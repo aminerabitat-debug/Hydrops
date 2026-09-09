@@ -17,4 +17,4 @@ services:
       - key: PYTHON_VERSION
         value: 3.12.6
       - key: HYDROPS_CORS_ORIGINS
-        value: '["https://hyprmodeling.com"]'
+        value: '["https://hydrops.hyprmodeling.com"]'

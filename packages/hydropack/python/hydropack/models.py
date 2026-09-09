@@ -189,6 +189,10 @@ class Node(BaseModel):
     parent_link: Optional[NodeParentLink] = None
     validated: bool = True
     structure_id: Optional[UUID] = None
+    # Mise en donnees detaillee specifique au type d'ouvrage (cdc §8) — champs libres varient selon
+    # le type (station de pompage, reservoir, brise charge, station de traitement...), definis cote
+    # frontend (shared/ouvrageFields.ts) ; le backend les stocke tels quels sans validation par champ.
+    data: Optional[dict] = None
 
 
 class Segment(BaseModel):
@@ -206,3 +210,11 @@ class Segment(BaseModel):
     roughness: float = Field(ge=0)
     flow: float = 0
     forced: bool = False
+    # Parametres hydrauliques du troncon (cdc §8), saisis depuis la fenetre "Modifier le troncon" —
+    # le sous-ensemble pertinent depend du regime (gravitaire vs refoulement, cf.
+    # shared/troncons.ts:tronconRegime cote frontend).
+    upstream_water_level_max: Optional[float] = None
+    upstream_water_level_min: Optional[float] = None
+    min_pressure: Optional[float] = None
+    downstream_residual_pressure: Optional[float] = None
+    max_velocity: Optional[float] = None

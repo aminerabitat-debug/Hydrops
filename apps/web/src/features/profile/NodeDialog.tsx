@@ -1,19 +1,28 @@
-// Dialogue de creation ET d'edition de noeud (cdc §8) : choix du type (un des ouvrages reels) et
-// nom pre-rempli (editable). Le type "Extremite"/terminal n'est plus propose du tout (consigne
-// utilisateur) — meme une extremite de trace doit porter un type reel (ex. une station de pompage
-// en bout de trace). "Jonction simple (changement de DN/matériau)" n'est plus proposee non plus
-// (consigne utilisateur, Lot 3 etape 1d) : ce n'est pas un ouvrage, seuls les ouvrages reels
-// restent selectionnables ici — junction ne subsiste que comme type de semis par defaut cote
-// backend pour les extremites de trace pas encore affectees (cf. traces.py:seed_terminal_nodes...).
-// Seule la suppression reste indisponible pour une extremite structurelle (bouton absent si
-// `onDelete` n'est pas fourni ; la protection reste basee sur le PK, pas sur le type — cf.
-// ProfileTableView/DataTable:isStructuralEndpoint). La mise en donnees detaillee par ouvrage
-// (cdc §8) arrive plus tard — ici on ne fait que taguer le type/nom.
+// Dialogue de creation ET d'edition de noeud (cdc §8) : choix du type (un des ouvrages reels), nom
+// pre-rempli (editable), et mise en donnees detaillee specifique au type choisi (cdc §8, consigne
+// utilisateur). Le type "Extremite"/terminal n'est plus propose du tout (consigne utilisateur) —
+// meme une extremite de trace doit porter un type reel (ex. une station de pompage en bout de
+// trace). "Jonction simple (changement de DN/matériau)" n'est plus proposee non plus (consigne
+// utilisateur, Lot 3 etape 1d) : ce n'est pas un ouvrage, seuls les ouvrages reels restent
+// selectionnables ici — junction ne subsiste que comme type de semis par defaut cote backend pour
+// les extremites de trace pas encore affectees (cf. traces.py:seed_terminal_nodes...). La
+// suppression d'un noeud se fait desormais uniquement depuis la fenetre principale (icone 🗑 dans
+// le tableau/l'arborescence, consigne utilisateur) — plus de bouton "Supprimer" ici, pour eviter
+// la redondance entre les deux endroits.
 
 import { useMemo, useState } from 'react'
 
 import { Modal } from '../../app/Modal'
+import { OUVRAGE_FIELDS, TREATMENT_PLANT_SUBTYPES, type OuvrageFieldSpec } from '../../shared/ouvrageFields'
 import type { CreatableNodeType, Node } from '../../shared/types'
+
+export interface NodeSubmitPayload {
+  type: CreatableNodeType
+  name: string
+  data: Record<string, unknown>
+  injectedFlow: number
+  withdrawnFlow: number
+}
 
 interface NodeDialogProps {
   mode: 'create' | 'edit'
@@ -21,12 +30,14 @@ interface NodeDialogProps {
   existingNodes: Node[]
   initialType?: CreatableNodeType
   initialName?: string | null
+  initialData?: Record<string, unknown> | null
+  initialInjectedFlow?: number
+  initialWithdrawnFlow?: number
   // Id du noeud en cours d'edition — exclu de la verification d'unicite du nom (sinon un noeud
   // dont le nom n'a pas change se heurterait toujours a "lui-meme").
   excludeNodeId?: string
   onClose: () => void
-  onSubmit: (type: CreatableNodeType, name: string) => Promise<void>
-  onDelete?: () => Promise<void>
+  onSubmit: (payload: NodeSubmitPayload) => Promise<void>
 }
 
 const TYPE_OPTIONS: { value: CreatableNodeType; label: string; namePrefix: string | null }[] = [
@@ -36,6 +47,9 @@ const TYPE_OPTIONS: { value: CreatableNodeType; label: string; namePrefix: strin
   { value: 'pressure_break', label: 'Brise charge', namePrefix: 'BC' },
   { value: 'treatment_plant', label: 'Station de traitement', namePrefix: 'ST' },
 ]
+
+const FLOW_DIRECTION_OPTIONS = ['Prélèvement', 'Injection'] as const
+type FlowDirection = (typeof FLOW_DIRECTION_OPTIONS)[number]
 
 // Un noeud existant peut encore etre 'junction' (semis par defaut d'une extremite de trace pas
 // encore affectee) : ce type n'etant plus dans TYPE_OPTIONS, on retombe sur le premier ouvrage reel
@@ -52,28 +66,68 @@ function suggestName(type: CreatableNodeType, existingNodes: Node[]): string {
   return `${option.namePrefix}${count + 1}`
 }
 
+function resolveInitialFlow(
+  injected: number,
+  withdrawn: number,
+): { direction: FlowDirection; value: number } {
+  if (withdrawn > 0) return { direction: 'Prélèvement', value: withdrawn }
+  if (injected > 0) return { direction: 'Injection', value: injected }
+  return { direction: 'Prélèvement', value: 0 }
+}
+
 export function NodeDialog({
   mode,
   pk,
   existingNodes,
   initialType,
   initialName,
+  initialData,
+  initialInjectedFlow,
+  initialWithdrawnFlow,
   excludeNodeId,
   onClose,
   onSubmit,
-  onDelete,
 }: NodeDialogProps) {
   const [type, setType] = useState<CreatableNodeType>(resolveInitialType(initialType))
   const [name, setName] = useState(initialName ?? '')
+  const [data, setData] = useState<Record<string, unknown>>(initialData ?? {})
+  const initialFlow = resolveInitialFlow(initialInjectedFlow ?? 0, initialWithdrawnFlow ?? 0)
+  const [flowDirection, setFlowDirection] = useState<FlowDirection>(initialFlow.direction)
+  const [flowValue, setFlowValue] = useState<number>(initialFlow.value)
   const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)
 
   const namePrefix = useMemo(() => TYPE_OPTIONS.find((o) => o.value === type)?.namePrefix, [type])
+  const fieldSpecs = OUVRAGE_FIELDS[type]
+  const selectedSubtype = useMemo(
+    () => TREATMENT_PLANT_SUBTYPES.find((s) => s.value === data.plant_subtype),
+    [data.plant_subtype],
+  )
 
   const handleTypeChange = (newType: CreatableNodeType) => {
     setType(newType)
     // En edition, ne pas ecraser un nom deja saisi par un simple changement de type dans le select.
     if (mode === 'create') setName(suggestName(newType, existingNodes))
+    // Les champs de mise en donnees sont entierement differents d'un type a l'autre — repartir
+    // d'un formulaire vierge evite de soumettre des cles d'un autre type par erreur.
+    setData({})
+  }
+
+  const setField = (key: string, value: unknown) => {
+    setData((d) => ({ ...d, [key]: value }))
+  }
+
+  const handleSubtypeChange = (subtype: string) => {
+    // Chaque sous-type de station de traitement a sa propre liste de filieres — repartir d'une
+    // selection vierge si on change de sous-type, sinon d'anciennes filieres non pertinentes
+    // resteraient cochees silencieusement.
+    setData({ plant_subtype: subtype, treated_flow: data.treated_flow, filieres: [] })
+  }
+
+  const toggleFiliere = (filiere: string) => {
+    const current = Array.isArray(data.filieres) ? (data.filieres as string[]) : []
+    const next = current.includes(filiere) ? current.filter((f) => f !== filiere) : [...current, filiere]
+    setField('filieres', next)
   }
 
   const handleConfirm = async () => {
@@ -92,7 +146,9 @@ export function NodeDialog({
     setSubmitting(true)
     setError('')
     try {
-      await onSubmit(type, trimmedName)
+      const injectedFlow = type === 'tie_in' && flowDirection === 'Injection' ? flowValue : 0
+      const withdrawnFlow = type === 'tie_in' && flowDirection === 'Prélèvement' ? flowValue : 0
+      await onSubmit({ type, name: trimmedName, data, injectedFlow, withdrawnFlow })
       onClose()
     } catch (e) {
       setError((e as Error).message)
@@ -101,17 +157,44 @@ export function NodeDialog({
     }
   }
 
-  const handleDelete = async () => {
-    if (!onDelete) return
-    setSubmitting(true)
-    setError('')
-    try {
-      await onDelete()
-      onClose()
-    } catch (e) {
-      setError((e as Error).message)
-      setSubmitting(false)
+  const renderField = (spec: OuvrageFieldSpec) => {
+    if (spec.showIf && !spec.showIf(data)) return null
+    if (spec.kind === 'select') {
+      return (
+        <div className="modal-field" key={spec.key}>
+          <label htmlFor={`node-field-${spec.key}`}>{spec.label}</label>
+          <select
+            id={`node-field-${spec.key}`}
+            value={(data[spec.key] as string) ?? ''}
+            onChange={(e) => setField(spec.key, e.target.value)}
+          >
+            <option value="" disabled>
+              — Choisir —
+            </option>
+            {spec.options.map((o) => (
+              <option key={o} value={o}>{o}</option>
+            ))}
+          </select>
+        </div>
+      )
     }
+    if (spec.kind === 'number') {
+      return (
+        <div className="modal-field" key={spec.key}>
+          <label htmlFor={`node-field-${spec.key}`}>
+            {spec.label}
+            {spec.unit ? ` (${spec.unit})` : ''}
+          </label>
+          <input
+            id={`node-field-${spec.key}`}
+            type="number"
+            value={(data[spec.key] as number) ?? ''}
+            onChange={(e) => setField(spec.key, e.target.value === '' ? undefined : Number(e.target.value))}
+          />
+        </div>
+      )
+    }
+    return null
   }
 
   return (
@@ -144,10 +227,79 @@ export function NodeDialog({
           />
         </div>
       )}
-      {mode === 'edit' && onDelete && (
-        <button type="button" className="modal-inline-danger" onClick={handleDelete} disabled={submitting}>
-          Supprimer ce nœud
-        </button>
+
+      {type === 'tie_in' && (
+        <>
+          <div className="modal-field">
+            <label htmlFor="node-flow-direction">Prélèvement / Injection</label>
+            <select
+              id="node-flow-direction"
+              value={flowDirection}
+              onChange={(e) => setFlowDirection(e.target.value as FlowDirection)}
+            >
+              {FLOW_DIRECTION_OPTIONS.map((o) => (
+                <option key={o} value={o}>{o}</option>
+              ))}
+            </select>
+          </div>
+          <div className="modal-field">
+            <label htmlFor="node-flow-value">Débit (m³/h)</label>
+            <input
+              id="node-flow-value"
+              type="number"
+              value={flowValue || ''}
+              onChange={(e) => setFlowValue(e.target.value === '' ? 0 : Number(e.target.value))}
+            />
+          </div>
+        </>
+      )}
+
+      {fieldSpecs?.map(renderField)}
+
+      {type === 'treatment_plant' && (
+        <>
+          <div className="modal-field">
+            <label htmlFor="node-plant-subtype">Type</label>
+            <select
+              id="node-plant-subtype"
+              value={(data.plant_subtype as string) ?? ''}
+              onChange={(e) => handleSubtypeChange(e.target.value)}
+            >
+              <option value="" disabled>
+                — Choisir —
+              </option>
+              {TREATMENT_PLANT_SUBTYPES.map((s) => (
+                <option key={s.value} value={s.value}>{s.label}</option>
+              ))}
+            </select>
+          </div>
+          <div className="modal-field">
+            <label htmlFor="node-treated-flow">Débit d'eau traité (m³/h)</label>
+            <input
+              id="node-treated-flow"
+              type="number"
+              value={(data.treated_flow as number) ?? ''}
+              onChange={(e) => setField('treated_flow', e.target.value === '' ? undefined : Number(e.target.value))}
+            />
+          </div>
+          {selectedSubtype && (
+            <div className="modal-field">
+              <label>Filières</label>
+              <div className="modal-checkbox-group">
+                {selectedSubtype.filieres.map((filiere) => (
+                  <label key={filiere} className="modal-checkbox-label">
+                    <input
+                      type="checkbox"
+                      checked={Array.isArray(data.filieres) && (data.filieres as string[]).includes(filiere)}
+                      onChange={() => toggleFiliere(filiere)}
+                    />
+                    <span>{filiere}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
+        </>
       )}
     </Modal>
   )

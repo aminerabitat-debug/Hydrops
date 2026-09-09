@@ -99,6 +99,92 @@ def test_patch_segment_applies_catalog_and_marks_forced(client, session_id, proj
     assert updated["di"] == 209.4
 
 
+def test_patch_segment_applies_hydraulic_fields_and_marks_forced_even_unchanged(
+    client, session_id, project_state, sample_kml_bytes, import_trace
+):
+    """"force" reflete desormais "les donnees ont ete validees via la fenetre Modifier" — pas
+    seulement un ecart par rapport aux valeurs catalogue par defaut (consigne utilisateur)."""
+    variant_id, trace = _import_sample(client, session_id, project_state, sample_kml_bytes, import_trace)
+    segments = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments").json()
+    segment_id = segments[0]["id"]
+    default = segments[0]
+
+    response = client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/segments/{segment_id}",
+        json={
+            "material": default["material"],
+            "dn": default["dn"],
+            "pressure_class": default["pressure_class"],
+            "upstream_water_level_max": 120.5,
+            "upstream_water_level_min": 118.0,
+            "min_pressure": 15.0,
+            "downstream_residual_pressure": 20.0,
+            "max_velocity": 1.5,
+        },
+    )
+    assert response.status_code == 200, response.text
+    updated = response.json()
+    assert updated["forced"] is True
+    assert updated["upstream_water_level_max"] == 120.5
+    assert updated["upstream_water_level_min"] == 118.0
+    assert updated["min_pressure"] == 15.0
+    assert updated["downstream_residual_pressure"] == 20.0
+    assert updated["max_velocity"] == 1.5
+
+
+def test_reset_segment_also_clears_hydraulic_fields(client, session_id, project_state, sample_kml_bytes, import_trace):
+    variant_id, trace = _import_sample(client, session_id, project_state, sample_kml_bytes, import_trace)
+    segments = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments").json()
+    segment_id = segments[0]["id"]
+
+    client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/segments/{segment_id}",
+        json={"material": "fonte_ductile", "dn": 200, "pressure_class": "k9", "max_velocity": 1.5},
+    )
+    response = client.post(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments/{segment_id}/reset")
+    assert response.status_code == 200, response.text
+    reset = response.json()
+    assert reset["forced"] is False
+    assert "max_velocity" not in reset
+
+
+def test_patch_node_sets_ouvrage_data_and_flows(client, session_id, project_state, sample_kml_bytes, import_trace):
+    variant_id, trace = _import_sample(client, session_id, project_state, sample_kml_bytes, import_trace)
+    nodes = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes").json()
+    node_id = nodes[0]["id"]
+
+    response = client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes/{node_id}",
+        json={
+            "type": "tie_in",
+            "name": "P1",
+            "withdrawn_flow": 12.5,
+            "data": {"note": "test"},
+        },
+    )
+    assert response.status_code == 200, response.text
+    updated = response.json()
+    assert updated["withdrawn_flow"] == 12.5
+    assert updated["data"] == {"note": "test"}
+
+
+def test_add_node_with_data_and_flows(client, session_id, project_state, sample_kml_bytes, import_trace):
+    variant_id, trace = _import_sample(client, session_id, project_state, sample_kml_bytes, import_trace)
+    response = client.post(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes",
+        json={
+            "trace_id": trace["id"],
+            "pk": 20,
+            "type": "pumping_station",
+            "name": "SP1",
+            "data": {"installation_type": "Submersible"},
+        },
+    )
+    assert response.status_code == 201, response.text
+    node = response.json()
+    assert node["data"] == {"installation_type": "Submersible"}
+
+
 def test_patch_segment_rejects_unknown_catalog_combination(client, session_id, project_state, sample_kml_bytes, import_trace):
     variant_id, trace = _import_sample(client, session_id, project_state, sample_kml_bytes, import_trace)
     segments = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments").json()

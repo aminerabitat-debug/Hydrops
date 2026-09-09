@@ -9,7 +9,7 @@ import { useAppStore } from '../../state/store'
 import { isStructuralEndpoint as isStructuralEndpointOf } from '../../shared/types'
 import type { CreatableNodeType, Node } from '../../shared/types'
 import { DataTable } from '../table/DataTable'
-import { NodeDialog } from './NodeDialog'
+import { NodeDialog, type NodeSubmitPayload } from './NodeDialog'
 import { ProfileChart } from './ProfileChart'
 
 // Un ajout au PK visé (pas de noeud reel a ce PK) declenche POST .../nodes ; l'affectation d'un
@@ -48,23 +48,42 @@ export function ProfileTableView() {
   const trace = traces.find((t) => t.id === selectedTraceId) ?? traces[0]
   const profile = trace?.elevation_profile
 
-  const handleSubmitPendingAdd = async (type: CreatableNodeType, name: string) => {
+  const handleSubmitPendingAdd = async (payload: NodeSubmitPayload) => {
     if (!sessionId || !selectedVariantId || !trace || pendingAdd == null) return
+    const { type, name, data, injectedFlow, withdrawnFlow } = payload
     if (pendingAdd.placeholderNodeId) {
       // Le PK visé porte deja un placeholder d'extremite (jamais montre comme tel a
       // l'utilisateur) : on l'affecte au lieu d'en creer un second au meme PK (rejete par le
       // backend), sans jamais afficher de "Jonction" par defaut (consigne utilisateur).
-      await api.patchNode(sessionId, selectedVariantId, pendingAdd.placeholderNodeId, { type, name })
+      await api.patchNode(sessionId, selectedVariantId, pendingAdd.placeholderNodeId, {
+        type,
+        name,
+        data,
+        injected_flow: injectedFlow,
+        withdrawn_flow: withdrawnFlow,
+      })
     } else {
-      await api.addNode(sessionId, selectedVariantId, trace.id, pendingAdd.pk, type, name)
+      await api.addNode(sessionId, selectedVariantId, trace.id, pendingAdd.pk, {
+        type,
+        name,
+        data,
+        injected_flow: injectedFlow,
+        withdrawn_flow: withdrawnFlow,
+      })
     }
     await refreshNetwork()
     setStatusMessage(`Nœud ajouté au PK ${Math.round(pendingAdd.pk)} m`)
   }
 
-  const handlePatchNode = async (type: CreatableNodeType, name: string) => {
+  const handlePatchNode = async (payload: NodeSubmitPayload) => {
     if (!sessionId || !selectedVariantId || !editingNode) return
-    await api.patchNode(sessionId, selectedVariantId, editingNode.id, { type, name })
+    await api.patchNode(sessionId, selectedVariantId, editingNode.id, {
+      type: payload.type,
+      name: payload.name,
+      data: payload.data,
+      injected_flow: payload.injectedFlow,
+      withdrawn_flow: payload.withdrawnFlow,
+    })
     await refreshNetwork()
     setStatusMessage('Nœud mis à jour')
   }
@@ -181,10 +200,12 @@ export function ProfileTableView() {
           existingNodes={nodes}
           initialType={editingNode.type as CreatableNodeType}
           initialName={editingNode.name}
+          initialData={editingNode.data}
+          initialInjectedFlow={editingNode.injected_flow}
+          initialWithdrawnFlow={editingNode.withdrawn_flow}
           excludeNodeId={editingNode.id}
           onClose={() => setEditingNode(null)}
           onSubmit={handlePatchNode}
-          onDelete={() => handleDeleteNode(editingNode)}
         />
       )}
     </>

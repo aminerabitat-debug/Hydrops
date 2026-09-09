@@ -22,6 +22,11 @@
     "pressure_class": { "type": "string", "description": "Référence catalog.PressureClass" },
     "roughness": { "type": "number", "minimum": 0 },
     "flow": { "type": "number" },
-    "forced": { "type": "boolean", "default": false }
+    "forced": { "type": "boolean", "default": false },
+    "upstream_water_level_max": { "type": ["number", "null"], "description": "Niveau du plan d'eau amont max (m) — troncon gravitaire" },
+    "upstream_water_level_min": { "type": ["number", "null"], "description": "Niveau du plan d'eau amont min (m) — troncon gravitaire" },
+    "min_pressure": { "type": ["number", "null"], "description": "Pression min (m) — troncon gravitaire" },
+    "downstream_residual_pressure": { "type": ["number", "null"], "description": "Pression residuelle aval (m) — gravitaire et refoulement" },
+    "max_velocity": { "type": ["number", "null"], "description": "Vitesse max (m/s) — gravitaire et refoulement" }
   }
 }

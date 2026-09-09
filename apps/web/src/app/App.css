@@ -466,6 +466,13 @@ body,
   flex: none;
 }
 
+/* Ouvrage/troncon dont la mise en donnees a ete validee (consigne utilisateur) — reinitialiser
+   (ouvrage sans data, troncon "reset") ramene au libelle par defaut (var(--muted), cf. .tree-traces li). */
+.tree-item-defined {
+  color: var(--accent-2);
+  font-weight: 600;
+}
+
 .tree-traces li.selected {
   background: rgba(62, 166, 255, 0.18);
   color: var(--text);
@@ -894,6 +901,22 @@ body,
 .modal-checkbox-label input[type='checkbox'] {
   width: auto;
   accent-color: var(--accent);
+}
+
+.modal-checkbox-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  padding: 8px 10px;
+}
+
+.modal-checkbox-group .modal-checkbox-label {
+  font-size: 13px;
+  color: var(--text);
 }
 
 .volume-preview {

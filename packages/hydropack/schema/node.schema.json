@@ -34,6 +34,7 @@
       }
     },
     "validated": { "type": "boolean", "default": true, "description": "false tant qu'un point haut/bas candidat n'est pas confirmé par l'utilisateur" },
-    "structure_id": { "type": ["string", "null"], "format": "uuid" }
+    "structure_id": { "type": ["string", "null"], "format": "uuid" },
+    "data": { "type": ["object", "null"], "description": "Mise en donnees detaillee specifique au type d'ouvrage (cdc §8) — champs libres, varient selon le type (station de pompage, reservoir, brise charge, station de traitement...)" }
   }
 }

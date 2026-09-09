@@ -8,12 +8,13 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { api } from '../../shared/apiClient'
 import { nodeColor, nodeDisplayLabel, nodeInitials } from '../../shared/nodeLabels'
+import { isOuvrageDataDefined } from '../../shared/ouvrageFields'
 import { useAppStore } from '../../state/store'
 import { REAL_OUVRAGE_TYPES, isStructuralEndpoint } from '../../shared/types'
 import type { CreatableNodeType, Node, TronconGroup, Variant } from '../../shared/types'
 import { TRONCON_REGIME_COLOR, TRONCON_REGIME_GLYPH, tronconIsForced, tronconRegime } from '../../shared/troncons'
-import { NodeDialog } from '../profile/NodeDialog'
-import { TronconDialog } from './TronconDialog'
+import { NodeDialog, type NodeSubmitPayload } from '../profile/NodeDialog'
+import { TronconDialog, type TronconHydraulicValues } from './TronconDialog'
 
 const POLL_INTERVAL_MS = 400
 const VARIANT_PREFIX = 'Variante'
@@ -141,10 +142,16 @@ export function ProjectTree({ onOpenProjectSettings, onNewVariant, onDuplicateVa
     }
   }
 
-  const handlePatchOuvrage = async (type: CreatableNodeType, name: string) => {
+  const handlePatchOuvrage = async (payload: NodeSubmitPayload) => {
     if (!sessionId || !selectedVariantId || !editingOuvrage) return
     try {
-      await api.patchNode(sessionId, selectedVariantId, editingOuvrage.id, { type, name })
+      await api.patchNode(sessionId, selectedVariantId, editingOuvrage.id, {
+        type: payload.type,
+        name: payload.name,
+        data: payload.data,
+        injected_flow: payload.injectedFlow,
+        withdrawn_flow: payload.withdrawnFlow,
+      })
       await refreshNetwork()
       setStatusMessage('Ouvrage mis à jour')
     } catch (error) {
@@ -172,13 +179,28 @@ export function ProjectTree({ onOpenProjectSettings, onNewVariant, onDuplicateVa
     }
   }
 
-  // "Modifier" un troncon applique la meme donnee Materiau/DN/Classe a TOUS ses segments (un
-  // troncon peut en regrouper plusieurs si des jonctions/piquages transparents s'y trouvent).
-  const handleSaveTroncon = async (material: string, dn: number, pressureClass: string) => {
+  // "Modifier" un troncon applique la meme donnee Materiau/DN/Classe + parametres hydrauliques a
+  // TOUS ses segments (un troncon peut en regrouper plusieurs si des jonctions/piquages
+  // transparents s'y trouvent).
+  const handleSaveTroncon = async (
+    material: string,
+    dn: number,
+    pressureClass: string,
+    hydraulics: TronconHydraulicValues,
+  ) => {
     if (!sessionId || !selectedVariantId || !editingTroncon) return
     await Promise.all(
       editingTroncon.troncon.segment_ids.map((id) =>
-        api.patchSegment(sessionId, selectedVariantId, id, { material, dn, pressure_class: pressureClass }),
+        api.patchSegment(sessionId, selectedVariantId, id, {
+          material,
+          dn,
+          pressure_class: pressureClass,
+          upstream_water_level_max: hydraulics.upstreamWaterLevelMax,
+          upstream_water_level_min: hydraulics.upstreamWaterLevelMin,
+          min_pressure: hydraulics.minPressure,
+          downstream_residual_pressure: hydraulics.downstreamResidualPressure,
+          max_velocity: hydraulics.maxVelocity,
+        }),
       ),
     )
     await refreshNetwork()
@@ -407,7 +429,15 @@ export function ProjectTree({ onOpenProjectSettings, onNewVariant, onDuplicateVa
                 <ul className="tree-traces">
                   {ouvrageNodes.map((node) => (
                     <li key={node.id} className={node.id === selectedNodeId ? 'selected' : ''}>
-                      <span className="tree-item-main" onClick={() => handleSelectOuvrage(node.id, node.trace_id)}>
+                      <span
+                        className={`tree-item-main ${isOuvrageDataDefined(node) ? 'tree-item-defined' : ''}`}
+                        onClick={() => handleSelectOuvrage(node.id, node.trace_id)}
+                        title={
+                          isOuvrageDataDefined(node)
+                            ? 'Mise en données renseignée'
+                            : 'Mise en données pas encore renseignée'
+                        }
+                      >
                         <NodeBadge node={node} />
                         {nodeDisplayLabel(node)}
                       </span>
@@ -455,7 +485,7 @@ export function ProjectTree({ onOpenProjectSettings, onNewVariant, onDuplicateVa
                     return (
                       <li key={`${t.start_node_id}-${t.end_node_id}`} className={isTronconSelected ? 'selected' : ''}>
                         <span
-                          className="tree-item-main"
+                          className={`tree-item-main ${forced ? 'tree-item-defined' : ''}`}
                           onClick={() => handleSelectTroncon(t.trace_id, t.pk_start, t.pk_end, label)}
                         >
                           <span
@@ -522,10 +552,12 @@ export function ProjectTree({ onOpenProjectSettings, onNewVariant, onDuplicateVa
           existingNodes={nodes}
           initialType={editingOuvrage.type as CreatableNodeType}
           initialName={editingOuvrage.name}
+          initialData={editingOuvrage.data}
+          initialInjectedFlow={editingOuvrage.injected_flow}
+          initialWithdrawnFlow={editingOuvrage.withdrawn_flow}
           excludeNodeId={editingOuvrage.id}
           onClose={() => setEditingOuvrage(null)}
           onSubmit={handlePatchOuvrage}
-          onDelete={() => handleDeleteOuvrage(editingOuvrage)}
         />
       )}
 
@@ -536,9 +568,17 @@ export function ProjectTree({ onOpenProjectSettings, onNewVariant, onDuplicateVa
           return (
             <TronconDialog
               label={editingTroncon.label}
+              regime={tronconRegime(editingTroncon.troncon, nodesById)}
               initialMaterial={firstSegment?.material ?? 'pehd_pe100'}
               initialPressureClass={firstSegment?.pressure_class ?? 'pn10'}
               initialDn={firstSegment?.dn ?? 160}
+              initialHydraulics={{
+                upstreamWaterLevelMax: firstSegment?.upstream_water_level_max ?? undefined,
+                upstreamWaterLevelMin: firstSegment?.upstream_water_level_min ?? undefined,
+                minPressure: firstSegment?.min_pressure ?? undefined,
+                downstreamResidualPressure: firstSegment?.downstream_residual_pressure ?? undefined,
+                maxVelocity: firstSegment?.max_velocity ?? undefined,
+              }}
               onClose={() => setEditingTroncon(null)}
               onSubmit={handleSaveTroncon}
             />

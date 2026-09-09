@@ -192,13 +192,18 @@ export const api = {
     variantId: string,
     traceId: string,
     pk: number,
-    type: CreatableNodeType,
-    name?: string,
+    payload: {
+      type: CreatableNodeType
+      name?: string
+      data?: Record<string, unknown>
+      injected_flow?: number
+      withdrawn_flow?: number
+    },
   ): Promise<Node> {
     const response = await fetch(`${API_BASE}/projects/${sessionId}/variants/${variantId}/nodes`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ trace_id: traceId, pk, type, name: name || undefined }),
+      body: JSON.stringify({ trace_id: traceId, pk, ...payload, name: payload.name || undefined }),
     })
     return handleJson(response)
   },
@@ -207,7 +212,13 @@ export const api = {
     sessionId: string,
     variantId: string,
     nodeId: string,
-    payload: { type?: CreatableNodeType; name?: string },
+    payload: {
+      type?: CreatableNodeType
+      name?: string
+      data?: Record<string, unknown>
+      injected_flow?: number
+      withdrawn_flow?: number
+    },
   ): Promise<Node> {
     const response = await fetch(`${API_BASE}/projects/${sessionId}/variants/${variantId}/nodes/${nodeId}`, {
       method: 'PATCH',
@@ -236,7 +247,16 @@ export const api = {
     sessionId: string,
     variantId: string,
     segmentId: string,
-    payload: { material?: string; dn?: number; pressure_class?: string },
+    payload: {
+      material?: string
+      dn?: number
+      pressure_class?: string
+      upstream_water_level_max?: number
+      upstream_water_level_min?: number
+      min_pressure?: number
+      downstream_residual_pressure?: number
+      max_velocity?: number
+    },
   ): Promise<Segment> {
     const response = await fetch(
       `${API_BASE}/projects/${sessionId}/variants/${variantId}/segments/${segmentId}`,

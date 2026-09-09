@@ -179,6 +179,9 @@ def add_node(session_id: str, variant_id: str, payload: NewNodeRequest, request:
         y=lat,
         z=z,
         z_source="dem",
+        data=payload.data,
+        injected_flow=payload.injected_flow,
+        withdrawn_flow=payload.withdrawn_flow,
     )
     package.nodes[str(node.id)] = node
 
@@ -238,6 +241,12 @@ def patch_node(session_id: str, variant_id: str, node_id: str, payload: PatchNod
         updates["type"] = payload.type
     if payload.name is not None:
         updates["name"] = payload.name or None
+    if payload.data is not None:
+        updates["data"] = payload.data
+    if payload.injected_flow is not None:
+        updates["injected_flow"] = payload.injected_flow
+    if payload.withdrawn_flow is not None:
+        updates["withdrawn_flow"] = payload.withdrawn_flow
     if not updates:
         return node.model_dump(mode="json", exclude_none=True)
 
@@ -304,18 +313,30 @@ def patch_segment(session_id: str, variant_id: str, segment_id: str, payload: Pa
     except catalog.CatalogLookupError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
 
-    changed = (material, dn, pressure_class) != (segment.material, segment.dn, segment.pressure_class)
-    updated = segment.model_copy(
-        update={
-            "material": material,
-            "dn": dn,
-            "pressure_class": pressure_class,
-            "di": resolved["di"],
-            "de": resolved["de"],
-            "roughness": resolved["roughness"],
-            "forced": segment.forced or changed,
-        }
-    )
+    # "force" marque desormais simplement "les donnees de ce troncon ont ete validees via la
+    # fenetre Modifier" (consigne utilisateur : couleur du texte une fois valide/reinitialise) —
+    # pas seulement un ecart par rapport au catalogue par defaut.
+    updates: dict = {
+        "material": material,
+        "dn": dn,
+        "pressure_class": pressure_class,
+        "di": resolved["di"],
+        "de": resolved["de"],
+        "roughness": resolved["roughness"],
+        "forced": True,
+    }
+    if payload.upstream_water_level_max is not None:
+        updates["upstream_water_level_max"] = payload.upstream_water_level_max
+    if payload.upstream_water_level_min is not None:
+        updates["upstream_water_level_min"] = payload.upstream_water_level_min
+    if payload.min_pressure is not None:
+        updates["min_pressure"] = payload.min_pressure
+    if payload.downstream_residual_pressure is not None:
+        updates["downstream_residual_pressure"] = payload.downstream_residual_pressure
+    if payload.max_velocity is not None:
+        updates["max_velocity"] = payload.max_velocity
+
+    updated = segment.model_copy(update=updates)
     package.segments[segment_id] = updated
     return updated.model_dump(mode="json", exclude_none=True)
 
@@ -344,6 +365,11 @@ def reset_segment(session_id: str, variant_id: str, segment_id: str, request: Re
             "pressure_class": default["pressure_class"],
             "roughness": default["roughness"],
             "forced": False,
+            "upstream_water_level_max": None,
+            "upstream_water_level_min": None,
+            "min_pressure": None,
+            "downstream_residual_pressure": None,
+            "max_velocity": None,
         }
     )
     package.segments[segment_id] = updated

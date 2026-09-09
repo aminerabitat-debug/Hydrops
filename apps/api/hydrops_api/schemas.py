@@ -74,6 +74,9 @@ class NewNodeRequest(BaseModel):
     pk: float
     type: CreatableNodeType = "junction"
     name: Optional[str] = None
+    data: Optional[dict] = None
+    injected_flow: float = 0
+    withdrawn_flow: float = 0
 
 
 class PatchNodeRequest(BaseModel):
@@ -81,13 +84,23 @@ class PatchNodeRequest(BaseModel):
     porter un ouvrage (consigne utilisateur, Lot 3 etape 1c). Le type "terminal"/Extremite n'est
     plus autorise du tout (consigne utilisateur) : meme une extremite doit porter un type reel
     (junction au minimum) — cf. _is_structural_endpoint pour la protection contre la suppression,
-    qui reste basee sur le PK, jamais sur le type."""
+    qui reste basee sur le PK, jamais sur le type. `data` remplace entierement la mise en donnees
+    existante (meme convention que "Parametres du projet" : le formulaire soumet toujours l'etat
+    complet, pas un patch champ-par-champ)."""
 
     type: Optional[CreatableNodeType] = None
     name: Optional[str] = None
+    data: Optional[dict] = None
+    injected_flow: Optional[float] = None
+    withdrawn_flow: Optional[float] = None
 
 
 class PatchSegmentRequest(BaseModel):
     material: Optional[str] = None
     dn: Optional[int] = None
     pressure_class: Optional[str] = None
+    upstream_water_level_max: Optional[float] = None
+    upstream_water_level_min: Optional[float] = None
+    min_pressure: Optional[float] = None
+    downstream_residual_pressure: Optional[float] = None
+    max_velocity: Optional[float] = None

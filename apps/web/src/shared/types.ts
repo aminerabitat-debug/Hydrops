@@ -159,6 +159,9 @@ export interface Node {
   withdrawn_flow: number
   validated: boolean
   structure_id?: string | null
+  // Mise en donnees detaillee specifique au type d'ouvrage (cdc §8) — cf. shared/ouvrageFields.ts
+  // pour les champs attendus par type. Cle absente/valeur null tant que rien n'a ete saisi.
+  data?: Record<string, unknown> | null
 }
 
 const ENDPOINT_PK_TOLERANCE_M = 1e-6
@@ -188,6 +191,13 @@ export interface Segment {
   roughness: number
   flow: number
   forced: boolean
+  // Parametres hydrauliques du troncon (cdc §8), saisis depuis "Modifier le troncon" — le
+  // sous-ensemble pertinent depend du regime (cf. shared/troncons.ts:tronconRegime).
+  upstream_water_level_max?: number | null
+  upstream_water_level_min?: number | null
+  min_pressure?: number | null
+  downstream_residual_pressure?: number | null
+  max_velocity?: number | null
 }
 
 // Regroupement de segments consecutifs entre deux limites "dures" (ouvrage reel ou extremite de

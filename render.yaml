@@ -1,14 +1,16 @@
 # Blueprint Render pour le backend FastAPI (apps/api) — deploiement "New + > Blueprint" sur
-# render.com en pointant sur ce depot GitHub. Le build reste a la racine du monorepo (pas de
-# rootDir sur apps/api) car requirements.txt installe packages/hydrops-engine et packages/hydropack
-# en editable via des chemins relatifs (-e ../../packages/...), qui doivent rester valides.
+# render.com en pointant sur ce depot GitHub. requirements.txt installe packages/hydrops-engine et
+# packages/hydropack en editable via des chemins relatifs (-e ../../packages/...) : pip resout un
+# chemin -e relatif par rapport au repertoire COURANT (pas par rapport au fichier requirements.txt),
+# d'ou le "cd apps/api" avant pip install pour que ../../packages/... retombe bien sur packages/...
+# a la racine du repo.
 services:
   - type: web
     name: hydrops-api
     runtime: python
     plan: free
     region: frankfurt
-    buildCommand: pip install -r apps/api/requirements.txt
+    buildCommand: cd apps/api && pip install -r requirements.txt
     startCommand: uvicorn hydrops_api.main:app --app-dir apps/api --host 0.0.0.0 --port $PORT
     healthCheckPath: /api/v1/health
     envVars:

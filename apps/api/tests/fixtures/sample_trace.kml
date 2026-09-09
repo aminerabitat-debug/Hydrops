@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <name>Trace adduction test</name>
+    <Placemark>
+      <name>Conduite principale</name>
+      <LineString>
+        <tessellate>1</tessellate>
+        <coordinates>
+          2.350000,48.850000,0
+          2.352000,48.853000,0
+          2.355000,48.857000,0
+          2.358000,48.860000,0
+          2.360000,48.864000,0
+        </coordinates>
+      </LineString>
+    </Placemark>
+  </Document>
+</kml>

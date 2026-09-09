@@ -1,0 +1,119 @@
+def _default_variant_id(project_state) -> str:
+    return project_state["variants"][0]["id"]
+
+
+def test_import_returns_job_id_immediately(client, session_id, project_state, sample_kml_bytes):
+    response = client.post(
+        f"/api/v1/projects/{session_id}/traces/import",
+        files={"file": ("sample_trace.kml", sample_kml_bytes, "application/vnd.google-earth.kml+xml")},
+    )
+    assert response.status_code == 202
+    body = response.json()
+    assert "job_id" in body
+    assert body["total_chunks"] >= 1
+
+
+def test_import_job_status_reaches_done_with_trace(client, session_id, project_state, sample_kml_bytes, import_trace):
+    trace = import_trace(session_id, "sample_trace.kml", sample_kml_bytes, "application/vnd.google-earth.kml+xml")
+
+    assert trace["source"] == "kml_import"
+    assert trace["length"] > 0
+    assert len(trace["geometry"]["coordinates"]) == 5
+    assert trace["project_id"] == project_state["project"]["id"]
+
+    profile = trace["elevation_profile"]
+    assert profile["dem_source"] == "synthetic"
+    assert len(profile["raw"]) > 1
+    assert len(profile["smoothed"]) == len(profile["raw"])
+    # PK strictement croissant sur le profil brut (V1-01/V1-02 : coherence du profil)
+    pks = [p["pk"] for p in profile["raw"]]
+    assert pks == sorted(pks)
+
+
+def test_import_job_status_reports_completed_chunks_at_end(client, session_id, project_state, sample_kml_bytes, import_trace):
+    import_trace(session_id, "sample_trace.kml", sample_kml_bytes, "application/vnd.google-earth.kml+xml")
+
+    response = client.post(
+        f"/api/v1/projects/{session_id}/traces/import",
+        files={"file": ("sample_trace.kml", sample_kml_bytes, "application/vnd.google-earth.kml+xml")},
+    )
+    job_id = response.json()["job_id"]
+    import time
+
+    for _ in range(200):
+        job = client.get(f"/api/v1/projects/{session_id}/traces/import-jobs/{job_id}").json()
+        if job["status"] == "done":
+            break
+        time.sleep(0.02)
+    assert job["status"] == "done"
+    assert job["completed_chunks"] == job["total_chunks"] > 0
+
+
+def test_import_job_unknown_id_returns_404(client, session_id, project_state):
+    response = client.get(f"/api/v1/projects/{session_id}/traces/import-jobs/does-not-exist")
+    assert response.status_code == 404
+
+
+def test_import_kmz_extracts_inner_kml(client, session_id, project_state, sample_kmz_bytes, import_trace):
+    trace = import_trace(session_id, "sample_trace.kmz", sample_kmz_bytes, "application/vnd.google-earth.kmz")
+    assert trace["source"] == "kmz_import"
+
+
+def test_import_rejects_multiple_linestrings(client, session_id, project_state, branched_kml_bytes):
+    # Erreur de format KML : validee de facon synchrone, avant meme la creation d'un job.
+    response = client.post(
+        f"/api/v1/projects/{session_id}/traces/import",
+        files={"file": ("branched.kml", branched_kml_bytes, "application/vnd.google-earth.kml+xml")},
+    )
+    assert response.status_code == 422
+    assert "LineString" in response.json()["detail"]
+
+
+def test_import_seeds_every_existing_variant(client, session_id, project_state, sample_kml_bytes, import_trace):
+    # Une deuxieme variante existe deja avant l'import : le trace, partage au niveau projet, doit
+    # seeder un reseau (2 noeuds terminal + 1 segment) pour CHAQUE variante existante, pas
+    # seulement la premiere.
+    second_variant = client.post(f"/api/v1/projects/{session_id}/variants", json={"name": "Variante 2"}).json()
+    import_trace(session_id, "sample_trace.kml", sample_kml_bytes, "application/vnd.google-earth.kml+xml")
+
+    for variant_id in (_default_variant_id(project_state), second_variant["id"]):
+        nodes = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes").json()
+        assert len(nodes) == 2, f"variante {variant_id} devrait avoir 2 noeuds terminal"
+
+
+def test_get_trace_returns_stored_geometry(client, session_id, project_state, sample_kml_bytes, import_trace):
+    imported = import_trace(session_id, "sample_trace.kml", sample_kml_bytes, "application/vnd.google-earth.kml+xml")
+
+    response = client.get(f"/api/v1/projects/{session_id}/traces/{imported['id']}")
+    assert response.status_code == 200
+    assert response.json()["id"] == imported["id"]
+
+
+def test_list_traces_returns_project_level_traces(client, session_id, project_state, sample_kml_bytes, import_trace):
+    imported = import_trace(session_id, "sample_trace.kml", sample_kml_bytes, "application/vnd.google-earth.kml+xml")
+    response = client.get(f"/api/v1/projects/{session_id}/traces")
+    assert response.status_code == 200
+    assert [t["id"] for t in response.json()] == [imported["id"]]
+
+
+def test_patch_trace_reverses_direction(client, session_id, project_state, sample_kml_bytes, import_trace):
+    imported = import_trace(session_id, "sample_trace.kml", sample_kml_bytes, "application/vnd.google-earth.kml+xml")
+    assert imported["hydraulic_direction"] == "as_drawn"
+
+    response = client.patch(
+        f"/api/v1/projects/{session_id}/traces/{imported['id']}",
+        json={"hydraulic_direction": "reversed"},
+    )
+    assert response.status_code == 200
+    assert response.json()["hydraulic_direction"] == "reversed"
+
+
+def test_delete_trace_cascades_nodes_for_every_variant(client, session_id, project_state, sample_kml_bytes, import_trace):
+    variant_id = _default_variant_id(project_state)
+    imported = import_trace(session_id, "sample_trace.kml", sample_kml_bytes, "application/vnd.google-earth.kml+xml")
+
+    response = client.delete(f"/api/v1/projects/{session_id}/traces/{imported['id']}")
+    assert response.status_code == 204
+
+    assert client.get(f"/api/v1/projects/{session_id}/traces/{imported['id']}").status_code == 404
+    assert client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes").json() == []

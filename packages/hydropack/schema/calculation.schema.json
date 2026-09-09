@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hydrops.dev/schema/calculation.schema.json",
+  "title": "Calculation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "variant_id", "engine_version", "input_hash", "friction_method", "catalog_version", "status"],
+  "properties": {
+    "id": { "type": "string", "format": "uuid" },
+    "variant_id": { "type": "string", "format": "uuid" },
+    "engine_version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+    "input_hash": { "type": "string", "description": "SHA-256 des entrées dépendantes ; sert à détecter l'obsolescence (statut stale)" },
+    "friction_method": {
+      "type": "string",
+      "enum": ["darcy_weisbach_colebrook", "darcy_weisbach_swamee_jain", "hazen_williams"]
+    },
+    "catalog_version": { "type": "string" },
+    "dem_source_version": { "type": "string" },
+    "status": { "type": "string", "enum": ["pending", "running", "done", "failed", "stale"] },
+    "triggered_at": { "type": "string", "format": "date-time" },
+    "duration_ms": { "type": "integer", "minimum": 0 },
+    "alerts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["level", "code", "message_key"],
+        "properties": {
+          "level": { "type": "string", "enum": ["info", "warning", "blocking"] },
+          "code": { "type": "string" },
+          "message_key": { "type": "string" },
+          "context": { "type": "object" }
+        }
+      }
+    }
+  }
+}

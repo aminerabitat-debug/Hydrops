@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hydrops.dev/schema/segment.schema.json",
+  "title": "Segment",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id", "upstream_node_id", "downstream_node_id", "pk_start", "pk_end", "length",
+    "material", "dn", "di", "pressure_class", "roughness", "flow", "forced"
+  ],
+  "properties": {
+    "id": { "type": "string", "format": "uuid" },
+    "upstream_node_id": { "type": "string", "format": "uuid" },
+    "downstream_node_id": { "type": "string", "format": "uuid" },
+    "pk_start": { "type": "number" },
+    "pk_end": { "type": "number" },
+    "length": { "type": "number", "minimum": 0 },
+    "material": { "type": "string", "description": "Référence catalog.Material" },
+    "dn": { "type": "integer", "description": "Diamètre nominal commercial standard, référence catalog.Diameter" },
+    "di": { "type": "number", "minimum": 0, "description": "Diamètre intérieur, dérivé de catalog pour (matériau, DN, classe)" },
+    "de": { "type": "number", "minimum": 0 },
+    "pressure_class": { "type": "string", "description": "Référence catalog.PressureClass" },
+    "roughness": { "type": "number", "minimum": 0 },
+    "flow": { "type": "number" },
+    "forced": { "type": "boolean", "default": false }
+  }
+}

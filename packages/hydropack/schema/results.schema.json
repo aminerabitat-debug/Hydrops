@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hydrops.dev/schema/results.schema.json",
+  "title": "Results",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "calculation_id", "variant_id", "per_node", "per_segment", "economics", "traceability"],
+  "properties": {
+    "id": { "type": "string", "format": "uuid" },
+    "calculation_id": { "type": "string", "format": "uuid" },
+    "variant_id": { "type": "string", "format": "uuid" },
+    "per_node": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "hgl_min": { "type": "number" },
+          "hgl_max": { "type": "number" },
+          "hydrostatic_min": { "type": "number" },
+          "hydrostatic_max": { "type": "number" },
+          "ground_pressure_min": { "type": "number" },
+          "ground_pressure_max": { "type": "number" },
+          "pressure_envelope_max": { "type": "number" }
+        }
+      }
+    },
+    "per_segment": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "head_loss_linear": { "type": "number" },
+          "head_loss_total": { "type": "number" },
+          "velocity": { "type": "number" },
+          "flow": { "type": "number" }
+        }
+      }
+    },
+    "pumping": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "hmt": { "type": "number" },
+          "power": { "type": "number" },
+          "energy_annual": { "type": "number" }
+        }
+      }
+    },
+    "economics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "capex_by_item": { "type": "object", "additionalProperties": { "type": "number" } },
+        "opex_by_item": { "type": "object", "additionalProperties": { "type": "number" } },
+        "reinvestment_schedule": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": { "year": { "type": "integer" }, "amount": { "type": "number" }, "asset_category": { "type": "string" } }
+          }
+        },
+        "residual_value": { "type": "number" },
+        "npv_costs": { "type": "number" },
+        "levelized_cost_per_m3": { "type": "number" }
+      }
+    },
+    "trench_metrics": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "b_width": { "type": "number" },
+          "h_total": { "type": "number" },
+          "v_bedding": { "type": "number" },
+          "v_pipe": { "type": "number" },
+          "v_primary_backfill": { "type": "number" },
+          "v_secondary_backfill": { "type": "number" }
+        }
+      }
+    },
+    "traceability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["engine_version", "catalog_version", "dem_source_version"],
+      "properties": {
+        "engine_version": { "type": "string" },
+        "catalog_version": { "type": "string" },
+        "dem_source_version": { "type": "string" },
+        "economic_assumptions_snapshot": { "type": "object" }
+      }
+    }
+  }
+}

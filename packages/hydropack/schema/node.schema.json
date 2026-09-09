@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hydrops.dev/schema/node.schema.json",
+  "title": "Node",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "trace_id", "variant_id", "type", "pk", "x", "y", "z", "z_source"],
+  "properties": {
+    "id": { "type": "string", "format": "uuid" },
+    "trace_id": { "type": "string", "format": "uuid" },
+    "variant_id": { "type": "string", "format": "uuid", "description": "Le trace est partage entre variantes (projet) ; ce champ distingue le reseau noeuds/segments propre a CETTE variante sur ce trace" },
+    "type": {
+      "type": "string",
+      "enum": [
+        "junction", "high_point", "low_point", "sectioning_valve", "control_valve",
+        "pressure_break", "reservoir", "pumping_station", "intake", "treatment_plant",
+        "tie_in", "terminal"
+      ]
+    },
+    "name": { "type": ["string", "null"], "description": "Nom court affiche dans l'arborescence (ex. 'Res1', 'SP1') — optionnel, non fourni pour les jonctions simples" },
+    "pk": { "type": "number" },
+    "x": { "type": "number" },
+    "y": { "type": "number" },
+    "z": { "type": "number" },
+    "z_source": { "type": "string", "enum": ["dem", "manual", "surveyed"] },
+    "injected_flow": { "type": "number", "default": 0 },
+    "withdrawn_flow": { "type": "number", "default": 0 },
+    "parent_link": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "trace_id": { "type": "string", "format": "uuid" },
+        "node_id": { "type": "string", "format": "uuid" }
+      }
+    },
+    "validated": { "type": "boolean", "default": true, "description": "false tant qu'un point haut/bas candidat n'est pas confirmé par l'utilisateur" },
+    "structure_id": { "type": ["string", "null"], "format": "uuid" }
+  }
+}

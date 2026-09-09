@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hydrops.dev/schema/trace_geometry.schema.json",
+  "title": "TraceGeometry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "project_id", "source", "geometry", "length", "hydraulic_direction", "topological_order", "water_type"],
+  "properties": {
+    "id": { "type": "string", "format": "uuid" },
+    "project_id": { "type": "string", "format": "uuid", "description": "Un trace appartient au projet, partage entre toutes les variantes (pas a une variante)" },
+    "source": { "type": "string", "enum": ["kml_import", "kmz_import"] },
+    "source_file_ref": { "type": "string", "description": "Chemin dans le paquet .hydrops vers le KML/KMZ d'origine conservé tel quel" },
+    "geometry": {
+      "type": "object",
+      "description": "GeoJSON LineString en WGS84 (EPSG:4326)",
+      "additionalProperties": false,
+      "required": ["type", "coordinates"],
+      "properties": {
+        "type": { "const": "LineString" },
+        "coordinates": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 3,
+            "items": { "type": "number" }
+          }
+        }
+      }
+    },
+    "length": { "type": "number", "minimum": 0 },
+    "pk_origin": { "type": "number", "default": 0 },
+    "hydraulic_direction": { "type": "string", "enum": ["as_drawn", "reversed"] },
+    "topological_order": { "type": "integer", "minimum": 0 },
+    "water_type": { "type": "string" },
+    "parent_trace_id": { "type": ["string", "null"], "format": "uuid" },
+    "parent_node_id": { "type": ["string", "null"], "format": "uuid" },
+    "elevation_profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "dem_source": { "type": "string" },
+        "dem_version": { "type": "string" },
+        "raw": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": { "pk": { "type": "number" }, "z": { "type": "number" } }
+          }
+        },
+        "smoothed": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": { "pk": { "type": "number" }, "z": { "type": "number" } }
+          }
+        },
+        "candidate_high_points": {
+          "type": "array",
+          "items": { "type": "object", "properties": { "pk": { "type": "number" }, "z": { "type": "number" } } }
+        },
+        "candidate_low_points": {
+          "type": "array",
+          "items": { "type": "object", "properties": { "pk": { "type": "number" }, "z": { "type": "number" } } }
+        }
+      }
+    }
+  }
+}

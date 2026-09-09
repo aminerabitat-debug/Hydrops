@@ -1,0 +1,17 @@
+[project]
+name = "hydropack"
+version = "0.1.0"
+description = "Schema et (de)serialiseur du format de fichier .hydrops"
+requires-python = ">=3.11"
+dependencies = ["pydantic>=2", "jsonschema>=4"]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["python"]
+include = ["hydropack*"]

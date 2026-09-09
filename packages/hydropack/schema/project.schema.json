@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hydrops.dev/schema/project.schema.json",
+  "title": "Project",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id", "name", "currency", "default_water_type",
+    "study_horizon_years", "project_lifetime_years", "first_investment_year", "commissioning_year",
+    "amortization_years", "discount_rate", "energy_price", "annual_volume", "lifetimes_by_category", "options"
+  ],
+  "properties": {
+    "id": { "type": "string", "format": "uuid" },
+    "name": { "type": "string", "minLength": 1 },
+    "client": { "type": "string" },
+    "location": { "type": "string" },
+    "description": { "type": "string" },
+    "currency": { "type": "string", "pattern": "^[A-Z]{3}$", "description": "Code ISO 4217" },
+    "default_water_type": { "type": "string" },
+    "study_horizon_years": { "type": "integer", "minimum": 1 },
+    "project_lifetime_years": { "type": "integer", "minimum": 1 },
+    "first_investment_year": { "type": "integer" },
+    "commissioning_year": { "type": "integer", "description": "Annee de mise en service (distincte du 1er investissement)" },
+    "amortization_years": { "type": "integer", "minimum": 1, "description": "Duree d'amortissement — pilote le nombre de valeurs de la table de volume variable" },
+    "discount_rate": { "type": "number", "minimum": 0, "maximum": 1 },
+    "energy_price": { "type": "number", "minimum": 0 },
+    "annual_volume": {
+      "description": "Volume annuel a livrer, en Mm3/an (millions de m3 par an)",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "value"],
+          "properties": {
+            "mode": { "const": "constant" },
+            "value": { "type": "number", "minimum": 0 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "points"],
+          "properties": {
+            "mode": { "const": "table" },
+            "points": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["year", "value"],
+                "properties": {
+                  "year": { "type": "integer" },
+                  "value": { "type": "number", "minimum": 0 }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "lifetimes_by_category": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pipes", "civil_works", "electromechanical", "instrumentation_control", "other"],
+      "properties": {
+        "pipes": { "type": "integer", "minimum": 1 },
+        "civil_works": { "type": "integer", "minimum": 1 },
+        "electromechanical": { "type": "integer", "minimum": 1 },
+        "instrumentation_control": { "type": "integer", "minimum": 1 },
+        "other": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "options": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["include_reinvestment", "include_residual_value"],
+      "properties": {
+        "include_reinvestment": { "type": "boolean" },
+        "include_residual_value": { "type": "boolean" }
+      }
+    },
+    "language": { "type": "string", "enum": ["fr", "en"] },
+    "units_system": { "type": "string", "enum": ["SI", "US"] },
+    "number_format": { "type": "string" },
+    "page_format": { "type": "string", "enum": ["A4", "Letter"] },
+    "branding": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "logo_asset_ref": { "type": "string" },
+        "doc_number": { "type": "string" },
+        "revision": { "type": "string" },
+        "issue_date": { "type": "string", "format": "date" },
+        "prepared_by": { "type": "string" },
+        "checked_by": { "type": "string" },
+        "approved_by": { "type": "string" }
+      }
+    }
+  }
+}

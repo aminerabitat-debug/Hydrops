@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hydrops.dev/schema/techno_economic.schema.json",
+  "title": "TechnoEconomicAssumptions",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "maintenance_rules": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["asset_category", "mode"],
+        "properties": {
+          "asset_category": { "type": "string" },
+          "mode": { "type": "string", "enum": ["percent_of_capex", "table"] },
+          "percent_value": { "type": "number", "minimum": 0, "maximum": 1 },
+          "table": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "year": { "type": "integer" },
+                "value": { "type": "number", "minimum": 0 }
+              }
+            }
+          }
+        }
+      }
+    },
+    "overhead_rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": { "type": "string", "enum": ["fixed_value", "percent_of_opex"] },
+        "value": { "type": "number", "minimum": 0 }
+      }
+    },
+    "ancillary_costs": {
+      "type": "array",
+      "description": "Coûts annexes saisis par l'utilisateur : terrain, servitudes, accès, dévoiements, raccordements spéciaux, autres",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["label", "amount"],
+        "properties": {
+          "label": { "type": "string" },
+          "amount": { "type": "number" },
+          "year": { "type": "integer" }
+        }
+      }
+    },
+    "catalog_version": { "type": "string", "description": "Version du schéma catalog utilisée au moment de la saisie" }
+  }
+}

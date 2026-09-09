@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hydrops.dev/schema/metadata.schema.json",
+  "title": "HydropsMetadata",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format_version", "software_version", "created_at", "modified_at", "units_system"],
+  "properties": {
+    "format_version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+    "software_version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "modified_at": { "type": "string", "format": "date-time" },
+    "units_system": { "type": "string", "enum": ["SI", "US"] },
+    "generator": { "type": "string" }
+  }
+}

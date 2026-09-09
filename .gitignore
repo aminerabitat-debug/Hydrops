@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.venv/
+
+# Node / frontend
+node_modules/
+dist/
+.vite/
+
+# Divers
+*.hydrops
+.env
+.env.*
+.DS_Store
+*.log
+
+# Config locale de l'assistant (permissions, lancement dev) — pas destinee au depot public
+.claude/

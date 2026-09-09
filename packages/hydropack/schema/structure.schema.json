@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hydrops.dev/schema/structure.schema.json",
+  "title": "Structure",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "node_id", "type", "attributes"],
+  "properties": {
+    "id": { "type": "string", "format": "uuid" },
+    "node_id": { "type": "string", "format": "uuid" },
+    "type": {
+      "type": "string",
+      "enum": [
+        "high_point", "low_point", "sectioning_valve", "control_valve",
+        "pressure_break", "reservoir", "pumping_station", "intake", "treatment_plant"
+      ]
+    },
+    "cost_rule_ref": { "type": "string", "description": "Référence catalog.StructureCostCurve" },
+    "attributes": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "volume", "geometry", "burial"],
+          "properties": {
+            "type": { "const": "reservoir" },
+            "volume": { "type": "number", "minimum": 0 },
+            "geometry": { "type": "string", "enum": ["circular", "rectangular"] },
+            "burial": { "type": "string", "enum": ["semi_buried", "elevated"] },
+            "height_if_elevated": { "type": "number", "minimum": 0 },
+            "standard_capacity_ref": { "type": "string" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "configuration"],
+          "properties": {
+            "type": { "const": "pumping_station" },
+            "configuration": {
+              "type": "string",
+              "enum": ["on_network", "on_reservoir", "with_regulation_tank", "borehole", "submersible", "well_booster"]
+            },
+            "hmt_margin": {
+              "type": "object",
+              "additionalProperties": false,
+              "minProperties": 1,
+              "properties": {
+                "value_mce": { "type": "number" },
+                "value_pct": { "type": "number" }
+              }
+            },
+            "pump_efficiency": { "type": "number", "minimum": 0, "maximum": 1 },
+            "motor_efficiency": { "type": "number", "minimum": 0, "maximum": 1 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "source_type"],
+          "properties": {
+            "type": { "const": "intake" },
+            "source_type": { "type": "string", "enum": ["sea", "dam", "river", "canal", "pipe_tie_in", "reservoir"] }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "process_type"],
+          "properties": {
+            "type": { "const": "treatment_plant" },
+            "process_type": {
+              "type": "string",
+              "enum": ["surface_water", "desalination", "brackish_demineralization", "wastewater", "chlorination", "fe_mn_removal"]
+            },
+            "design_flow": { "type": "number", "minimum": 0 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "spacing_rule"],
+          "properties": {
+            "type": { "const": "sectioning_valve" },
+            "spacing_rule": { "type": "string", "enum": ["auto_5km", "manual"] },
+            "spacing_override_m": { "type": "number", "minimum": 0 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type"],
+          "properties": { "type": { "const": "control_valve" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type"],
+          "properties": { "type": { "const": "pressure_break" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "detection_source", "validated"],
+          "properties": {
+            "type": { "enum": ["high_point", "low_point"] },
+            "detection_source": { "type": "string", "enum": ["auto_candidate", "user_added"] },
+            "validated": { "type": "boolean" }
+          }
+        }
+      ]
+    }
+  }
+}

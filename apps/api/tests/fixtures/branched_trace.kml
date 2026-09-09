@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <name>Trace avec deux branches (invalide pour import V1-01)</name>
+    <Placemark>
+      <name>Branche 1</name>
+      <LineString>
+        <coordinates>2.350000,48.850000,0 2.352000,48.853000,0</coordinates>
+      </LineString>
+    </Placemark>
+    <Placemark>
+      <name>Branche 2</name>
+      <LineString>
+        <coordinates>2.352000,48.853000,0 2.360000,48.864000,0</coordinates>
+      </LineString>
+    </Placemark>
+  </Document>
+</kml>

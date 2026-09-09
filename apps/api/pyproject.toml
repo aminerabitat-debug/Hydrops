@@ -1,0 +1,5 @@
+[tool.pytest.ini_options]
+# Permet `pytest apps/api` depuis la racine du depot (pas seulement `cd apps/api && pytest`) :
+# hydrops_api n'est pas installe comme package, ce repertoire doit etre sur sys.path pour les tests.
+pythonpath = ["."]
+asyncio_mode = "strict"

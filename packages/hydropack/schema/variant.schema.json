@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hydrops.dev/schema/variant.schema.json",
+  "title": "Variant",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "project_id", "name", "optimization_mode", "status"],
+  "properties": {
+    "id": { "type": "string", "format": "uuid" },
+    "project_id": { "type": "string", "format": "uuid" },
+    "name": { "type": "string", "minLength": 1 },
+    "description": { "type": "string" },
+    "duplicated_from_variant_id": { "type": ["string", "null"], "format": "uuid" },
+    "forcings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["scope"],
+        "properties": {
+          "scope": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["type", "trace_id"],
+                "properties": { "type": { "const": "trace" }, "trace_id": { "type": "string", "format": "uuid" } }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["type", "from_node_id", "to_node_id"],
+                "properties": {
+                  "type": { "const": "node_range" },
+                  "from_node_id": { "type": "string", "format": "uuid" },
+                  "to_node_id": { "type": "string", "format": "uuid" }
+                }
+              }
+            ]
+          },
+          "dn": { "type": "integer" },
+          "material": { "type": "string" },
+          "pressure_class": { "type": "string" }
+        }
+      }
+    },
+    "optimization_mode": { "type": "string", "enum": ["auto", "manual"] },
+    "status": { "type": "string", "enum": ["draft", "calculated", "stale"] }
+  }
+}

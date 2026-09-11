@@ -13,9 +13,11 @@
       "type": "string",
       "enum": [
         "junction", "high_point", "low_point", "sectioning_valve", "control_valve",
-        "pressure_break", "reservoir", "pumping_station", "intake", "treatment_plant",
-        "tie_in", "terminal"
-      ]
+        "pressure_break", "storage_reservoir", "surge_reservoir", "pumping_station", "intake",
+        "treatment_plant", "tie_in", "terminal",
+        "reservoir"
+      ],
+      "description": "\"reservoir\" est un alias de lecture herite (avant la scission stockage/mise en charge) — jamais ecrit par l'application, mappe vers \"storage_reservoir\" a la lecture (cf. hydropack.models.Node)"
     },
     "name": { "type": ["string", "null"], "description": "Nom court affiche dans l'arborescence (ex. 'Res1', 'SP1') — optionnel, non fourni pour les jonctions simples" },
     "pk": { "type": "number" },
@@ -35,6 +37,10 @@
     },
     "validated": { "type": "boolean", "default": true, "description": "false tant qu'un point haut/bas candidat n'est pas confirmé par l'utilisateur" },
     "structure_id": { "type": ["string", "null"], "format": "uuid" },
-    "data": { "type": ["object", "null"], "description": "Mise en donnees detaillee specifique au type d'ouvrage (cdc §8) — champs libres, varient selon le type (station de pompage, reservoir, brise charge, station de traitement...)" }
+    "data": { "type": ["object", "null"], "description": "Mise en donnees detaillee specifique au type d'ouvrage (cdc §8) — champs libres, varient selon le type (station de pompage, reservoir, brise charge, station de traitement...)" },
+    "piezo_head": { "type": ["number", "null"], "description": "Cote piezometrique calculee (m) — sortie du calcul hydraulique" },
+    "pressure_dynamic": { "type": ["number", "null"], "description": "Pression hydrodynamique calculee (m) — sortie du calcul hydraulique" },
+    "pressure_static_max": { "type": ["number", "null"], "description": "Pression hydrostatique max calculee (m) — troncon gravitaire uniquement" },
+    "pressure_static_min": { "type": ["number", "null"], "description": "Pression hydrostatique min calculee (m) — troncon gravitaire uniquement" }
   }
 }

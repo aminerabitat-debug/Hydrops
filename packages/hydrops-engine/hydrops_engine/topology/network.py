@@ -45,7 +45,9 @@ def validate_pk_strictly_increasing(nodes_ordered: list[tuple[str, float]]) -> l
 # les extremites de trace) — Piquage (tie_in) et Jonction simple sont transparents : plusieurs
 # segments consecutifs entre deux limites dures se regroupent en UN SEUL troncon dans l'arborescence
 # (decision utilisateur, Lot 3 etape 1b), meme si leur DN differe d'un segment a l'autre.
-BOUNDARY_NODE_TYPES = frozenset({"terminal", "reservoir", "pumping_station", "pressure_break", "treatment_plant"})
+BOUNDARY_NODE_TYPES = frozenset(
+    {"terminal", "storage_reservoir", "surge_reservoir", "pumping_station", "pressure_break", "treatment_plant"}
+)
 
 
 @dataclass(frozen=True)

@@ -121,7 +121,7 @@ export interface ImportJobStatus {
 // mais ne sont pas non plus encore creables/editables depuis l'UI.
 export type NodeType =
   | 'junction' | 'high_point' | 'low_point' | 'sectioning_valve' | 'control_valve'
-  | 'pressure_break' | 'reservoir' | 'pumping_station' | 'intake' | 'treatment_plant'
+  | 'pressure_break' | 'storage_reservoir' | 'surge_reservoir' | 'pumping_station' | 'intake' | 'treatment_plant'
   | 'tie_in' | 'terminal'
 
 // Types reellement proposables dans le <select> de NodeDialog (Lot 3 etape 1d) : uniquement des
@@ -129,14 +129,19 @@ export type NodeType =
 // utilisateur) au meme titre que "terminal". "junction" reste ici dans l'union TypeScript
 // uniquement pour rester compatible avec les noeuds existants seedes par le backend (cf.
 // NodeDialog:resolveInitialType, qui retombe sur le premier ouvrage reel de la liste le cas
-// echeant) — jamais choisissable depuis le formulaire.
-export type CreatableNodeType = 'junction' | 'tie_in' | 'reservoir' | 'pumping_station' | 'pressure_break' | 'treatment_plant'
+// echeant) — jamais choisissable depuis le formulaire. "Réservoir" a ete scinde (consigne
+// utilisateur) en "storage_reservoir" (Réservoir de stockage) et "surge_reservoir" (Réservoir de
+// mise en charge) — cf. shared/ouvrageFields.ts pour leurs champs (débit + autonomie).
+export type CreatableNodeType =
+  | 'junction' | 'tie_in' | 'storage_reservoir' | 'surge_reservoir' | 'pumping_station' | 'pressure_break' | 'treatment_plant'
 
 // Ouvrages affiches dans l'arborescence Variante (cdc §8) — Piquage y figure desormais (consigne
 // utilisateur) mais reste exclu du regroupement en troncons (BOUNDARY_NODE_TYPES cote moteur,
 // hydrops_engine.topology.network, inchange). Jonction simple reste exclue de cette liste : ce
 // n'est pas un ouvrage, juste un point de changement de DN.
-export const REAL_OUVRAGE_TYPES: NodeType[] = ['reservoir', 'pumping_station', 'pressure_break', 'treatment_plant', 'tie_in']
+export const REAL_OUVRAGE_TYPES: NodeType[] = [
+  'storage_reservoir', 'surge_reservoir', 'pumping_station', 'pressure_break', 'treatment_plant', 'tie_in',
+]
 
 // Un ouvrage est considere "defini" une fois qu'il porte un type reel (pas juste terminal/junction
 // generique) — utilise pour les indicateurs visuels de completion (arborescence, troncons).
@@ -160,8 +165,15 @@ export interface Node {
   validated: boolean
   structure_id?: string | null
   // Mise en donnees detaillee specifique au type d'ouvrage (cdc §8) — cf. shared/ouvrageFields.ts
-  // pour les champs attendus par type. Cle absente/valeur null tant que rien n'a ete saisi.
+  // pour les champs attendus par type. Cle absente/valeur null tant que rien n'a ete saisi. Pour un
+  // Piquage (tie_in), le seul champ utilise est `include_withdrawal_in_sizing` (bool, defaut true).
   data?: Record<string, unknown> | null
+  // Sorties du calcul hydraulique (bouton Calculer) — cf. shared/apiClient.ts:runCalculation. null
+  // tant qu'aucun calcul n'a ete lance ou que ce noeud n'appartient pas a un troncon calculable.
+  piezo_head?: number | null
+  pressure_dynamic?: number | null
+  pressure_static_max?: number | null
+  pressure_static_min?: number | null
 }
 
 const ENDPOINT_PK_TOLERANCE_M = 1e-6
@@ -192,12 +204,25 @@ export interface Segment {
   flow: number
   forced: boolean
   // Parametres hydrauliques du troncon (cdc §8), saisis depuis "Modifier le troncon" — le
-  // sous-ensemble pertinent depend du regime (cf. shared/troncons.ts:tronconRegime).
+  // sous-ensemble pertinent depend du regime (cf. shared/troncons.ts:tronconRegime). `head_flow`
+  // (debit de tete, m3/h) est commun aux deux regimes.
+  head_flow?: number | null
   upstream_water_level_max?: number | null
   upstream_water_level_min?: number | null
+  // Non-null = la cote correspondante a ete saisie en relatif ("+N", cf. TronconDialog
+  // resolveLevelInput) — permet de la recalculer automatiquement si le noeud de depart du
+  // tronçon est deplace (consigne utilisateur, cf. shared/apiClient.ts:patchNodePosition).
+  upstream_water_level_max_offset?: number | null
+  upstream_water_level_min_offset?: number | null
   min_pressure?: number | null
   downstream_residual_pressure?: number | null
   max_velocity?: number | null
+  // Sorties du calcul hydraulique (bouton Calculer) — cf. shared/apiClient.ts:runCalculation.
+  // `flow`/`roughness` (ci-dessus) sont aussi ecrases par le calcul.
+  velocity?: number | null
+  head_loss_unit?: number | null
+  head_loss_segment?: number | null
+  head_loss_cumulative?: number | null
 }
 
 // Regroupement de segments consecutifs entre deux limites "dures" (ouvrage reel ou extremite de
@@ -222,11 +247,61 @@ export interface NetworkViolation {
 export interface CatalogMaterial {
   material: string
   label: string
-  pressure_classes: string[]
 }
 
 export interface CatalogDiameter {
   dn: number
   di: number
   de: number
+}
+
+// Base "Conduites" (menu Base de données > Conduites, consigne utilisateur) — jeu préliminaire de
+// test fourni par l'utilisateur, à mettre à jour plus tard. `active` pilote la case "Actif" :
+// décochée, la ligne est exclue des recherches du moteur de calcul sans être supprimée.
+export interface PipeCatalogRow {
+  id: number
+  dn: number
+  di: number
+  material: string
+  pressure_class: string
+  pms: number
+  prix_ftp: number
+  prix_fourniture: number
+  prix_aps: number
+  active: boolean
+}
+
+// Une ligne du tableau "Critères de choix des matériaux des conduites" (fenêtre Préférences) :
+// matériaux autorisés pour une plage de DN et, éventuellement, un type de fluide précis (null =
+// s'applique à tous les fluides).
+export interface MaterialCriterionRule {
+  dn_min: number | null
+  dn_max: number | null
+  fluid: string | null
+  materials: string[]
+}
+
+export interface CalculationPreferences {
+  roughness_by_material: Record<string, number>
+  fluid_temperature_c: number
+  singular_loss_markup_pct: number
+  material_criteria: MaterialCriterionRule[]
+  default_min_pressure?: number | null
+  default_downstream_residual_pressure?: number | null
+  default_max_velocity?: number | null
+}
+
+export interface RepositionSuggestion {
+  node_id: string
+  node_label: string
+  current_pk: number
+  candidate_pk: number
+}
+
+export interface CalcRunResult {
+  status: string
+  segments_updated: number
+  nodes_updated: number
+  alerts: string[]
+  reposition_suggestions: RepositionSuggestion[]
 }

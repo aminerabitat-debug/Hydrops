@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hydrops.dev/schema/calculation_preferences.schema.json",
+  "title": "CalculationPreferences",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "roughness_by_material": {
+      "type": "object",
+      "description": "Rugosite absolue (mm) par code materiau du catalogue Conduites — surcharge des valeurs par defaut",
+      "additionalProperties": { "type": "number", "minimum": 0 }
+    },
+    "fluid_temperature_c": { "type": "number", "description": "Temperature du fluide (°C), pilote la viscosite cinematique" },
+    "singular_loss_markup_pct": { "type": "number", "minimum": 0, "description": "Majoration (%) appliquee aux pertes de charge lineaires pour approcher les pertes de charge singulieres" },
+    "default_min_pressure": { "type": ["number", "null"], "description": "Valeur par defaut proposee pour \"Pression min\" a l'ouverture de Modifier le tronçon, si non deja saisie" },
+    "default_downstream_residual_pressure": { "type": ["number", "null"], "description": "Valeur par defaut proposee pour \"Pression résiduelle aval\"" },
+    "default_max_velocity": { "type": ["number", "null"], "description": "Valeur par defaut proposee pour \"Vitesse Max\"" },
+    "material_criteria": {
+      "type": "array",
+      "description": "Critères de choix des matériaux des conduites (plage DN x fluide -> matériaux autorisés)",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "dn_min": { "type": ["integer", "null"] },
+          "dn_max": { "type": ["integer", "null"] },
+          "fluid": { "type": ["string", "null"], "description": "null = s'applique a tous les fluides" },
+          "materials": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    }
+  }
+}

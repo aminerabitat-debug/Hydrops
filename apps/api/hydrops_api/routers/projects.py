@@ -12,7 +12,9 @@ from hydropack.models import (
     AnnualVolumeConstant,
     AnnualVolumePoint,
     AnnualVolumeTable,
+    CalculationPreferences,
     LifetimesByCategory,
+    MaterialCriterionRule,
     Metadata,
     Project,
     TechnoEconomicAssumptions,
@@ -23,7 +25,9 @@ from hydropack.validation import HydropackValidationError
 
 from ..core.config import get_settings
 from ..core.deps import get_session_store, require_package, require_session
-from ..schemas import NewProjectRequest, PatchProjectRequest, ProjectFormFields
+from ..data.material_criteria_seed import DEFAULT_MATERIAL_CRITERIA
+from ..data.pipe_catalog_seed import DEFAULT_ROUGHNESS_MM
+from ..schemas import CalculationPreferencesRequest, NewProjectRequest, PatchProjectRequest, ProjectFormFields
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -136,6 +140,54 @@ async def import_project(session_id: str, request: Request, file: UploadFile = F
         raise HTTPException(status_code=422, detail=f"Fichier .hydrops illisible: {e}") from e
     store.set_package(session_id, package)
     return _project_response(package)
+
+
+def _preferences_response(package: ProjectPackage) -> dict:
+    """Fenêtre Préférences (menu Calcul, consigne utilisateur) : fusionne les valeurs enregistrées
+    avec les défauts (rugosité par matériau, critères de choix) pour les matériaux/règles pas
+    encore explicitement surchargés — l'utilisateur voit toujours un jeu complet, éditable."""
+    prefs = package.calculation_preferences
+    roughness = dict(DEFAULT_ROUGHNESS_MM)
+    roughness.update(prefs.roughness_by_material)
+    criteria = (
+        [c.model_dump(mode="json") for c in prefs.material_criteria]
+        if prefs.material_criteria
+        else list(DEFAULT_MATERIAL_CRITERIA)
+    )
+    return {
+        "roughness_by_material": roughness,
+        "fluid_temperature_c": prefs.fluid_temperature_c,
+        "singular_loss_markup_pct": prefs.singular_loss_markup_pct,
+        "material_criteria": criteria,
+        "default_min_pressure": prefs.default_min_pressure,
+        "default_downstream_residual_pressure": prefs.default_downstream_residual_pressure,
+        "default_max_velocity": prefs.default_max_velocity,
+    }
+
+
+@router.get("/{session_id}/preferences")
+def get_preferences(session_id: str, request: Request):
+    store = get_session_store(request)
+    package = require_package(store, session_id)
+    return _preferences_response(package)
+
+
+@router.put("/{session_id}/preferences")
+def put_preferences(session_id: str, payload: CalculationPreferencesRequest, request: Request):
+    """Remplacement complet (même convention que "Paramètres du projet") — le formulaire soumet
+    toujours l'état affiché en entier, defaults deja fusionnes cote client depuis le GET."""
+    store = get_session_store(request)
+    package = require_package(store, session_id)
+    package.calculation_preferences = CalculationPreferences(
+        roughness_by_material=payload.roughness_by_material,
+        fluid_temperature_c=payload.fluid_temperature_c,
+        singular_loss_markup_pct=payload.singular_loss_markup_pct,
+        material_criteria=[MaterialCriterionRule(**c.model_dump()) for c in payload.material_criteria],
+        default_min_pressure=payload.default_min_pressure,
+        default_downstream_residual_pressure=payload.default_downstream_residual_pressure,
+        default_max_velocity=payload.default_max_velocity,
+    )
+    return _preferences_response(package)
 
 
 @router.get("/{session_id}/export")

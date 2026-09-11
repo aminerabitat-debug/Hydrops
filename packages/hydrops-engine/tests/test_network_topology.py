@@ -81,10 +81,10 @@ def test_group_into_troncons_junction_and_piquage_are_transparent():
 
 
 def test_group_into_troncons_splits_at_real_ouvrages():
-    # a(terminal) -- s1 -- r(reservoir) -- s2 -- sp(pumping_station) -- s3 -- b(terminal)
+    # a(terminal) -- s1 -- r(storage_reservoir) -- s2 -- sp(pumping_station) -- s3 -- b(terminal)
     nodes = [
         ("a", "terminal", 0.0),
-        ("r", "reservoir", 40.0),
+        ("r", "storage_reservoir", 40.0),
         ("sp", "pumping_station", 90.0),
         ("b", "terminal", 150.0),
     ]

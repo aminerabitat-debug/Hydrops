@@ -1,0 +1,480 @@
+from __future__ import annotations
+
+import math
+
+import pytest
+
+from hydrops_engine.hydraulics import (
+    CatalogPipe,
+    SegmentSpec,
+    colebrook_white,
+    kinematic_viscosity_m2s,
+    min_di_mm_for_velocity,
+    segment_hydraulics,
+    solve_gravitaire_troncon,
+    solve_refoulement_troncon,
+)
+
+
+def test_kinematic_viscosity_decreases_with_temperature():
+    assert kinematic_viscosity_m2s(20) < kinematic_viscosity_m2s(5)
+    assert kinematic_viscosity_m2s(20) == pytest.approx(1.0e-6, rel=0.15)
+
+
+def test_colebrook_white_turbulent_smooth_pipe_reasonable_friction_factor():
+    f = colebrook_white(reynolds=100_000, relative_roughness=0.0001)
+    assert 0.015 < f < 0.03
+
+
+def test_colebrook_white_laminar_uses_64_over_re():
+    assert colebrook_white(reynolds=1000, relative_roughness=0.001) == pytest.approx(64 / 1000)
+
+
+def test_segment_hydraulics_zero_flow_gives_zero_loss():
+    velocity, j = segment_hydraulics(0.0, di_mm=200, roughness_mm=0.01, viscosity_m2s=1e-6)
+    assert velocity == 0.0
+    assert j == 0.0
+
+
+def test_segment_hydraulics_velocity_matches_area_formula():
+    flow = 0.1  # m3/s
+    di_mm = 300
+    velocity, j = segment_hydraulics(flow, di_mm=di_mm, roughness_mm=0.01, viscosity_m2s=1e-6)
+    expected_velocity = flow / (math.pi * (di_mm / 1000) ** 2 / 4)
+    assert velocity == pytest.approx(expected_velocity)
+    assert j > 0
+
+
+def test_min_di_for_velocity_zero_without_vmax():
+    assert min_di_mm_for_velocity(0.1, None) == 0.0
+    assert min_di_mm_for_velocity(0.1, 0) == 0.0
+
+
+def _catalog() -> list[CatalogPipe]:
+    return [
+        CatalogPipe(id=1, dn=110, di_mm=99.4, material="PVC", pressure_class="PN10", pms_m=101.9, price=72.8, roughness_mm=0.01),
+        CatalogPipe(id=2, dn=160, di_mm=147.6, material="PVC", pressure_class="PN10", pms_m=101.9, price=126.8, roughness_mm=0.01),
+        CatalogPipe(id=3, dn=200, di_mm=184.6, material="PVC", pressure_class="PN10", pms_m=101.9, price=196.0, roughness_mm=0.01),
+        CatalogPipe(id=4, dn=110, di_mm=96.8, material="PEHD", pressure_class="PN10", pms_m=101.9, price=101.9, roughness_mm=0.007),
+    ]
+
+
+def test_solve_gravitaire_troncon_single_segment_respects_min_pressure():
+    catalog = _catalog()
+    nodes_z = {"A": 100.0, "B": 80.0}
+    segments = [SegmentSpec(id="s1", length_m=500.0, flow_m3s=0.05, max_velocity_ms=2.0)]
+    result = solve_gravitaire_troncon(
+        node_ids_ordered=["A", "B"],
+        node_ground_z=nodes_z,
+        segments_ordered=segments,
+        upstream_level_max=105.0,
+        upstream_level_min=103.0,
+        min_pressure=5.0,
+        downstream_residual_pressure=5.0,
+        catalog=catalog,
+        singular_loss_markup_pct=10.0,
+        fluid_temperature_c=20.0,
+    )
+    assert result.alerts == []
+    node_b = next(n for n in result.nodes if n.node_id == "B")
+    assert node_b.pressure_dynamic is not None
+    assert node_b.pressure_dynamic >= 5.0 - 1e-6
+    assert node_b.pressure_static_max == pytest.approx(105.0 - 80.0)
+    assert node_b.pressure_static_min == pytest.approx(103.0 - 80.0)
+    seg_result = result.segments[0]
+    assert seg_result.head_loss_cumulative == pytest.approx(seg_result.head_loss_segment)
+    # Le choix doit respecter la contrainte de vitesse (Q/A <= 2 m/s).
+    area = math.pi * (seg_result.di_mm / 1000) ** 2 / 4
+    assert 0.05 / area <= 2.0 + 1e-6
+
+
+def test_solve_gravitaire_troncon_dn_non_increasing_downstream():
+    catalog = _catalog()
+    nodes_z = {"A": 100.0, "B": 90.0, "C": 80.0}
+    segments = [
+        SegmentSpec(id="s1", length_m=500.0, flow_m3s=0.03, max_velocity_ms=3.0),
+        SegmentSpec(id="s2", length_m=500.0, flow_m3s=0.03, max_velocity_ms=3.0),
+    ]
+    result = solve_gravitaire_troncon(
+        node_ids_ordered=["A", "B", "C"],
+        node_ground_z=nodes_z,
+        segments_ordered=segments,
+        upstream_level_max=110.0,
+        upstream_level_min=108.0,
+        min_pressure=None,
+        downstream_residual_pressure=None,
+        catalog=catalog,
+        singular_loss_markup_pct=10.0,
+        fluid_temperature_c=20.0,
+    )
+    assert result.segments[1].dn <= result.segments[0].dn
+
+
+def test_solve_refoulement_troncon_derives_pump_head_from_downstream_residual():
+    catalog = _catalog()
+    nodes_z = {"P": 50.0, "R": 100.0}
+    segments = [SegmentSpec(id="s1", length_m=2000.0, flow_m3s=0.04, max_velocity_ms=2.0)]
+    result = solve_refoulement_troncon(
+        node_ids_ordered=["P", "R"],
+        node_ground_z=nodes_z,
+        segments_ordered=segments,
+        min_pressure=None,
+        downstream_residual_pressure=20.0,
+        catalog=catalog,
+        singular_loss_markup_pct=10.0,
+        fluid_temperature_c=20.0,
+    )
+    assert result.alerts == []
+    node_r = next(n for n in result.nodes if n.node_id == "R")
+    assert node_r.pressure_dynamic == pytest.approx(20.0)
+    assert node_r.pressure_static_max is None  # pas d'hydrostatique en refoulement (consigne utilisateur)
+    node_p = next(n for n in result.nodes if n.node_id == "P")
+    seg_result = result.segments[0]
+    # La cote en tete = cote aval + perte de charge (parcours AMONT -> AVAL, forme close).
+    assert node_p.piezo_head == pytest.approx(node_r.piezo_head + seg_result.head_loss_segment)
+
+
+def test_solve_refoulement_troncon_dn_non_decreasing_towards_pump():
+    catalog = _catalog()
+    nodes_z = {"P": 50.0, "M": 60.0, "R": 70.0}
+    segments = [
+        SegmentSpec(id="s1", length_m=1000.0, flow_m3s=0.05, max_velocity_ms=3.0),
+        SegmentSpec(id="s2", length_m=1000.0, flow_m3s=0.02, max_velocity_ms=3.0),
+    ]
+    result = solve_refoulement_troncon(
+        node_ids_ordered=["P", "M", "R"],
+        node_ground_z=nodes_z,
+        segments_ordered=segments,
+        min_pressure=None,
+        downstream_residual_pressure=15.0,
+        catalog=catalog,
+        singular_loss_markup_pct=10.0,
+        fluid_temperature_c=20.0,
+    )
+    # segments[0] = P->M (le plus amont, pres de la pompe) doit avoir un DN >= segments[1] (M->R, aval).
+    assert result.segments[0].dn >= result.segments[1].dn
+
+
+def test_solve_refoulement_troncon_min_pressure_honored_at_intermediate_node():
+    catalog = _catalog()
+    # Point haut intermediaire (M a une altitude tres proche de R) : le debit/DN sont identiques
+    # sur les deux segments, donc sans min_pressure la ligne piezo serait tres au-dessus de M —
+    # min_pressure doit neanmoins etre respectee la aussi, pas seulement au point aval R.
+    nodes_z = {"P": 50.0, "M": 95.0, "R": 70.0}
+    segments = [
+        SegmentSpec(id="s1", length_m=500.0, flow_m3s=0.03, max_velocity_ms=3.0),
+        SegmentSpec(id="s2", length_m=500.0, flow_m3s=0.03, max_velocity_ms=3.0),
+    ]
+    result = solve_refoulement_troncon(
+        node_ids_ordered=["P", "M", "R"],
+        node_ground_z=nodes_z,
+        segments_ordered=segments,
+        min_pressure=8.0,
+        downstream_residual_pressure=15.0,
+        catalog=catalog,
+        singular_loss_markup_pct=10.0,
+        fluid_temperature_c=20.0,
+    )
+    node_m = next(n for n in result.nodes if n.node_id == "M")
+    node_r = next(n for n in result.nodes if n.node_id == "R")
+    assert node_m.pressure_dynamic >= 8.0 - 1e-6
+    assert node_r.pressure_dynamic >= 15.0 - 1e-6
+
+
+def test_solve_refoulement_troncon_pms_exceeded_raises_alert_not_exception():
+    # PMS tres bas sur toutes les lignes du catalogue + residuelle aval elevee -> la pression de
+    # service depasse forcement le PMS retenu (aucune conduite ne peut le respecter) : une alerte,
+    # jamais une exception, et le calcul retourne quand meme un resultat exploitable.
+    catalog = [
+        CatalogPipe(id=1, dn=200, di_mm=184.6, material="PVC", pressure_class="PN2", pms_m=5.0, price=196.0, roughness_mm=0.01),
+    ]
+    nodes_z = {"P": 50.0, "R": 100.0}
+    segments = [SegmentSpec(id="s1", length_m=2000.0, flow_m3s=0.04, max_velocity_ms=2.0)]
+    result = solve_refoulement_troncon(
+        node_ids_ordered=["P", "R"],
+        node_ground_z=nodes_z,
+        segments_ordered=segments,
+        min_pressure=None,
+        downstream_residual_pressure=80.0,
+        catalog=catalog,
+        singular_loss_markup_pct=10.0,
+        fluid_temperature_c=20.0,
+    )
+    assert any("PMS" in a for a in result.alerts)
+    assert len(result.segments) == 1
+
+
+def test_solve_gravitaire_troncon_insufficient_reservoir_level_raises_alert():
+    catalog = _catalog()
+    # Residuelle aval elevee mais reservoir tres bas (a peine au-dessus du terrain aval) : meme
+    # sans aucune perte de charge, le niveau disponible ne peut pas suffire.
+    nodes_z = {"A": 100.0, "B": 80.0}
+    segments = [SegmentSpec(id="s1", length_m=200.0, flow_m3s=0.01, max_velocity_ms=2.0)]
+    result = solve_gravitaire_troncon(
+        node_ids_ordered=["A", "B"],
+        node_ground_z=nodes_z,
+        segments_ordered=segments,
+        upstream_level_max=101.0,
+        upstream_level_min=100.5,
+        min_pressure=None,
+        downstream_residual_pressure=50.0,  # exige cote_B >= 130, hors de portee d'un reservoir a 100.5
+        catalog=catalog,
+        singular_loss_markup_pct=10.0,
+        fluid_temperature_c=20.0,
+    )
+    assert any("réservoir" in a.lower() for a in result.alerts)
+
+
+def test_solve_gravitaire_troncon_infeasible_pressure_raises_alert_not_exception():
+    catalog = _catalog()
+    nodes_z = {"A": 100.0, "B": 99.0}
+    segments = [SegmentSpec(id="s1", length_m=5000.0, flow_m3s=0.08, max_velocity_ms=2.0)]
+    result = solve_gravitaire_troncon(
+        node_ids_ordered=["A", "B"],
+        node_ground_z=nodes_z,
+        segments_ordered=segments,
+        upstream_level_max=101.0,
+        upstream_level_min=100.5,
+        min_pressure=50.0,  # volontairement irrealiste pour forcer l'infaisabilite
+        downstream_residual_pressure=None,
+        catalog=catalog,
+        singular_loss_markup_pct=10.0,
+        fluid_temperature_c=20.0,
+    )
+    assert len(result.alerts) >= 1
+    assert len(result.segments) == 1
+
+
+def test_solve_gravitaire_troncon_detects_intermediate_terrain_high_point():
+    # Un troncon peut n'avoir que 2 noeuds reels (ses extremites) mais couvrir un terrain
+    # accidente entre les deux : verifier la pression aux seuls noeuds ne suffit pas — un point
+    # haut intermediaire (jamais materialise par un noeud) peut passer sous la ligne piezometrique
+    # sans qu'aucune des deux extremites ne le detecte (cas signale par l'utilisateur).
+    catalog = _catalog()
+    nodes_z = {"A": 100.0, "B": 95.0}
+    segments = [SegmentSpec(id="s1", length_m=1000.0, flow_m3s=0.001, max_velocity_ms=2.0)]
+    node_pk = {"A": 0.0, "B": 1000.0}
+    # Un "point haut" a mi-troncon (PK 500, z=108), bien au-dessus des deux extremites (100/95) et
+    # tres proche du niveau du reservoir (112) : la ligne piezometrique (quasi plate, faible debit)
+    # y laisse une pression tres inferieure aux 5 m minimum exiges, alors que A et B sont corrects.
+    terrain_samples = [(0.0, 100.0), (200.0, 96.0), (500.0, 108.0), (800.0, 94.0), (1000.0, 95.0)]
+    result = solve_gravitaire_troncon(
+        node_ids_ordered=["A", "B"],
+        node_ground_z=nodes_z,
+        segments_ordered=segments,
+        upstream_level_max=115.0,
+        upstream_level_min=112.0,
+        min_pressure=5.0,
+        downstream_residual_pressure=None,
+        catalog=catalog,
+        singular_loss_markup_pct=10.0,
+        fluid_temperature_c=20.0,
+        node_pk=node_pk,
+        terrain_samples=terrain_samples,
+    )
+    node_b = next(n for n in result.nodes if n.node_id == "B")
+    # Les deux extremites respectent la pression minimale...
+    assert node_b.pressure_dynamic >= 5.0 - 1e-6
+    # ...mais le point haut intermediaire (PK 500, z=108) doit etre detecte malgre tout.
+    assert any("terrain" in a.lower() and "500" in a for a in result.alerts)
+
+
+def test_solve_gravitaire_troncon_terrain_check_silent_when_profile_clears_it():
+    # Meme troncon, mais un terrain qui reste sous la ligne piezometrique partout : aucune alerte
+    # de terrain ne doit apparaitre (pas de faux positif).
+    catalog = _catalog()
+    nodes_z = {"A": 100.0, "B": 95.0}
+    segments = [SegmentSpec(id="s1", length_m=1000.0, flow_m3s=0.001, max_velocity_ms=2.0)]
+    node_pk = {"A": 0.0, "B": 1000.0}
+    terrain_samples = [(0.0, 100.0), (200.0, 96.0), (500.0, 97.0), (800.0, 94.0), (1000.0, 95.0)]
+    result = solve_gravitaire_troncon(
+        node_ids_ordered=["A", "B"],
+        node_ground_z=nodes_z,
+        segments_ordered=segments,
+        upstream_level_max=115.0,
+        upstream_level_min=112.0,
+        min_pressure=5.0,
+        downstream_residual_pressure=None,
+        catalog=catalog,
+        singular_loss_markup_pct=10.0,
+        fluid_temperature_c=20.0,
+        node_pk=node_pk,
+        terrain_samples=terrain_samples,
+    )
+    assert not any("terrain" in a.lower() for a in result.alerts)
+
+
+def test_solve_refoulement_troncon_raises_h0_to_cover_intermediate_terrain_high_point():
+    catalog = _catalog()
+    nodes_z = {"P": 50.0, "R": 60.0}
+    segments = [SegmentSpec(id="s1", length_m=1000.0, flow_m3s=0.001, max_velocity_ms=2.0)]
+    node_pk = {"P": 0.0, "R": 1000.0}
+    # Point haut intermediaire (PK 500, z=72) : ni P ni R ne l'exigent directement (tous deux
+    # calcules pour respecter leurs propres exigences), donc sans prise en compte du terrain la
+    # ligne piezometrique passerait sous ce point. En refoulement, pas d'alerte : H0 doit etre
+    # augmentee jusqu'a ce que ce point soit lui aussi couvert.
+    terrain_samples = [(0.0, 50.0), (500.0, 72.0), (1000.0, 60.0)]
+    result = solve_refoulement_troncon(
+        node_ids_ordered=["P", "R"],
+        node_ground_z=nodes_z,
+        segments_ordered=segments,
+        min_pressure=8.0,
+        downstream_residual_pressure=15.0,
+        catalog=catalog,
+        singular_loss_markup_pct=10.0,
+        fluid_temperature_c=20.0,
+        node_pk=node_pk,
+        terrain_samples=terrain_samples,
+    )
+    assert not any("terrain" in a.lower() for a in result.alerts)
+
+    node_p = next(n for n in result.nodes if n.node_id == "P")
+    node_r = next(n for n in result.nodes if n.node_id == "R")
+    # H0 a ete pousse au-dela de ce que R exigeait seul (15.0 m de residuel) pour couvrir le
+    # point haut intermediaire.
+    assert node_r.pressure_dynamic > 15.0
+
+    # La pression interpolee au point haut (pk=500, z=72) respecte tout juste min_pressure.
+    t = 500.0 / 1000.0
+    cote_500 = node_p.piezo_head + t * (node_r.piezo_head - node_p.piezo_head)
+    assert (cote_500 - 72.0) == pytest.approx(8.0)
+
+
+def test_solve_gravitaire_troncon_hydrostatic_precheck_skips_calc_when_terrain_submerges_reservoir():
+    # Le terrain (piquet a PK 5000, z=101.0) atteint deja la cote hydrostatique du reservoir amont
+    # (niveau min = 100.0) : aucun dimensionnement de conduite ne peut jamais y faire passer un
+    # ecoulement gravitaire, donc pas de reconstruction detaillee — juste l'alerte, et les noeuds
+    # explicitement remis a "non calcule" (consigne utilisateur).
+    catalog = _catalog()
+    nodes_z = {"A": 100.0, "B": 60.0}
+    segments = [SegmentSpec(id="s1", length_m=10000.0, flow_m3s=0.01, max_velocity_ms=2.0)]
+    node_pk = {"A": 0.0, "B": 10000.0}
+    terrain_samples = [(0.0, 100.0), (5000.0, 101.0), (10000.0, 60.0)]
+    result = solve_gravitaire_troncon(
+        node_ids_ordered=["A", "B"],
+        node_ground_z=nodes_z,
+        segments_ordered=segments,
+        upstream_level_max=100.5,
+        upstream_level_min=100.0,
+        min_pressure=5.0,
+        downstream_residual_pressure=10.0,
+        catalog=catalog,
+        singular_loss_markup_pct=10.0,
+        fluid_temperature_c=20.0,
+        node_pk=node_pk,
+        terrain_samples=terrain_samples,
+    )
+    assert result.segments == []
+    assert all(n.piezo_head is None and n.pressure_dynamic is None for n in result.nodes)
+    assert any("hydrostatique" in a.lower() and "5000" in a for a in result.alerts)
+
+
+def test_solve_gravitaire_troncon_hydrostatic_precheck_silent_when_profile_clears_it():
+    catalog = _catalog()
+    nodes_z = {"A": 95.0, "B": 60.0}
+    segments = [SegmentSpec(id="s1", length_m=1000.0, flow_m3s=0.001, max_velocity_ms=2.0)]
+    node_pk = {"A": 0.0, "B": 1000.0}
+    terrain_samples = [(0.0, 95.0), (500.0, 90.0), (1000.0, 60.0)]
+    result = solve_gravitaire_troncon(
+        node_ids_ordered=["A", "B"],
+        node_ground_z=nodes_z,
+        segments_ordered=segments,
+        upstream_level_max=100.5,
+        upstream_level_min=100.0,
+        min_pressure=5.0,
+        downstream_residual_pressure=10.0,
+        catalog=catalog,
+        singular_loss_markup_pct=10.0,
+        fluid_temperature_c=20.0,
+        node_pk=node_pk,
+        terrain_samples=terrain_samples,
+    )
+    assert not any("hydrostatique" in a.lower() for a in result.alerts)
+    assert len(result.segments) == 1
+
+
+def test_solve_gravitaire_troncon_hydrostatic_precheck_disabled_when_level_not_configured():
+    # upstream_level_min=None (niveau pas encore renseigne dans "Modifier le tronçon") : le
+    # pre-check doit rester desactive, meme si le terrain depasse largement 0 (comportement
+    # actuel inchange, pas de faux positif).
+    catalog = _catalog()
+    nodes_z = {"A": 100.0, "B": 60.0}
+    segments = [SegmentSpec(id="s1", length_m=10000.0, flow_m3s=0.01, max_velocity_ms=2.0)]
+    node_pk = {"A": 0.0, "B": 10000.0}
+    terrain_samples = [(0.0, 100.0), (5000.0, 101.0), (10000.0, 60.0)]
+    result = solve_gravitaire_troncon(
+        node_ids_ordered=["A", "B"],
+        node_ground_z=nodes_z,
+        segments_ordered=segments,
+        upstream_level_max=100.5,
+        upstream_level_min=None,
+        min_pressure=None,
+        downstream_residual_pressure=None,
+        catalog=catalog,
+        singular_loss_markup_pct=10.0,
+        fluid_temperature_c=20.0,
+        node_pk=node_pk,
+        terrain_samples=terrain_samples,
+    )
+    assert not any("hydrostatique" in a.lower() for a in result.alerts)
+    assert len(result.segments) == 1
+
+
+def test_solve_gravitaire_troncon_bumps_upstream_dn_to_resolve_pressure_violation():
+    # Avec le DN le moins cher (110) sur les deux segments, le noeud intermediaire M viole la
+    # pression minimale (-16.5 m obtenus pour 20.0 m requis) alors que B, plus en aval mais sur un
+    # denivele plus favorable, la respecte deja — verifie via _gravitaire_pass dans le
+    # developpement de ce test. Un DN plus gros sur le segment AMONT de M (A-M) doit resoudre le
+    # deficit (consigne utilisateur : "augmenter le diametre a l'amont du point en question").
+    catalog = _catalog()
+    nodes_z = {"A": 100.0, "M": 50.0, "B": 0.0}
+    segments = [
+        SegmentSpec(id="s1", length_m=6000.0, flow_m3s=0.008, max_velocity_ms=2.0),
+        SegmentSpec(id="s2", length_m=1000.0, flow_m3s=0.008, max_velocity_ms=2.0),
+    ]
+    result = solve_gravitaire_troncon(
+        node_ids_ordered=["A", "M", "B"],
+        node_ground_z=nodes_z,
+        segments_ordered=segments,
+        upstream_level_max=100.5,
+        upstream_level_min=100.0,
+        min_pressure=20.0,
+        downstream_residual_pressure=0.0,
+        catalog=catalog,
+        singular_loss_markup_pct=10.0,
+        fluid_temperature_c=20.0,
+    )
+    assert not any("pression insuffisante" in a.lower() for a in result.alerts)
+    node_m = next(n for n in result.nodes if n.node_id == "M")
+    assert node_m.pressure_dynamic >= 20.0 - 1e-6
+    seg_s1 = next(s for s in result.segments if s.id == "s1")
+    assert seg_s1.dn > 110  # DN le moins cher initialement choisi, avant augmentation
+
+
+def test_solve_gravitaire_troncon_pressure_violation_persists_when_no_bigger_dn_available():
+    # Meme scenario que ci-dessus, mais un catalogue limite au seul DN110 (aucun DN plus gros
+    # disponible) : la tentative d'augmentation ne peut pas aboutir, l'alerte doit persister sans
+    # boucle infinie ni exception.
+    catalog = [
+        CatalogPipe(id=1, dn=110, di_mm=99.4, material="PVC", pressure_class="PN10", pms_m=101.9, price=72.8, roughness_mm=0.01),
+    ]
+    nodes_z = {"A": 100.0, "M": 50.0, "B": 0.0}
+    segments = [
+        SegmentSpec(id="s1", length_m=6000.0, flow_m3s=0.008, max_velocity_ms=2.0),
+        SegmentSpec(id="s2", length_m=1000.0, flow_m3s=0.008, max_velocity_ms=2.0),
+    ]
+    result = solve_gravitaire_troncon(
+        node_ids_ordered=["A", "M", "B"],
+        node_ground_z=nodes_z,
+        segments_ordered=segments,
+        upstream_level_max=100.5,
+        upstream_level_min=100.0,
+        min_pressure=20.0,
+        downstream_residual_pressure=0.0,
+        catalog=catalog,
+        singular_loss_markup_pct=10.0,
+        fluid_temperature_c=20.0,
+    )
+    assert any("pression insuffisante" in a.lower() for a in result.alerts)
+    seg_s1 = next(s for s in result.segments if s.id == "s1")
+    assert seg_s1.dn == 110

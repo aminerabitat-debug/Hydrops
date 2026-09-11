@@ -3,6 +3,8 @@
 // l'API se stabilise (docs/architecture/02-arborescence-repository.md : packages/shared-types).
 
 import type {
+  CalcRunResult,
+  CalculationPreferences,
   CatalogDiameter,
   CatalogMaterial,
   CreatableNodeType,
@@ -10,6 +12,7 @@ import type {
   ImportJobStatus,
   NetworkViolation,
   Node,
+  PipeCatalogRow,
   ProjectStateResponse,
   Segment,
   TraceGeometry,
@@ -228,6 +231,20 @@ export const api = {
     return handleJson(response)
   },
 
+  async patchNodePosition(
+    sessionId: string,
+    variantId: string,
+    nodeId: string,
+    pk: number,
+  ): Promise<{ node: Node; needs_level_confirmation: boolean }> {
+    const response = await fetch(`${API_BASE}/projects/${sessionId}/variants/${variantId}/nodes/${nodeId}/position`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pk }),
+    })
+    return handleJson(response)
+  },
+
   async listTroncons(sessionId: string, variantId: string): Promise<TronconGroup[]> {
     const response = await fetch(`${API_BASE}/projects/${sessionId}/variants/${variantId}/network/troncons`)
     return handleJson(response)
@@ -251,8 +268,11 @@ export const api = {
       material?: string
       dn?: number
       pressure_class?: string
+      head_flow?: number
       upstream_water_level_max?: number
       upstream_water_level_min?: number
+      upstream_water_level_max_offset?: number
+      upstream_water_level_min_offset?: number
       min_pressure?: number
       downstream_residual_pressure?: number
       max_velocity?: number
@@ -282,6 +302,39 @@ export const api = {
     const response = await fetch(
       `${API_BASE}/catalog/diameters?material=${encodeURIComponent(material)}&pressure_class=${encodeURIComponent(pressureClass)}`,
     )
+    return handleJson(response)
+  },
+
+  async listConduites(): Promise<PipeCatalogRow[]> {
+    const response = await fetch(`${API_BASE}/catalog/conduites`)
+    return handleJson(response)
+  },
+
+  async patchConduite(rowId: number, active: boolean): Promise<PipeCatalogRow> {
+    const response = await fetch(`${API_BASE}/catalog/conduites/${rowId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ active }),
+    })
+    return handleJson(response)
+  },
+
+  async getPreferences(sessionId: string): Promise<CalculationPreferences> {
+    const response = await fetch(`${API_BASE}/projects/${sessionId}/preferences`)
+    return handleJson(response)
+  },
+
+  async putPreferences(sessionId: string, payload: CalculationPreferences): Promise<CalculationPreferences> {
+    const response = await fetch(`${API_BASE}/projects/${sessionId}/preferences`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    return handleJson(response)
+  },
+
+  async runCalculation(sessionId: string, variantId: string): Promise<CalcRunResult> {
+    const response = await fetch(`${API_BASE}/projects/${sessionId}/variants/${variantId}/calcul`, { method: 'POST' })
     return handleJson(response)
   },
 }

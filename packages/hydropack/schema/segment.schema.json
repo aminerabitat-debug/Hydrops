@@ -23,10 +23,17 @@
     "roughness": { "type": "number", "minimum": 0 },
     "flow": { "type": "number" },
     "forced": { "type": "boolean", "default": false },
+    "head_flow": { "type": ["number", "null"], "description": "Debit de tete (m3/h) — saisi au niveau du troncon, quel que soit son regime" },
     "upstream_water_level_max": { "type": ["number", "null"], "description": "Niveau du plan d'eau amont max (m) — troncon gravitaire" },
     "upstream_water_level_min": { "type": ["number", "null"], "description": "Niveau du plan d'eau amont min (m) — troncon gravitaire" },
+    "upstream_water_level_max_offset": { "type": ["number", "null"], "description": "Non-null si la cote max a ete saisie en relatif (+N m au-dessus du terrain) — permet de la recalculer si le noeud de depart est deplace" },
+    "upstream_water_level_min_offset": { "type": ["number", "null"], "description": "Non-null si la cote min a ete saisie en relatif (+N m au-dessus du terrain)" },
     "min_pressure": { "type": ["number", "null"], "description": "Pression min (m) — troncon gravitaire" },
     "downstream_residual_pressure": { "type": ["number", "null"], "description": "Pression residuelle aval (m) — gravitaire et refoulement" },
-    "max_velocity": { "type": ["number", "null"], "description": "Vitesse max (m/s) — gravitaire et refoulement" }
+    "max_velocity": { "type": ["number", "null"], "description": "Vitesse max (m/s) — gravitaire et refoulement" },
+    "velocity": { "type": ["number", "null"], "description": "Vitesse calculee (m/s) — sortie du calcul hydraulique" },
+    "head_loss_unit": { "type": ["number", "null"], "description": "Perte de charge lineaire unitaire J (m/m) — Darcy-Weisbach/Colebrook-White" },
+    "head_loss_segment": { "type": ["number", "null"], "description": "Perte de charge totale du segment, majoration singulieres incluse (m)" },
+    "head_loss_cumulative": { "type": ["number", "null"], "description": "Perte de charge cumulee depuis le debut du troncon calcule (m)" }
   }
 }

@@ -66,7 +66,9 @@ class PatchTraceRequest(BaseModel):
 # Types de noeud creables depuis l'UI a ce stade (Lot 3 etape 1b) — high_point/low_point/
 # sectioning_valve/control_valve/intake restent exclus (consigne utilisateur : pas de creation de
 # points hauts/bas ni de vannes pour l'instant).
-CreatableNodeType = Literal["junction", "tie_in", "reservoir", "pumping_station", "pressure_break", "treatment_plant"]
+CreatableNodeType = Literal[
+    "junction", "tie_in", "storage_reservoir", "surge_reservoir", "pumping_station", "pressure_break", "treatment_plant"
+]
 
 
 class NewNodeRequest(BaseModel):
@@ -99,8 +101,53 @@ class PatchSegmentRequest(BaseModel):
     material: Optional[str] = None
     dn: Optional[int] = None
     pressure_class: Optional[str] = None
+    head_flow: Optional[float] = None
     upstream_water_level_max: Optional[float] = None
     upstream_water_level_min: Optional[float] = None
+    # Non-null = la cote correspondante a ete saisie en relatif ("+N", cf. TronconDialog
+    # resolveLevelInput) : valeur = N, mCE au-dessus du terrain du noeud de depart au moment de la
+    # saisie. Permet de recalculer automatiquement la cote si ce noeud est deplace plus tard
+    # (consigne utilisateur, cf. PATCH .../nodes/{id}/position) — une cote absolue (offset null)
+    # n'est jamais recalculee automatiquement.
+    upstream_water_level_max_offset: Optional[float] = None
+    upstream_water_level_min_offset: Optional[float] = None
     min_pressure: Optional[float] = None
     downstream_residual_pressure: Optional[float] = None
     max_velocity: Optional[float] = None
+
+
+class PatchNodePositionRequest(BaseModel):
+    """Deplace un noeud existant le long de sa trace (consigne utilisateur : proposer de decaler
+    le reservoir sur une alerte de terrain incompatible) — refuse sur une extremite structurelle
+    ou un pk qui ne reste pas strictement entre ses voisins immediats, cf. patch_node_position."""
+
+    pk: float
+
+
+class PatchCatalogRowRequest(BaseModel):
+    """Case "Actif" de la fenêtre Conduites (menu Base de données) — décocher exclut la ligne des
+    recherches du moteur de calcul sans la supprimer (certains DN ne sont pas toujours standards
+    selon les cas, consigne utilisateur)."""
+
+    active: bool
+
+
+class MaterialCriterionRuleRequest(BaseModel):
+    dn_min: Optional[int] = None
+    dn_max: Optional[int] = None
+    fluid: Optional[str] = None
+    materials: list[str] = []
+
+
+class CalculationPreferencesRequest(BaseModel):
+    """Fenêtre Préférences (menu Calcul, consigne utilisateur) : rugosité par matériau, hypothèses
+    de calcul des pertes de charge — remplacement complet (même convention que "Paramètres du
+    projet" : le formulaire soumet toujours l'état complet, pas un patch champ-par-champ)."""
+
+    roughness_by_material: dict[str, float] = {}
+    fluid_temperature_c: float = 20.0
+    singular_loss_markup_pct: float = 10.0
+    material_criteria: list[MaterialCriterionRuleRequest] = []
+    default_min_pressure: Optional[float] = None
+    default_downstream_residual_pressure: Optional[float] = None
+    default_max_velocity: Optional[float] = None

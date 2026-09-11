@@ -1,0 +1,271 @@
+import pytest
+
+
+def _default_variant_id(project_state) -> str:
+    return project_state["variants"][0]["id"]
+
+
+def _import_sample(client, session_id, project_state, sample_kml_bytes, import_trace):
+    variant_id = _default_variant_id(project_state)
+    trace = import_trace(session_id, "sample_trace.kml", sample_kml_bytes, "application/vnd.google-earth.kml+xml")
+    return variant_id, trace
+
+
+def test_calcul_rejected_when_troncon_not_validated(client, session_id, project_state, sample_kml_bytes, import_trace):
+    variant_id, trace = _import_sample(client, session_id, project_state, sample_kml_bytes, import_trace)
+    response = client.post(f"/api/v1/projects/{session_id}/variants/{variant_id}/calcul")
+    assert response.status_code == 409
+    assert "tronçon" in response.json()["detail"].lower() or "troncon" in response.json()["detail"].lower()
+
+
+def test_calcul_rejected_when_regime_indetermine_even_if_forced(
+    client, session_id, project_state, sample_kml_bytes, import_trace
+):
+    variant_id, trace = _import_sample(client, session_id, project_state, sample_kml_bytes, import_trace)
+    segments = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments").json()
+    segment_id = segments[0]["id"]
+    client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/segments/{segment_id}",
+        json={"upstream_water_level_max": 200.0, "upstream_water_level_min": 195.0, "max_velocity": 2.0},
+    )
+    # Aucun des deux noeuds n'a ete affecte a un ouvrage reel -> regime reste indetermine malgre
+    # "forced" (consigne utilisateur : les deux conditions sont requises).
+    response = client.post(f"/api/v1/projects/{session_id}/variants/{variant_id}/calcul")
+    assert response.status_code == 409
+
+
+def test_calcul_gravitaire_happy_path_sizes_segment_and_writes_results(
+    client, session_id, project_state, sample_kml_bytes, import_trace
+):
+    variant_id, trace = _import_sample(client, session_id, project_state, sample_kml_bytes, import_trace)
+    nodes = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes").json()
+    upstream_id, downstream_id = nodes[0]["id"], nodes[1]["id"]
+
+    client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes/{upstream_id}",
+        json={"type": "storage_reservoir", "name": "Res1", "data": {"fluid": "Eau potable"}},
+    )
+    client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes/{downstream_id}",
+        json={"type": "pressure_break", "name": "BC1"},
+    )
+
+    max_z = max(n["z"] for n in nodes)
+    segments = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments").json()
+    segment_id = segments[0]["id"]
+    patch_response = client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/segments/{segment_id}",
+        json={
+            "head_flow": 100.0,
+            "upstream_water_level_max": max_z + 60.0,
+            "upstream_water_level_min": max_z + 55.0,
+            "min_pressure": 5.0,
+            "downstream_residual_pressure": 5.0,
+            "max_velocity": 2.0,
+        },
+    )
+    assert patch_response.status_code == 200, patch_response.text
+
+    response = client.post(f"/api/v1/projects/{session_id}/variants/{variant_id}/calcul")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "calculated"
+    assert body["segments_updated"] == 1
+    assert body["nodes_updated"] == 2
+
+    updated_segments = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments").json()
+    seg = updated_segments[0]
+    # Le debit de tete (100 m3/h, sans piquage sur ce troncon) doit se retrouver tel quel sur le
+    # segment, et produire une vitesse/perte de charge non nulles (contrairement au cas Q=0).
+    assert seg["flow"] == pytest.approx(100.0)
+    assert seg["velocity"] is not None and 0 < seg["velocity"] <= 2.0 + 1e-6
+    assert seg["head_loss_unit"] is not None and seg["head_loss_unit"] > 0
+    assert seg["head_loss_segment"] is not None and seg["head_loss_segment"] > 0
+    assert seg["head_loss_cumulative"] == seg["head_loss_segment"]
+
+    updated_nodes = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes").json()
+    downstream_node = next(n for n in updated_nodes if n["id"] == downstream_id)
+    assert downstream_node["pressure_dynamic"] is not None
+    assert downstream_node["pressure_dynamic"] >= 5.0 - 1e-6
+    assert downstream_node["pressure_static_max"] is not None
+    assert downstream_node["pressure_static_min"] is not None
+
+    variant = client.get(f"/api/v1/projects/{session_id}").json()["variants"][0]
+    assert variant["status"] == "calculated"
+
+    # Toute modification des donnees du troncon doit invalider (remettre a None) les resultats du
+    # calcul precedent — consigne utilisateur : les colonnes "depuis Debit vers la droite" du
+    # profil Data ne doivent jamais rester prereplies avec un resultat perime.
+    repatch = client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/segments/{segment_id}",
+        json={"max_velocity": 1.5},
+    )
+    assert repatch.status_code == 200, repatch.text
+    reset_seg = repatch.json()
+    assert reset_seg.get("velocity") is None
+    assert reset_seg.get("head_loss_unit") is None
+    assert reset_seg.get("head_loss_segment") is None
+    assert reset_seg.get("head_loss_cumulative") is None
+    assert reset_seg["flow"] == 0.0
+
+    nodes_after_repatch = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes").json()
+    downstream_after = next(n for n in nodes_after_repatch if n["id"] == downstream_id)
+    assert downstream_after.get("piezo_head") is None
+    assert downstream_after.get("pressure_dynamic") is None
+    assert downstream_after.get("pressure_static_max") is None
+    assert downstream_after.get("pressure_static_min") is None
+
+    # Le materiau/DN aussi doivent revenir au catalogue par defaut (pas rester sur le
+    # dimensionnement du calcul precedent) — consigne utilisateur : une edition pure des
+    # parametres hydrauliques (pas de materiau/dn/classe dans ce payload) invalide le
+    # dimensionnement affiche, il ne doit pas persister silencieusement.
+    default_material, default_dn = reset_seg["material"], reset_seg["dn"]
+    assert (default_material, default_dn) != (seg["material"], seg["dn"])
+
+
+def test_patch_segment_manual_pipe_correction_is_not_reset_to_default(
+    client, session_id, project_state, sample_kml_bytes, import_trace
+):
+    # A l'inverse : un payload qui fournit explicitement material/dn/pressure_class est une
+    # correction manuelle intentionnelle (depuis le profil Data) — elle doit etre appliquee telle
+    # quelle, pas ecrasee par le catalogue par defaut.
+    variant_id, trace = _import_sample(client, session_id, project_state, sample_kml_bytes, import_trace)
+    segments = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments").json()
+    segment_id = segments[0]["id"]
+    default = segments[0]
+    other_dn = next(d for d in [110, 160, 200] if d != default["dn"]) if default["dn"] in [110, 160, 200] else 160
+
+    response = client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/segments/{segment_id}",
+        json={"material": default["material"], "dn": other_dn, "pressure_class": default["pressure_class"]},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["dn"] == other_dn
+
+
+def test_calcul_gravitaire_hydrostatic_alert_clears_segment_and_nodes_but_keeps_forced(
+    client, session_id, project_state, sample_kml_bytes, import_trace
+):
+    # Consigne utilisateur : un troncon dont le calcul produit une alerte n'a "pas abouti sans
+    # erreur" — aucune donnee de dimensionnement/pression periee ne doit rester affichee, mais les
+    # parametres hydrauliques SAISIS (donc `forced`) restent valides pour un nouvel essai.
+    variant_id, trace = _import_sample(client, session_id, project_state, sample_kml_bytes, import_trace)
+    nodes = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes").json()
+    upstream_id, downstream_id = nodes[0]["id"], nodes[1]["id"]
+
+    client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes/{upstream_id}",
+        json={"type": "storage_reservoir", "name": "Res1", "data": {"fluid": "Eau potable"}},
+    )
+    client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes/{downstream_id}",
+        json={"type": "pressure_break", "name": "BC1"},
+    )
+
+    trace_detail = client.get(f"/api/v1/projects/{session_id}/traces/{trace['id']}").json()
+    raw_profile = trace_detail["elevation_profile"]["raw"]
+    min_z = min(p["z"] for p in raw_profile)
+    max_z = max(p["z"] for p in raw_profile)
+    assert max_z > min_z, "profil de test plat — impossible de forcer l'alerte hydrostatique"
+    # Niveau du reservoir a peine au-dessus du terrain le plus bas -> une partie du profil (le
+    # point le plus haut) depasse forcement cette cote.
+    hydrostatic_level = min_z + 0.01
+
+    segments = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments").json()
+    segment_id = segments[0]["id"]
+    client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/segments/{segment_id}",
+        json={
+            "head_flow": 100.0,
+            "upstream_water_level_max": hydrostatic_level + 0.5,
+            "upstream_water_level_min": hydrostatic_level,
+            "min_pressure": 5.0,
+            "downstream_residual_pressure": 5.0,
+            "max_velocity": 2.0,
+        },
+    )
+
+    response = client.post(f"/api/v1/projects/{session_id}/variants/{variant_id}/calcul")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["segments_updated"] == 0
+    assert body["nodes_updated"] == 0
+    assert any("hydrostatique" in a.lower() for a in body["alerts"])
+    # Le reservoir est a l'extremite structurelle de la trace (pk 0) — rien de sense a deplacer,
+    # aucune suggestion ne doit etre proposee.
+    assert body["reposition_suggestions"] == []
+
+
+def test_calcul_gravitaire_hydrostatic_alert_suggests_reposition_for_non_structural_reservoir(
+    client, session_id, project_state, sample_kml_bytes, import_trace
+):
+    # Le reservoir est un noeud INTERIEUR (pas a l'extremite de la trace) — deplacable, une
+    # suggestion de repositionnement doit apparaitre (consigne utilisateur : proposer de decaler
+    # l'ouvrage plutot que seulement alerter). Le profil DEM synthetique de test (voir
+    # services/dem.py:SyntheticDemProvider) decroit ~lineairement sur cette courte trace : un
+    # troncon [0 -> pk 50] trivial (niveau tres largement suffisant) mene a un 2e troncon
+    # [pk 50 -> fin] dont la cote (-7.70 m, verifiee ci-dessous) est depassee par le terrain entre
+    # les PK 60 et 100 avant de repasser dessous plus loin — repositionnable.
+    variant_id, trace = _import_sample(client, session_id, project_state, sample_kml_bytes, import_trace)
+    nodes = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes").json()
+    start_id = next(n["id"] for n in nodes if n["pk"] == 0.0)
+    # Transparent (piquage) plutot que jonction simple : un regime determine est requis sur TOUS
+    # les troncons pour lancer le calcul, y compris ce court troncon [0 -> 50] sans interet propre.
+    client.patch(f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes/{start_id}", json={"type": "tie_in", "name": ""})
+
+    reservoir = client.post(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes",
+        json={"trace_id": trace["id"], "pk": 50.0, "type": "pressure_break", "name": "BC1"},
+    ).json()
+    downstream_id = next(
+        n["id"] for n in client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes").json() if n["pk"] == trace["length"]
+    )
+    client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes/{downstream_id}",
+        json={"type": "pressure_break", "name": "BC2"},
+    )
+
+    segments = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments").json()
+    seg1_id = next(s["id"] for s in segments if s["upstream_node_id"] == start_id)
+    seg2_id = next(s["id"] for s in segments if s["upstream_node_id"] == reservoir["id"])
+    client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/segments/{seg1_id}",
+        json={
+            "head_flow": 10.0, "upstream_water_level_max": 200.0, "upstream_water_level_min": 195.0,
+            "min_pressure": 1.0, "downstream_residual_pressure": 1.0, "max_velocity": 2.0,
+        },
+    )
+    hydrostatic_level = -7.70
+    client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/segments/{seg2_id}",
+        json={
+            "head_flow": 100.0,
+            "upstream_water_level_max": hydrostatic_level + 0.5,
+            "upstream_water_level_min": hydrostatic_level,
+            "min_pressure": 5.0,
+            "downstream_residual_pressure": 5.0,
+            "max_velocity": 2.0,
+        },
+    )
+
+    response = client.post(f"/api/v1/projects/{session_id}/variants/{variant_id}/calcul")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert any("hydrostatique" in a.lower() for a in body["alerts"])
+    assert len(body["reposition_suggestions"]) == 1
+    suggestion = body["reposition_suggestions"][0]
+    assert suggestion["node_id"] == reservoir["id"]
+    assert suggestion["current_pk"] == pytest.approx(50.0)
+    assert suggestion["candidate_pk"] != suggestion["current_pk"]
+
+    # Le pk candidat doit effectivement resoudre l'alerte HYDROSTATIQUE (pas forcement toute
+    # alerte : le niveau -7.70 m ne laisse quasiment aucune marge de pression, d'autres alertes de
+    # pression insuffisante peuvent legitimement subsister — seul le probleme hydrostatique
+    # cible par la suggestion doit disparaitre).
+    move_response = client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes/{reservoir['id']}/position",
+        json={"pk": suggestion["candidate_pk"]},
+    )
+    assert move_response.status_code == 200, move_response.text
+    recalc = client.post(f"/api/v1/projects/{session_id}/variants/{variant_id}/calcul").json()
+    assert not any("hydrostatique" in a.lower() for a in recalc["alerts"])

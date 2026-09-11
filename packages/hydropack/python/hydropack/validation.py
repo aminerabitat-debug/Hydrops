@@ -20,6 +20,7 @@ _SCHEMA_FILES = {
     "metadata": "metadata.schema.json",
     "project": "project.schema.json",
     "techno_economic": "techno_economic.schema.json",
+    "calculation_preferences": "calculation_preferences.schema.json",
     "trace_geometry": "trace_geometry.schema.json",
     "variant": "variant.schema.json",
     "node": "node.schema.json",

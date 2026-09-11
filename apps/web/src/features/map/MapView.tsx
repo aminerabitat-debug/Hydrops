@@ -8,7 +8,7 @@ import maplibregl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { useEffect, useRef, useState } from 'react'
 
-import { coordinatesForPkRange } from '../../shared/geo'
+import { buildVertices, coordinatesForPkRange, nearestPkForPoint } from '../../shared/geo'
 import { isPlaceholderNode, nodeColor, nodeDisplayLabel, nodeInitials } from '../../shared/nodeLabels'
 import { useAppStore } from '../../state/store'
 import type { TraceGeometry } from '../../shared/types'
@@ -69,6 +69,10 @@ export function MapView() {
   const nodeMarkersRef = useRef<Map<string, maplibregl.Marker>>(new Map())
   const tileFailureCountRef = useRef(0)
   const [usingFallbackBasemap, setUsingFallbackBasemap] = useState(false)
+  // Petit bouton d'information (consigne utilisateur) : affiche l'ID et le PK du piquet survole
+  // sur la carte — desactive par defaut pour ne pas alourdir la carte en usage courant.
+  const [infoMode, setInfoMode] = useState(false)
+  const [hoverInfo, setHoverInfo] = useState<{ x: number; y: number; text: string } | null>(null)
 
   const traces = useAppStore((s) => s.traces)
   const nodes = useAppStore((s) => s.nodes)
@@ -236,6 +240,32 @@ export function MapView() {
 
   useEffect(() => {
     const map = mapRef.current
+    if (!map || !infoMode) {
+      setHoverInfo(null)
+      return
+    }
+
+    const handleMove = (event: maplibregl.MapLayerMouseEvent) => {
+      const feature = event.features?.[0]
+      const traceId = feature?.properties?.id as string | undefined
+      const trace = traces.find((t) => t.id === traceId)
+      if (!trace) return
+      const vertices = buildVertices(trace.geometry.coordinates as [number, number][])
+      const pk = nearestPkForPoint(vertices, event.lngLat.lng, event.lngLat.lat)
+      setHoverInfo({ x: event.point.x, y: event.point.y, text: `PK ${Math.round(pk)} m` })
+    }
+    const handleLeave = () => setHoverInfo(null)
+
+    map.on('mousemove', 'traces-line', handleMove)
+    map.on('mouseleave', 'traces-line', handleLeave)
+    return () => {
+      map.off('mousemove', 'traces-line', handleMove)
+      map.off('mouseleave', 'traces-line', handleLeave)
+    }
+  }, [infoMode, traces])
+
+  useEffect(() => {
+    const map = mapRef.current
     if (!map) return
 
     // Marqueurs de noeuds — un maplibregl.Marker HTML par noeud (pas une couche GL circle+symbol)
@@ -263,7 +293,9 @@ export function MapView() {
       const el = marker.getElement()
       el.style.backgroundColor = nodeColor(node)
       el.textContent = nodeInitials(node)
-      el.title = nodeDisplayLabel(node)
+      el.title = infoMode
+        ? `${nodeDisplayLabel(node)} · id ${node.id} · PK ${Math.round(node.pk)} m`
+        : nodeDisplayLabel(node)
     }
 
     for (const [id, marker] of markers) {
@@ -272,7 +304,7 @@ export function MapView() {
         markers.delete(id)
       }
     }
-  }, [nodes])
+  }, [nodes, infoMode])
 
   useEffect(() => {
     const map = mapRef.current
@@ -292,5 +324,23 @@ export function MapView() {
     }
   }, [hoveredPk, traces, selectedTraceId])
 
-  return <div ref={containerRef} className="map-view" />
+  return (
+    <div className="map-view-wrap">
+      <div ref={containerRef} className="map-view" />
+      <button
+        type="button"
+        className={`map-info-toggle ${infoMode ? 'active' : ''}`}
+        onClick={() => setInfoMode((v) => !v)}
+        title="Afficher l'ID et le PK du piquet survolé"
+        aria-label="Afficher l'ID et le PK du piquet survolé"
+      >
+        PK ?
+      </button>
+      {hoverInfo && (
+        <div className="map-hover-tooltip" style={{ left: hoverInfo.x + 12, top: hoverInfo.y + 12 }}>
+          {hoverInfo.text}
+        </div>
+      )}
+    </div>
+  )
 }

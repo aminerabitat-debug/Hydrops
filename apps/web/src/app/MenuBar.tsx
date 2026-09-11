@@ -1,6 +1,6 @@
 // Barre de menus (cdc §4) : Fichier, Variante, Calcul, Base de donnees, Affichage, Langue, Aide.
-// Calcul/Base de donnees/Langue restent des entrees non fonctionnelles a ce stade (Lot 3/Lot 7,
-// cf. cdc §21) — affichees pour la structure attendue, jamais presentees comme actives.
+// Calcul (Calculer/Preferences) et Base de donnees (Conduites) sont actives depuis l'ajout du
+// moteur de calcul hydraulique (consigne utilisateur) — Langue reste non fonctionnelle (Lot 7).
 
 import { MenuDropdown } from './MenuDropdown'
 import type { LayoutMode } from './Workspace'
@@ -17,6 +17,9 @@ interface MenuBarProps {
   layoutMode: LayoutMode
   onLayoutModeChange: (mode: LayoutMode) => void
   onAbout: () => void
+  onRunCalcul: () => void
+  onOpenPreferences: () => void
+  onOpenConduites: () => void
 }
 
 export function MenuBar({
@@ -31,6 +34,9 @@ export function MenuBar({
   layoutMode,
   onLayoutModeChange,
   onAbout,
+  onRunCalcul,
+  onOpenPreferences,
+  onOpenConduites,
 }: MenuBarProps) {
   return (
     <header className="menu-bar">
@@ -50,8 +56,17 @@ export function MenuBar({
           { label: 'Supprimer', onClick: onDeleteVariant, disabled: !variantSelected },
         ]}
       />
-      <MenuDropdown label="Calcul" items={[]} hint="Disponible au Lot 3 (moteur hydraulique)" disabled />
-      <MenuDropdown label="Base de données" items={[]} hint="Disponible au Lot 3 (bibliothèques)" disabled />
+      <MenuDropdown
+        label="Calcul"
+        items={[
+          { label: 'Calculer', onClick: onRunCalcul, disabled: !variantSelected },
+          { label: 'Préférences', onClick: onOpenPreferences, disabled: !projectOpen },
+        ]}
+      />
+      <MenuDropdown
+        label="Base de données"
+        items={[{ label: 'Conduites', onClick: onOpenConduites }]}
+      />
       <MenuDropdown
         label="Affichage"
         items={[

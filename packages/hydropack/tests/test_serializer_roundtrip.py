@@ -165,6 +165,38 @@ def test_unpack_rejects_schema_violation(sample_metadata, sample_project, sample
         unpack(buffer.getvalue())
 
 
+def test_unpack_maps_legacy_reservoir_type_to_storage_reservoir(
+    sample_metadata, sample_project, sample_techno_economic, sample_trace
+):
+    # Alias de lecture (consigne utilisateur) : un .hydrops exporte avant la scission
+    # Reservoir de stockage / Reservoir de mise en charge portait "reservoir" comme type de noeud —
+    # doit rester lisible, mappe vers "storage_reservoir".
+    import json
+    import zipfile
+    from io import BytesIO
+
+    variant_id = uuid.uuid4()
+    nodes, segments = _build_sample_nodes_and_segments(sample_trace, variant_id)
+    pkg, _ = _build_package(sample_metadata, sample_project, sample_techno_economic, sample_trace, nodes, segments)
+    pkg.variants = {str(variant_id): Variant(id=variant_id, project_id=sample_project.id, name="Variante 1")}
+    data = pack(pkg)
+
+    with zipfile.ZipFile(BytesIO(data)) as zf:
+        contents = {n: zf.read(n) for n in zf.namelist()}
+    nodes_key = next(n for n in contents if n.endswith("/nodes.json"))
+    nodes_list = json.loads(contents[nodes_key])
+    nodes_list[0]["type"] = "reservoir"
+    contents[nodes_key] = json.dumps(nodes_list).encode("utf-8")
+
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w") as zf:
+        for name, content in contents.items():
+            zf.writestr(name, content)
+
+    restored = unpack(buffer.getvalue())
+    assert restored.nodes[str(nodes[0].id)].type == "storage_reservoir"
+
+
 def test_validate_helper_rejects_wrong_type():
     with pytest.raises(HydropackValidationError):
         validate("metadata", {"format_version": 1.0})

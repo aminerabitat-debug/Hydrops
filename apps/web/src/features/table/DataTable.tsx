@@ -38,14 +38,64 @@ interface Row {
 
 const TOPO_COLUMNS = ['N° Piquet', 'Type', 'Distance partielle (m)', 'PK cumulé (m)', 'X', 'Y', 'Z (m)']
 const PIPE_COLUMNS = ['Matériau', 'DN', 'Classe', 'DI (mm)', 'Rugosité (mm)']
+// Sorties du bouton Calcul > Calculer (consigne utilisateur) : rappel du debit, vitesse, PDC
+// unitaire/lineaire/totale, puis les lignes piezometrique et hydrostatique (si applicable) pour
+// chaque piquet du troncon selectionne — '—' tant qu'aucun calcul n'a ete lance pour ce segment/
+// noeud (cf. Segment.velocity/Node.piezo_head, null jusqu'au premier calcul) : ces colonnes ne
+// sont JAMAIS prereplies d'une valeur par defaut, et sont explicitement reinitialisees des que les
+// donnees du troncon changent (cf. routers/network.py:_reset_node_calc_fields).
+const HYDRAULIC_COLUMNS = [
+  'Débit (m³/h)', 'Vitesse (m/s)', 'PDC unitaire (m/km)', 'PDC linéaire (m)', 'PDC totale (m)',
+  'Cote piézo (m)', 'Pression dyn. (m)', 'Pression hydro. max (m)', 'Pression hydro. min (m)',
+]
 const ACTION_COLUMN = ''
 
 const DEFAULT_COLUMN_WIDTHS: Record<string, number> = {
   'N° Piquet': 80, Type: 120, 'Distance partielle (m)': 150, 'PK cumulé (m)': 120,
   X: 110, Y: 110, 'Z (m)': 90,
   Matériau: 140, DN: 70, Classe: 80, 'DI (mm)': 80, 'Rugosité (mm)': 100,
+  'Débit (m³/h)': 110, 'Vitesse (m/s)': 100, 'PDC unitaire (m/km)': 130, 'PDC linéaire (m)': 120,
+  'PDC totale (m)': 110, 'Cote piézo (m)': 110, 'Pression dyn. (m)': 120,
+  'Pression hydro. max (m)': 140, 'Pression hydro. min (m)': 140,
   '': 60,
 }
+
+function formatOrDash(value: number | null | undefined, digits = 2): string {
+  return value == null ? '—' : value.toFixed(digits)
+}
+
+// Cote (piezometrique ou hydrostatique) au piquet `pk`, interpolee lineairement entre les deux
+// noeuds reels qui bornent son segment — la perte de charge est constante le long d'un segment (DN/
+// materiau fixes), donc la cote y varie bien lineairement avec la distance (consigne utilisateur :
+// ces colonnes doivent etre calculees pour CHAQUE piquet, pas seulement aux noeuds).
+function interpolateNodeField(
+  pk: number,
+  segment: Segment,
+  nodesById: Map<string, Node>,
+  field: 'piezo_head' | 'pressure_dynamic' | 'pressure_static_max' | 'pressure_static_min',
+): number | null {
+  const a = nodesById.get(segment.upstream_node_id)?.[field]
+  const b = nodesById.get(segment.downstream_node_id)?.[field]
+  if (a == null || b == null) return null
+  const span = segment.pk_end - segment.pk_start
+  if (span <= 1e-9) return a
+  const t = (pk - segment.pk_start) / span
+  return a + t * (b - a)
+}
+
+interface HydraulicValues {
+  calculated: boolean
+  flow: number | null
+  velocity: number | null
+  pdcUnitKm: number | null
+  pdcLineaire: number | null
+  pdcTotale: number | null
+  piezo: number | null
+  pressureDyn: number | null
+  pressureStaticMax: number | null
+  pressureStaticMin: number | null
+}
+
 const MIN_COLUMN_WIDTH = 36
 
 interface DataTableProps {
@@ -78,7 +128,10 @@ export function DataTable({ onAddNode, onEditNode, onAssignNode, onDeleteNode, a
   const profile = trace?.elevation_profile
 
   const columns = useMemo(
-    () => (tableScope.kind === 'troncon' ? [...TOPO_COLUMNS, ...PIPE_COLUMNS, ACTION_COLUMN] : [...TOPO_COLUMNS, ACTION_COLUMN]),
+    () =>
+      tableScope.kind === 'troncon'
+        ? [...TOPO_COLUMNS, ...PIPE_COLUMNS, ...HYDRAULIC_COLUMNS, ACTION_COLUMN]
+        : [...TOPO_COLUMNS, ACTION_COLUMN],
     [tableScope.kind],
   )
 
@@ -133,6 +186,45 @@ export function DataTable({ onAddNode, onEditNode, onAssignNode, onDeleteNode, a
 
   const segmentAtPk = (pk: number): Segment | null => segments.find((s) => s.pk_start - 1e-6 <= pk && pk <= s.pk_end + 1e-6) ?? null
 
+  const nodesById = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes])
+
+  // PDC lineaire (consigne utilisateur) = perte du SEGMENT repartie au prorata de la distance
+  // partielle du piquet (pas la perte totale du segment recopiee sur chaque ligne) ; PDC totale =
+  // cumul de cette valeur depuis le debut du troncon affiche (toujours le pk_start du troncon,
+  // cf. ProjectTree:handleSelectTroncon). Cote piezo/pressions interpolees par piquet (ci-dessus).
+  const hydraulicRows = useMemo<HydraulicValues[]>(() => {
+    if (tableScope.kind !== 'troncon') return []
+    let cumulative = 0
+    return rows.map((row) => {
+      const segment = segmentAtPk(row.pk)
+      if (!segment) {
+        return {
+          calculated: false,
+          flow: null, velocity: null, pdcUnitKm: null, pdcLineaire: null, pdcTotale: null,
+          piezo: null, pressureDyn: null, pressureStaticMax: null, pressureStaticMin: null,
+        }
+      }
+      const calculated = segment.velocity != null
+      const pdcUnitKm = segment.head_loss_unit != null ? segment.head_loss_unit * 1000 : null
+      const rate = segment.length > 1e-9 && segment.head_loss_segment != null ? segment.head_loss_segment / segment.length : null
+      const pdcLineaire = rate != null ? rate * row.partialDistance : null
+      if (pdcLineaire != null) cumulative += pdcLineaire
+      return {
+        calculated,
+        flow: calculated ? segment.flow : null,
+        velocity: segment.velocity ?? null,
+        pdcUnitKm,
+        pdcLineaire,
+        pdcTotale: pdcLineaire != null ? cumulative : null,
+        piezo: interpolateNodeField(row.pk, segment, nodesById, 'piezo_head'),
+        pressureDyn: interpolateNodeField(row.pk, segment, nodesById, 'pressure_dynamic'),
+        pressureStaticMax: interpolateNodeField(row.pk, segment, nodesById, 'pressure_static_max'),
+        pressureStaticMin: interpolateNodeField(row.pk, segment, nodesById, 'pressure_static_min'),
+      }
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows, segments, nodesById, tableScope.kind])
+
   const handleResizeMove = (event: PointerEvent) => {
     const resizing = resizingRef.current
     if (!resizing) return
@@ -180,9 +272,15 @@ export function DataTable({ onAddNode, onEditNode, onAssignNode, onDeleteNode, a
           </tr>
         </thead>
         <tbody>
-          {rows.map((row) => {
+          {rows.map((row, rowIndex) => {
             const segment = tableScope.kind === 'troncon' ? segmentAtPk(row.pk) : null
-            const materialLabel = segment ? materials.find((m) => m.material === segment.material)?.label ?? segment.material : '—'
+            const hydraulics = hydraulicRows[rowIndex]
+            // Materiau/DN/Classe/DI/Rugosite ne doivent etre affiches QUE si le calcul a abouti
+            // pour ce segment (consigne utilisateur) — sinon le catalogue par defaut (jamais
+            // "vide") donnerait l'impression trompeuse d'un dimensionnement valide.
+            const pipeCalculated = hydraulics?.calculated ?? false
+            const materialLabel =
+              segment && pipeCalculated ? materials.find((m) => m.material === segment.material)?.label ?? segment.material : '—'
             // Un placeholder d'extremite pas encore affectee (noeud "junction") se comporte comme un
             // piquet vide : pas de Type affiche, icone "+" plutot que crayon/corbeille, et
             // participe au clic-de-ligne du mode "+ Nœud" — consigne utilisateur.
@@ -214,10 +312,19 @@ export function DataTable({ onAddNode, onEditNode, onAssignNode, onDeleteNode, a
                 {tableScope.kind === 'troncon' && (
                   <>
                     <td>{materialLabel}</td>
-                    <td>{segment ? segment.dn : '—'}</td>
-                    <td>{segment ? segment.pressure_class.toUpperCase() : '—'}</td>
-                    <td>{segment ? segment.di.toFixed(1) : '—'}</td>
-                    <td>{segment ? segment.roughness.toFixed(3) : '—'}</td>
+                    <td>{segment && pipeCalculated ? segment.dn : '—'}</td>
+                    <td>{segment && pipeCalculated ? segment.pressure_class.toUpperCase() : '—'}</td>
+                    <td>{segment && pipeCalculated ? segment.di.toFixed(1) : '—'}</td>
+                    <td>{segment && pipeCalculated ? segment.roughness.toFixed(3) : '—'}</td>
+                    <td>{formatOrDash(hydraulics?.flow, 1)}</td>
+                    <td>{formatOrDash(hydraulics?.velocity, 2)}</td>
+                    <td>{formatOrDash(hydraulics?.pdcUnitKm, 2)}</td>
+                    <td>{formatOrDash(hydraulics?.pdcLineaire, 3)}</td>
+                    <td>{formatOrDash(hydraulics?.pdcTotale, 3)}</td>
+                    <td>{formatOrDash(hydraulics?.piezo, 2)}</td>
+                    <td>{formatOrDash(hydraulics?.pressureDyn, 2)}</td>
+                    <td>{formatOrDash(hydraulics?.pressureStaticMax, 2)}</td>
+                    <td>{formatOrDash(hydraulics?.pressureStaticMin, 2)}</td>
                   </>
                 )}
                 <td className="data-table-actions">

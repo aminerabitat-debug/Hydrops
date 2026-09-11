@@ -4,6 +4,7 @@
 // structure a deux niveaux type -> filieres) liste ses champs ici. Stocke tel quel dans
 // Node.data (JSON libre cote backend, cf. hydropack.models.Node), sans validation par champ.
 
+import { isPlaceholderNode } from './nodeLabels'
 import type { CreatableNodeType, Node } from './types'
 
 export const FLUIDE_OPTIONS = [
@@ -35,10 +36,15 @@ const PUMPING_STATION_FIELDS: OuvrageFieldSpec[] = [
     showIf: (d) => d.installation_type === 'En cale sèche',
   },
   { key: 'fluid', label: 'Fluide', kind: 'select', options: FLUIDE_OPTIONS },
-  { key: 'flow', label: 'Débit', kind: 'number', unit: 'm³/h' },
   { key: 'suction_pressure', label: "Pression à l'aspiration", kind: 'number', unit: 'm' },
   { key: 'head_losses', label: 'Pertes de charge dans la station', kind: 'number', unit: 'm' },
 ]
+
+// Débit + autonomie plutôt qu'une capacité saisie directement (consigne utilisateur) — la
+// capacité s'en déduit (NodeDialog affiche la valeur calculée, en lecture seule). Partagé par les
+// deux types issus de la scission de "Réservoir" (stockage / mise en charge, consigne
+// utilisateur) : mêmes champs, seuls le libellé/les initiales/la couleur du type diffèrent.
+export const RESERVOIR_AUTONOMY_UNITS = ['minutes', 'heures']
 
 const RESERVOIR_FIELDS: OuvrageFieldSpec[] = [
   {
@@ -47,8 +53,10 @@ const RESERVOIR_FIELDS: OuvrageFieldSpec[] = [
     kind: 'select',
     options: ['Semi-enterré couvert', 'Semi-enterré non couvert', 'Surélevé'],
   },
-  { key: 'capacity', label: 'Capacité', kind: 'number', unit: 'm³' },
   { key: 'fluid', label: 'Fluide', kind: 'select', options: FLUIDE_OPTIONS },
+  { key: 'flow', label: 'Débit', kind: 'number', unit: 'm³/h' },
+  { key: 'autonomy', label: 'Autonomie', kind: 'number' },
+  { key: 'autonomy_unit', label: "Unité de l'autonomie", kind: 'select', options: RESERVOIR_AUTONOMY_UNITS },
 ]
 
 const PRESSURE_BREAK_FIELDS: OuvrageFieldSpec[] = [
@@ -69,8 +77,20 @@ const PRESSURE_BREAK_FIELDS: OuvrageFieldSpec[] = [
 // Injection reutilisent directement Node.injected_flow/withdrawn_flow.
 export const OUVRAGE_FIELDS: Partial<Record<CreatableNodeType, OuvrageFieldSpec[]>> = {
   pumping_station: PUMPING_STATION_FIELDS,
-  reservoir: RESERVOIR_FIELDS,
+  storage_reservoir: RESERVOIR_FIELDS,
+  surge_reservoir: RESERVOIR_FIELDS,
   pressure_break: PRESSURE_BREAK_FIELDS,
+}
+
+// Capacité déduite du débit + de l'autonomie (consigne utilisateur : "l'utilisateur va introduire
+// un débit et une autonomie") — affichée en lecture seule dans NodeDialog, jamais stockée
+// séparément (une seule source de vérité, pas de désynchronisation possible).
+export function computeReservoirCapacity(data: Record<string, unknown> | null | undefined): number | null {
+  const flow = typeof data?.flow === 'number' ? data.flow : null
+  const autonomy = typeof data?.autonomy === 'number' ? data.autonomy : null
+  if (flow == null || autonomy == null || flow <= 0 || autonomy <= 0) return null
+  const autonomyHours = data?.autonomy_unit === 'minutes' ? autonomy / 60 : autonomy
+  return flow * autonomyHours
 }
 
 // Un ouvrage est considere "donnees validees" (couleur du texte dans l'arborescence, consigne
@@ -88,6 +108,28 @@ export function isOuvrageDataDefined(
     if (Array.isArray(v)) return v.length > 0
     return true
   })
+}
+
+// Ouvrage reel le plus proche en amont (pk le plus grand strictement inferieur a `pk`) sur la
+// meme trace, avec une mise en donnees definie — utilise pour preremplir le fluide/debit d'un
+// nouvel ouvrage depuis celui qui le precede dans le profil, quand il existe (consigne utilisateur).
+export function findPrecedingOuvrage(nodes: Node[], traceId: string, pk: number): Node | null {
+  const candidates = nodes
+    .filter((n) => n.trace_id === traceId && n.pk < pk && !isPlaceholderNode(n) && isOuvrageDataDefined(n))
+    .sort((a, b) => b.pk - a.pk)
+  return candidates[0] ?? null
+}
+
+// Intersection des cles de `precedingData` presentes dans `fieldSpecs` du nouveau type — utilise
+// pour heriter fluide/debit (et tout autre champ partage) sans coder en dur une liste de cles
+// (consigne utilisateur : "il doit prendre les infos relatives au fluide et débit").
+export function inheritableOuvrageData(
+  precedingData: Record<string, unknown> | null | undefined,
+  fieldSpecs: OuvrageFieldSpec[] | undefined,
+): Record<string, unknown> {
+  if (!precedingData || !fieldSpecs) return {}
+  const keys = new Set(fieldSpecs.map((f) => f.key))
+  return Object.fromEntries(Object.entries(precedingData).filter(([k]) => keys.has(k)))
 }
 
 const COMMON_UTILITY_FILIERES = [

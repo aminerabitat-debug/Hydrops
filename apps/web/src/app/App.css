@@ -527,9 +527,79 @@ body,
   overflow: visible;
 }
 
+.map-view-wrap {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
 .map-view {
   width: 100%;
   height: 100%;
+}
+
+.map-info-toggle {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 10;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 13px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  background: rgba(12, 21, 36, 0.85);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.map-info-toggle.active {
+  background: var(--accent);
+  color: #0b1220;
+  border-color: var(--accent);
+}
+
+.map-hover-tooltip,
+.profile-hover-tooltip {
+  position: absolute;
+  z-index: 10;
+  pointer-events: none;
+  background: rgba(12, 21, 36, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 12px;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+/* Bande de caracteristiques de conduite ("guitare", consigne utilisateur) — rangee de hauteur
+   fixe AU-DESSUS du graphique (flux normal, cf. .profile-chart-wrap ci-dessous), jamais en
+   chevauchement avec le bouton d'info (deplace dans la barre d'outils, a droite de "+ Nœud"). */
+.profile-guitar-band {
+  position: relative;
+  flex: 0 0 auto;
+  width: 100%;
+}
+
+.profile-guitar-segment {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  border-right: 1px solid rgba(255, 255, 255, 0.2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 0 6px;
+  font-size: 10px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: auto;
 }
 
 .map-node-marker {
@@ -629,6 +699,22 @@ body,
   margin: 0;
 }
 
+/* Pastille de couleur dans la legende (consigne utilisateur) : meme couleur que le trait que la
+   case a cocher controle, pour l'identifier d'un coup d'oeil sur le graphique. */
+.curve-color-swatch {
+  display: inline-block;
+  width: 14px;
+  height: 3px;
+  border-radius: 2px;
+  flex: 0 0 auto;
+}
+
+.curve-color-swatch--dashed {
+  height: 0;
+  border-top: 2px dashed;
+  background: none;
+}
+
 .btn-toggle {
   border: none;
   border-radius: 10px;
@@ -669,8 +755,23 @@ body,
   display: flex;
 }
 
-.profile-chart {
+.profile-chart-wrap {
+  position: relative;
+  display: flex;
+  flex-direction: column;
   flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+
+.profile-canvas-area {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+
+.profile-chart {
   width: 100% !important;
   height: 100% !important;
 }
@@ -826,6 +927,118 @@ body,
   overflow: hidden;
 }
 
+.modal-card--wide {
+  width: min(920px, 100%);
+}
+
+.data-window-table-wrap {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  max-height: 55vh;
+  overflow: auto;
+}
+
+.data-window-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.data-window-table th {
+  position: sticky;
+  top: 0;
+  background: #16233a;
+  color: var(--text);
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+  white-space: nowrap;
+}
+
+.data-window-table td {
+  padding: 5px 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.data-window-table tr.row-inactive td {
+  opacity: 0.4;
+}
+
+.preferences-section {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.preferences-section-title {
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.preferences-roughness-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 8px;
+}
+
+.preferences-roughness-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.preferences-roughness-item label {
+  font-size: 12px;
+  color: var(--text);
+}
+
+.criteria-row {
+  display: grid;
+  grid-template-columns: 80px 80px 1fr auto;
+  gap: 8px;
+  align-items: start;
+  padding: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+}
+
+.criteria-row-materials {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+}
+
+.formula-reminder {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px dashed rgba(255, 255, 255, 0.18);
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.formula-reminder code {
+  color: inherit;
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+}
+
+.btn-small {
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
 .modal-header {
   display: flex;
   align-items: center;
@@ -888,6 +1101,11 @@ body,
 .modal-field textarea {
   min-height: 80px;
   resize: vertical;
+}
+
+.modal-field-hint {
+  font-size: 11px;
+  color: var(--text-muted, #7d8cad);
 }
 
 .modal-checkbox-label {
@@ -991,6 +1209,16 @@ body,
   justify-content: flex-end;
   gap: 10px;
   padding: 0 16px 16px;
+}
+
+.reposition-suggestion {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
 }
 
 .modal-btn {

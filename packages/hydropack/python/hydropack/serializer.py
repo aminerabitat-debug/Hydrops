@@ -13,7 +13,16 @@ import zipfile
 from dataclasses import dataclass, field
 from io import BytesIO
 
-from .models import Metadata, Node, Project, Segment, TechnoEconomicAssumptions, TraceGeometry, Variant
+from .models import (
+    CalculationPreferences,
+    Metadata,
+    Node,
+    Project,
+    Segment,
+    TechnoEconomicAssumptions,
+    TraceGeometry,
+    Variant,
+)
 from .validation import validate
 
 
@@ -28,6 +37,7 @@ class ProjectPackage:
     metadata: Metadata
     project: Project
     techno_economic: TechnoEconomicAssumptions = field(default_factory=TechnoEconomicAssumptions)
+    calculation_preferences: CalculationPreferences = field(default_factory=CalculationPreferences)
     variants: dict[str, Variant] = field(default_factory=dict)
     traces: dict[str, TraceEntry] = field(default_factory=dict)
     nodes: dict[str, Node] = field(default_factory=dict)
@@ -57,6 +67,12 @@ def pack(pkg: ProjectPackage) -> bytes:
             "techno_economic.json",
             "techno_economic",
             pkg.techno_economic.model_dump(mode="json", exclude_none=True),
+        )
+        _write_json(
+            zf,
+            "calculation_preferences.json",
+            "calculation_preferences",
+            pkg.calculation_preferences.model_dump(mode="json", exclude_none=True),
         )
 
         for trace_id, entry in pkg.traces.items():
@@ -122,6 +138,13 @@ def unpack(data: bytes) -> ProjectPackage:
         else:
             techno_economic = TechnoEconomicAssumptions()
 
+        if "calculation_preferences.json" in names:
+            prefs_dict = json.loads(zf.read("calculation_preferences.json"))
+            validate("calculation_preferences", prefs_dict)
+            calculation_preferences = CalculationPreferences.model_validate(prefs_dict)
+        else:
+            calculation_preferences = CalculationPreferences()
+
         traces: dict[str, TraceEntry] = {}
         for name in names:
             if name.startswith("traces/") and name.endswith(".geometry.json"):
@@ -159,6 +182,7 @@ def unpack(data: bytes) -> ProjectPackage:
         metadata=metadata,
         project=project,
         techno_economic=techno_economic,
+        calculation_preferences=calculation_preferences,
         variants=variants,
         traces=traces,
         nodes=nodes,

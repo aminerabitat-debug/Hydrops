@@ -13,7 +13,13 @@
 import { useMemo, useState } from 'react'
 
 import { Modal } from '../../app/Modal'
-import { OUVRAGE_FIELDS, TREATMENT_PLANT_SUBTYPES, type OuvrageFieldSpec } from '../../shared/ouvrageFields'
+import {
+  OUVRAGE_FIELDS,
+  TREATMENT_PLANT_SUBTYPES,
+  computeReservoirCapacity,
+  inheritableOuvrageData,
+  type OuvrageFieldSpec,
+} from '../../shared/ouvrageFields'
 import type { CreatableNodeType, Node } from '../../shared/types'
 
 export interface NodeSubmitPayload {
@@ -36,6 +42,10 @@ interface NodeDialogProps {
   // Id du noeud en cours d'edition — exclu de la verification d'unicite du nom (sinon un noeud
   // dont le nom n'a pas change se heurterait toujours a "lui-meme").
   excludeNodeId?: string
+  // Ouvrage reel le plus proche en amont dans le profil (calcule par l'appelant, qui connait la
+  // trace/le pk) — sert a preremplir fluide/débit en mode creation (consigne utilisateur). Ignore
+  // en mode edition (on ne veut pas ecraser silencieusement une donnee deja saisie).
+  precedingOuvrage?: Node | null
   onClose: () => void
   onSubmit: (payload: NodeSubmitPayload) => Promise<void>
 }
@@ -43,7 +53,8 @@ interface NodeDialogProps {
 const TYPE_OPTIONS: { value: CreatableNodeType; label: string; namePrefix: string | null }[] = [
   { value: 'tie_in', label: 'Piquage', namePrefix: 'P' },
   { value: 'pumping_station', label: 'Station de pompage', namePrefix: 'SP' },
-  { value: 'reservoir', label: 'Réservoir', namePrefix: 'Res' },
+  { value: 'storage_reservoir', label: 'Réservoir de stockage', namePrefix: 'Res' },
+  { value: 'surge_reservoir', label: 'Réservoir de mise en charge', namePrefix: 'RMC' },
   { value: 'pressure_break', label: 'Brise charge', namePrefix: 'BC' },
   { value: 'treatment_plant', label: 'Station de traitement', namePrefix: 'ST' },
 ]
@@ -85,12 +96,15 @@ export function NodeDialog({
   initialInjectedFlow,
   initialWithdrawnFlow,
   excludeNodeId,
+  precedingOuvrage,
   onClose,
   onSubmit,
 }: NodeDialogProps) {
   const [type, setType] = useState<CreatableNodeType>(resolveInitialType(initialType))
   const [name, setName] = useState(initialName ?? '')
-  const [data, setData] = useState<Record<string, unknown>>(initialData ?? {})
+  const [data, setData] = useState<Record<string, unknown>>(
+    initialData ?? (mode === 'create' ? inheritableOuvrageData(precedingOuvrage?.data, OUVRAGE_FIELDS[resolveInitialType(initialType)]) : {}),
+  )
   const initialFlow = resolveInitialFlow(initialInjectedFlow ?? 0, initialWithdrawnFlow ?? 0)
   const [flowDirection, setFlowDirection] = useState<FlowDirection>(initialFlow.direction)
   const [flowValue, setFlowValue] = useState<number>(initialFlow.value)
@@ -99,6 +113,7 @@ export function NodeDialog({
 
   const namePrefix = useMemo(() => TYPE_OPTIONS.find((o) => o.value === type)?.namePrefix, [type])
   const fieldSpecs = OUVRAGE_FIELDS[type]
+  const reservoirCapacity = useMemo(() => computeReservoirCapacity(data), [data])
   const selectedSubtype = useMemo(
     () => TREATMENT_PLANT_SUBTYPES.find((s) => s.value === data.plant_subtype),
     [data.plant_subtype],
@@ -109,8 +124,9 @@ export function NodeDialog({
     // En edition, ne pas ecraser un nom deja saisi par un simple changement de type dans le select.
     if (mode === 'create') setName(suggestName(newType, existingNodes))
     // Les champs de mise en donnees sont entierement differents d'un type a l'autre — repartir
-    // d'un formulaire vierge evite de soumettre des cles d'un autre type par erreur.
-    setData({})
+    // d'un formulaire vierge evite de soumettre des cles d'un autre type par erreur. En creation,
+    // reheriter fluide/débit de l'ouvrage precedent pour le NOUVEAU type (consigne utilisateur).
+    setData(mode === 'create' ? inheritableOuvrageData(precedingOuvrage?.data, OUVRAGE_FIELDS[newType]) : {})
   }
 
   const setField = (key: string, value: unknown) => {
@@ -251,10 +267,29 @@ export function NodeDialog({
               onChange={(e) => setFlowValue(e.target.value === '' ? 0 : Number(e.target.value))}
             />
           </div>
+          {flowDirection === 'Prélèvement' && (
+            <label className="modal-checkbox-label">
+              <input
+                type="checkbox"
+                checked={data.include_withdrawal_in_sizing !== false}
+                onChange={(e) => setField('include_withdrawal_in_sizing', e.target.checked)}
+              />
+              <span>
+                Prendre en compte le débit de ce piquage dans le dimensionnement aval (décocher pour
+                dimensionner le tronçon aval sur le débit de tête, sans soustraire ce prélèvement)
+              </span>
+            </label>
+          )}
         </>
       )}
 
       {fieldSpecs?.map(renderField)}
+
+      {(type === 'storage_reservoir' || type === 'surge_reservoir') && reservoirCapacity != null && (
+        <p className="modal-field-hint" style={{ margin: 0 }}>
+          Capacité estimée (débit × autonomie) : {reservoirCapacity.toFixed(1)} m³
+        </p>
+      )}
 
       {type === 'treatment_plant' && (
         <>

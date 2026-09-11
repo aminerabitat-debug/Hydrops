@@ -2,15 +2,16 @@
 // integre" (cdc §4) — bouton bascule Graphique/Data + cases a cocher des courbes, inspires de
 // la page de reference fournie par l'utilisateur.
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 
 import { api } from '../../shared/apiClient'
+import { findPrecedingOuvrage } from '../../shared/ouvrageFields'
 import { useAppStore } from '../../state/store'
 import { isStructuralEndpoint as isStructuralEndpointOf } from '../../shared/types'
-import type { CreatableNodeType, Node } from '../../shared/types'
+import type { CreatableNodeType, Node, PipeCatalogRow } from '../../shared/types'
 import { DataTable } from '../table/DataTable'
 import { NodeDialog, type NodeSubmitPayload } from './NodeDialog'
-import { ProfileChart } from './ProfileChart'
+import { CURVE_COLORS, ProfileChart } from './ProfileChart'
 
 // Un ajout au PK visé (pas de noeud reel a ce PK) declenche POST .../nodes ; l'affectation d'un
 // placeholder d'extremite (noeud "junction" deja present, plus jamais montre a l'utilisateur comme
@@ -33,7 +34,28 @@ function formatSignedElevation(meters: number): string {
 export function ProfileTableView() {
   const [mode, setMode] = useState<'graph' | 'data'>('graph')
   const [showTerrain, setShowTerrain] = useState(true)
+  // Ligne piezometrique (consigne utilisateur) : affichee des qu'un troncon est calcule, case a
+  // cocher pour la masquer/l'afficher, positionnee entre Terrain et le bouton + Nœud.
+  const [showPiezo, setShowPiezo] = useState(true)
+  // Enveloppe PMS (consigne utilisateur) : altitude terrain + PMS (mCE) de la conduite en place a
+  // chaque point — necessite le catalogue (PMS par materiau/DN/classe), charge une fois ici (meme
+  // pattern que ConduitesWindow.tsx), pas besoin de le tenir a jour en temps reel (catalogue rarement
+  // modifie en cours de session).
+  const [showPms, setShowPms] = useState(true)
+  // Lignes hydrostatiques min et max (consigne utilisateur : deux cases separees) — cotes
+  // constantes du reservoir amont des tronçons gravitaires (Segment.upstream_water_level_max/min).
+  const [showHydrostaticMax, setShowHydrostaticMax] = useState(true)
+  const [showHydrostaticMin, setShowHydrostaticMin] = useState(true)
+  const [pipeCatalog, setPipeCatalog] = useState<PipeCatalogRow[]>([])
   const [addNodeMode, setAddNodeMode] = useState(false)
+  // Bouton d'info (consigne utilisateur) : affiche l'ID/PK/altitude du piquet survolé — deplace
+  // dans cette barre d'outils (a droite de "+ Nœud") pour ne plus chevaucher la bande de
+  // caracteristiques de conduite, desormais au-dessus du graphique.
+  const [infoMode, setInfoMode] = useState(false)
+
+  useEffect(() => {
+    api.listConduites().then(setPipeCatalog).catch(() => setPipeCatalog([]))
+  }, [])
 
   const [pendingAdd, setPendingAdd] = useState<PendingAdd | null>(null)
   const [editingNode, setEditingNode] = useState<Node | null>(null)
@@ -41,12 +63,23 @@ export function ProfileTableView() {
   const sessionId = useAppStore((s) => s.sessionId)
   const selectedVariantId = useAppStore((s) => s.selection.selectedVariantId)
   const nodes = useAppStore((s) => s.nodes)
+  const segments = useAppStore((s) => s.segments)
   const refreshNetwork = useAppStore((s) => s.refreshNetwork)
   const setStatusMessage = useAppStore((s) => s.setStatusMessage)
   const traces = useAppStore((s) => s.traces)
   const selectedTraceId = useAppStore((s) => s.selection.selectedTraceId)
   const trace = traces.find((t) => t.id === selectedTraceId) ?? traces[0]
   const profile = trace?.elevation_profile
+
+  // Les courbes derivees du calcul (piezo/PMS/hydrostatiques) et la bande de caracteristiques ne
+  // doivent apparaitre qu'une fois un calcul reussi pour cette trace, et redisparaitre des qu'une
+  // modification (ouvrage ou tronçon) les invalide (consigne utilisateur) — `Segment.velocity !=
+  // null` est le meme signal fiable que celui utilise par DataTable/ProfileChart.
+  const hasCalculatedData = useMemo(() => {
+    if (!trace) return false
+    const traceNodeIds = new Set(nodes.filter((n) => n.trace_id === trace.id).map((n) => n.id))
+    return segments.some((s) => traceNodeIds.has(s.upstream_node_id) && s.velocity != null)
+  }, [segments, nodes, trace])
 
   const handleSubmitPendingAdd = async (payload: NodeSubmitPayload) => {
     if (!sessionId || !selectedVariantId || !trace || pendingAdd == null) return
@@ -144,8 +177,33 @@ export function ProfileTableView() {
           </button>
           <label className="metric">
             <input type="checkbox" checked={showTerrain} onChange={(e) => setShowTerrain(e.target.checked)} />
+            <span className="curve-color-swatch" style={{ background: CURVE_COLORS.terrain }} />
             <span>Terrain</span>
           </label>
+          {hasCalculatedData && (
+            <>
+              <label className="metric" title="Cote piézométrique calculée (bouton Calcul > Calculer), par tronçon">
+                <input type="checkbox" checked={showPiezo} onChange={(e) => setShowPiezo(e.target.checked)} />
+                <span className="curve-color-swatch" style={{ background: CURVE_COLORS.piezo }} />
+                <span>Ligne piézométrique</span>
+              </label>
+              <label className="metric" title="Altitude du terrain + PMS (pression maximale de service) de la conduite en place — tracée en pointillés">
+                <input type="checkbox" checked={showPms} onChange={(e) => setShowPms(e.target.checked)} />
+                <span className="curve-color-swatch curve-color-swatch--dashed" style={{ borderColor: CURVE_COLORS.pms }} />
+                <span>Enveloppe PMS</span>
+              </label>
+              <label className="metric" title="Niveau (constant) du plan d'eau amont max des tronçons gravitaires">
+                <input type="checkbox" checked={showHydrostaticMax} onChange={(e) => setShowHydrostaticMax(e.target.checked)} />
+                <span className="curve-color-swatch" style={{ background: CURVE_COLORS.hydrostaticMax }} />
+                <span>Ligne hydrostatique Max</span>
+              </label>
+              <label className="metric" title="Niveau (constant) du plan d'eau amont min des tronçons gravitaires">
+                <input type="checkbox" checked={showHydrostaticMin} onChange={(e) => setShowHydrostaticMin(e.target.checked)} />
+                <span className="curve-color-swatch" style={{ background: CURVE_COLORS.hydrostaticMin }} />
+                <span>Ligne hydrostatique Min</span>
+              </label>
+            </>
+          )}
           <button
             type="button"
             className={`metric btn-toggle-node ${addNodeMode ? 'active' : ''}`}
@@ -162,13 +220,30 @@ export function ProfileTableView() {
                 : '✓ + Nœud (cliquer sur une ligne)'
               : '+ Nœud'}
           </button>
+          {mode === 'graph' && (
+            <button
+              type="button"
+              className={`metric btn-toggle-node ${infoMode ? 'active' : ''}`}
+              onClick={() => setInfoMode((v) => !v)}
+              title="Afficher l'ID et le PK du piquet survolé"
+              aria-label="Afficher l'ID et le PK du piquet survolé"
+            >
+              ℹ
+            </button>
+          )}
         </div>
       </div>
       <div className="profile-content">
         {mode === 'graph' ? (
           <ProfileChart
             showTerrain={showTerrain}
+            showPiezo={showPiezo}
+            showPms={showPms}
+            showHydrostaticMax={showHydrostaticMax}
+            showHydrostaticMin={showHydrostaticMin}
+            pipeCatalog={pipeCatalog}
             addNodeMode={addNodeMode}
+            infoMode={infoMode}
             onAddNode={(pk) => setPendingAdd({ pk })}
             onEditNode={(node) => setEditingNode(node)}
             onAssignNode={(node) => setPendingAdd({ pk: node.pk, placeholderNodeId: node.id })}
@@ -183,12 +258,13 @@ export function ProfileTableView() {
           />
         )}
       </div>
-      {pendingAdd != null && (
+      {pendingAdd != null && trace && (
         <NodeDialog
           mode="create"
           pk={pendingAdd.pk}
           existingNodes={nodes}
           excludeNodeId={pendingAdd.placeholderNodeId}
+          precedingOuvrage={findPrecedingOuvrage(nodes, trace.id, pendingAdd.pk)}
           onClose={() => setPendingAdd(null)}
           onSubmit={handleSubmitPendingAdd}
         />

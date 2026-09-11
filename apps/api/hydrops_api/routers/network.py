@@ -10,12 +10,19 @@ et vannes restent exclus (consigne utilisateur). Le calcul hydraulique arrive a 
 from __future__ import annotations
 
 import uuid
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
 
-from hydropack.models import Node, Segment
+from hydropack.models import MaterialCriterionRule, Node, Segment
 from hydropack.serializer import ProjectPackage
 
+from hydrops_engine.hydraulics import (
+    CatalogPipe as HCatalogPipe,
+    SegmentSpec as HSegmentSpec,
+    solve_gravitaire_troncon,
+    solve_refoulement_troncon,
+)
 from hydrops_engine.topology import (
     group_into_troncons,
     interpolate_lonlat_at_pk,
@@ -25,8 +32,45 @@ from hydrops_engine.topology import (
 )
 
 from ..core.deps import get_session_store, require_package
-from ..schemas import NewNodeRequest, PatchNodeRequest, PatchSegmentRequest
+from ..data.material_criteria_seed import DEFAULT_MATERIAL_CRITERIA
+from ..data.pipe_catalog_seed import DEFAULT_ROUGHNESS_MM
+from ..schemas import NewNodeRequest, PatchNodePositionRequest, PatchNodeRequest, PatchSegmentRequest
 from ..services import catalog
+
+# Regime hydraulique d'un troncon (miroir exact de apps/web/src/shared/troncons.ts:tronconRegime —
+# seul le noeud de DEPART compte, une jonction/piquage simple n'y figure jamais).
+_PUMPING_TRIGGER_TYPES = frozenset({"pumping_station", "treatment_plant"})
+_REAL_OUVRAGE_TYPES = frozenset(
+    {"storage_reservoir", "surge_reservoir", "pumping_station", "pressure_break", "treatment_plant", "tie_in"}
+)
+
+
+def _troncon_regime(start_node: Optional[Node]) -> str:
+    if start_node is None or start_node.type not in _REAL_OUVRAGE_TYPES:
+        return "indetermine"
+    return "refoulement" if start_node.type in _PUMPING_TRIGGER_TYPES else "gravitaire"
+
+
+def _flow_by_node_within_troncon(troncon_node_ids: list[str], nodes_by_id: dict[str, Node], head_flow_m3h: float) -> dict[str, float]:
+    """Debit (m3/h) porte par le segment en AVAL de chaque noeud d'UN troncon, a partir de son
+    propre debit de tete (Segment.head_flow, saisi depuis la fenetre "Modifier le troncon" — quel
+    que soit le regime, consigne utilisateur), ajuste a chaque piquage interne (+injected_flow /
+    -withdrawn_flow si la case "prise en compte du prelevement" est cochee, cf.
+    data.include_withdrawal_in_sizing). Un piquage est toujours un noeud INTERIEUR d'un troncon
+    (jamais son debut/sa fin — cf. BOUNDARY_NODE_TYPES), donc ce parcours amont->aval suffit,
+    independamment du sens utilise pour le calcul des pressions (gravitaire vs refoulement)."""
+    result: dict[str, float] = {}
+    current = head_flow_m3h
+    for nid in troncon_node_ids:
+        node = nodes_by_id[nid]
+        if node.type == "tie_in":
+            include = not (node.data and node.data.get("include_withdrawal_in_sizing") is False)
+            if include and node.withdrawn_flow:
+                current -= node.withdrawn_flow
+            if node.injected_flow:
+                current += node.injected_flow
+        result[nid] = current
+    return result
 
 _ENDPOINT_PK_TOLERANCE_M = 1e-6
 
@@ -52,6 +96,23 @@ def _segments_for_variant(package: ProjectPackage, package_nodes: list[Node]) ->
     return sorted(segments, key=lambda s: s.pk_start)
 
 
+def _reset_node_calc_fields(package: ProjectPackage, node_id: str) -> None:
+    """Efface les sorties du calcul hydraulique portees par un noeud (cote piezo, pressions) —
+    appele des qu'un segment adjacent voit ses donnees modifiees ou reinitialisees (consigne
+    utilisateur), pour ne jamais laisser un resultat perime affiche dans le profil Data."""
+    node = package.nodes.get(node_id)
+    if node is None:
+        return
+    package.nodes[node_id] = node.model_copy(
+        update={
+            "piezo_head": None,
+            "pressure_dynamic": None,
+            "pressure_static_max": None,
+            "pressure_static_min": None,
+        }
+    )
+
+
 def _is_structural_endpoint(package: ProjectPackage, node: Node) -> bool:
     """Un noeud est une extremite STRUCTURELLE de trace (indeletable, meme s'il porte desormais un
     ouvrage — consigne utilisateur, Lot 3 etape 1c) si son PK correspond a 0 ou a la longueur de sa
@@ -61,6 +122,50 @@ def _is_structural_endpoint(package: ProjectPackage, node: Node) -> bool:
         return False
     trace = trace_entry.geometry
     return node.pk <= _ENDPOINT_PK_TOLERANCE_M or node.pk >= trace.length - _ENDPOINT_PK_TOLERANCE_M
+
+
+def _find_reposition_candidate_pk(
+    current_pk: float,
+    lower_bound: float,
+    upper_bound: float,
+    troncon_end_pk: float,
+    offset: Optional[float],
+    absolute_level: Optional[float],
+    terrain: list[tuple[float, float]],
+) -> Optional[float]:
+    """Cherche, parmi les points de terrain echantillonnes strictement entre `lower_bound` et
+    `upper_bound` (les voisins immediats du noeud sur sa trace — mêmes bornes que
+    patch_node_position), le pk le plus proche de `current_pk` ou` placer le reservoir rendrait le
+    tronçon a nouveau compatible : aucun point de terrain entre ce pk et `troncon_end_pk` ne
+    depasse la cote effective a cette position (consigne utilisateur — proposer un deplacement au
+    lieu de seulement alerter). Cote effective : si une saisie relative (`offset` non-null) a ete
+    utilisee, elle suit le terrain (recalculee a chaque candidat) ; sinon la cote ABSOLUE saisie
+    reste fixe quel que soit le candidat teste (elle n'est jamais recalculee automatiquement —
+    consigne utilisateur)."""
+    if offset is None and absolute_level is None:
+        return None
+    in_range = [(pk, z) for pk, z in terrain if lower_bound < pk < upper_bound]
+    if not in_range:
+        return None
+
+    def effective_level(pk: float) -> float:
+        if offset is not None:
+            return interpolate_value_at_pk(terrain, pk) + offset
+        return absolute_level  # type: ignore[return-value]
+
+    def feasible(pk: float) -> bool:
+        level = effective_level(pk)
+        return all(z < level - 1e-6 for p, z in terrain if pk - 1e-6 <= p <= troncon_end_pk + 1e-6)
+
+    best_pk: Optional[float] = None
+    best_dist = float("inf")
+    for pk, _ in in_range:
+        if not feasible(pk):
+            continue
+        dist = abs(pk - current_pk)
+        if dist < best_dist:
+            best_pk, best_dist = pk, dist
+    return best_pk
 
 
 @router.get("/nodes")
@@ -250,9 +355,130 @@ def patch_node(session_id: str, variant_id: str, node_id: str, payload: PatchNod
     if not updates:
         return node.model_dump(mode="json", exclude_none=True)
 
+    # Un changement de TYPE peut changer le regime hydraulique d'un troncon (reservoir <->
+    # station de pompage) ET/OU la topologie meme du decoupage en troncons (un noeud qui
+    # entre/sort de BOUNDARY_NODE_TYPES fusionne ou scinde des troncons, cf.
+    # hydrops_engine.topology.network.group_into_troncons) — les parametres hydrauliques
+    # eventuellement deja saisis pour l'ancien regime n'ont plus de sens, d'ou un reset COMPLET
+    # (_reset_segment_to_default, y compris `forced`). Un changement de DATA/debit de piquage ne
+    # change ni le regime ni la topologie — seul le DIMENSIONNEMENT (materiau/DN, issu du fluide
+    # notamment) n'est plus garanti valide, les parametres saisis restent bons : reset plus etroit
+    # (_reset_segment_calc_outputs, ne touche pas `forced`). Dans les deux cas, on capture les
+    # segments touches par ce noeud AVANT (ancien type encore en place) et APRES (nouveau type
+    # applique) le changement — l'union couvre fusion et scission aussi bien qu'un simple
+    # changement de regime sans changement de frontiere. Un simple renommage (`name` seul) ne
+    # touche a rien (cosmetique, consigne utilisateur).
+    type_changed = payload.type is not None and payload.type != node.type
+    data_changed = (
+        (payload.data is not None and payload.data != node.data)
+        or (payload.injected_flow is not None and payload.injected_flow != node.injected_flow)
+        or (payload.withdrawn_flow is not None and payload.withdrawn_flow != node.withdrawn_flow)
+    )
+    impacted_segment_ids: set[str] = set()
+    if type_changed or data_changed:
+        impacted_segment_ids |= _segment_ids_touching_node(package, variant, str(node.trace_id), node_id, node.pk)
+
     updated = node.model_copy(update=updates)
     package.nodes[node_id] = updated
+
+    if type_changed or data_changed:
+        impacted_segment_ids |= _segment_ids_touching_node(package, variant, str(node.trace_id), node_id, node.pk)
+        for segment_id in impacted_segment_ids:
+            if type_changed:
+                _reset_segment_to_default(package, segment_id)
+            else:
+                _reset_segment_calc_outputs(package, segment_id)
+                segment = package.segments.get(segment_id)
+                if segment is not None:
+                    _reset_node_calc_fields(package, str(segment.upstream_node_id))
+                    _reset_node_calc_fields(package, str(segment.downstream_node_id))
+
     return updated.model_dump(mode="json", exclude_none=True)
+
+
+@router.patch("/nodes/{node_id}/position")
+def patch_node_position(session_id: str, variant_id: str, node_id: str, payload: PatchNodePositionRequest, request: Request):
+    """Deplace un noeud existant le long de sa trace (consigne utilisateur : proposer de decaler
+    le reservoir amont d'un tronçon gravitaire sur une alerte de terrain incompatible avec sa cote
+    hydrostatique — cf. reposition_suggestions dans run_calculation). Refuse sur une extremite
+    structurelle (pk 0/longueur — aucun sens a la deplacer, la trace elle-meme commence/finit la)
+    et sur un pk qui ne reste pas strictement entre les deux noeuds voisins immediats de la meme
+    trace (jamais de croisement d'un autre noeud)."""
+    package = require_package(get_session_store(request), session_id)
+    variant = _require_variant(package, variant_id)
+    nodes = _nodes_for_variant(package, variant)
+    node = next((n for n in nodes if str(n.id) == node_id), None)
+    if node is None:
+        raise HTTPException(status_code=404, detail="noeud inconnu")
+    if _is_structural_endpoint(package, node):
+        raise HTTPException(status_code=400, detail="une extremite de trace ne peut pas etre deplacee")
+
+    trace_entry = package.traces.get(str(node.trace_id))
+    if trace_entry is None:
+        raise HTTPException(status_code=404, detail="trace inconnue")
+    trace = trace_entry.geometry
+
+    trace_nodes = sorted((n for n in nodes if str(n.trace_id) == str(node.trace_id)), key=lambda n: n.pk)
+    idx = next(i for i, n in enumerate(trace_nodes) if str(n.id) == node_id)
+    lower_bound = trace_nodes[idx - 1].pk if idx > 0 else 0.0
+    upper_bound = trace_nodes[idx + 1].pk if idx < len(trace_nodes) - 1 else trace.length
+    if not (lower_bound < payload.pk < upper_bound):
+        raise HTTPException(
+            status_code=422,
+            detail=f"le pk doit rester strictement entre {lower_bound:.1f} et {upper_bound:.1f} (voisins immediats)",
+        )
+
+    lon, lat = interpolate_lonlat_at_pk([(c[0], c[1]) for c in trace.geometry.coordinates], payload.pk)
+    if trace.elevation_profile and trace.elevation_profile.raw:
+        z = interpolate_value_at_pk([(p.pk, p.z) for p in trace.elevation_profile.raw], payload.pk)
+    else:
+        z = 0.0
+
+    updated_node = node.model_copy(update={"pk": payload.pk, "x": lon, "y": lat, "z": z})
+    package.nodes[node_id] = updated_node
+
+    segments = _segments_for_variant(package, nodes)
+    upstream_seg = next((s for s in segments if str(s.downstream_node_id) == node_id), None)
+    downstream_seg = next((s for s in segments if str(s.upstream_node_id) == node_id), None)
+
+    needs_level_confirmation = False
+    for seg in (s for s in (upstream_seg, downstream_seg) if s is not None):
+        seg_updates: dict = {}
+        if seg is upstream_seg:
+            seg_updates["pk_end"] = payload.pk
+            seg_updates["length"] = payload.pk - seg.pk_start
+        else:
+            seg_updates["pk_start"] = payload.pk
+            seg_updates["length"] = seg.pk_end - payload.pk
+        # `upstream_water_level_max/min` sont portes par le segment mais decrivent la cote du
+        # noeud AMONT du tronçon (le reservoir) — seul `downstream_seg` (celui qui DEMARRE au
+        # noeud deplace) a le noeud deplace comme upstream_node ; `upstream_seg` appartient a un
+        # tronçon DIFFERENT (qui se termine ici), sa propre cote amont est ailleurs et ne doit
+        # jamais changer suite a ce deplacement.
+        if seg is downstream_seg:
+            # Cote relative ("+N") : recalculee automatiquement a la nouvelle position (consigne
+            # utilisateur). Cote absolue (offset null) mais deja renseignee : laissee telle quelle
+            # ici, le frontend redemande confirmation/modification a l'utilisateur apres coup.
+            if seg.upstream_water_level_max_offset is not None:
+                seg_updates["upstream_water_level_max"] = z + seg.upstream_water_level_max_offset
+            elif seg.upstream_water_level_max is not None:
+                needs_level_confirmation = True
+            if seg.upstream_water_level_min_offset is not None:
+                seg_updates["upstream_water_level_min"] = z + seg.upstream_water_level_min_offset
+            elif seg.upstream_water_level_min is not None:
+                needs_level_confirmation = True
+        updated_seg = seg.model_copy(update=seg_updates)
+        package.segments[str(seg.id)] = updated_seg
+        # La longueur du segment change (donc sa perte de charge) — tout resultat de calcul
+        # precedent pour ce segment/ses noeuds n'est plus valide.
+        _reset_segment_calc_outputs(package, str(updated_seg.id))
+        _reset_node_calc_fields(package, str(updated_seg.upstream_node_id))
+        _reset_node_calc_fields(package, str(updated_seg.downstream_node_id))
+
+    return {
+        "node": updated_node.model_dump(mode="json", exclude_none=True),
+        "needs_level_confirmation": needs_level_confirmation,
+    }
 
 
 @router.delete("/nodes/{node_id}", status_code=204)
@@ -304,31 +530,65 @@ def patch_segment(session_id: str, variant_id: str, segment_id: str, payload: Pa
     if segment is None:
         raise HTTPException(status_code=404, detail="segment inconnu")
 
-    material = payload.material or segment.material
-    pressure_class = payload.pressure_class or segment.pressure_class
-    dn = payload.dn if payload.dn is not None else segment.dn
-
-    try:
-        resolved = catalog.resolve(material, dn, pressure_class)
-    except catalog.CatalogLookupError as e:
-        raise HTTPException(status_code=422, detail=str(e)) from e
+    # Materiau/DN/classe TOUS absents du payload = edition pure des parametres hydrauliques
+    # (fenetre "Modifier le tronçon"), pas une correction manuelle de conduite depuis le profil
+    # Data — dans ce cas, le dimensionnement affiche jusqu'ici n'est plus valide pour rien (il
+    # provenait d'un calcul avec d'anciens parametres, ou du catalogue par defaut) et ne doit pas
+    # etre conserve silencieusement : retour au catalogue par defaut, exactement comme un
+    # segment jamais calcule (consigne utilisateur — "ne remplir qu'une fois le calcul abouti").
+    # Un payload qui fournit au moins un des trois reste une correction manuelle intentionnelle,
+    # traitee comme avant (resolution via le catalogue).
+    is_pure_hydraulic_edit = payload.material is None and payload.dn is None and payload.pressure_class is None
+    if is_pure_hydraulic_edit:
+        default = catalog.default_selection()
+        material, dn, pressure_class = default["material"], default["dn"], default["pressure_class"]
+        resolved = {"di": default["di"], "de": default["de"]}
+        roughness = default["roughness"]
+    else:
+        material = payload.material or segment.material
+        pressure_class = payload.pressure_class or segment.pressure_class
+        dn = payload.dn if payload.dn is not None else segment.dn
+        try:
+            resolved = catalog.resolve(material, dn, pressure_class)
+        except catalog.CatalogLookupError as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
+        roughness = package.calculation_preferences.roughness_by_material.get(material, catalog.default_roughness(material))
 
     # "force" marque desormais simplement "les donnees de ce troncon ont ete validees via la
     # fenetre Modifier" (consigne utilisateur : couleur du texte une fois valide/reinitialise) —
-    # pas seulement un ecart par rapport au catalogue par defaut.
+    # pas seulement un ecart par rapport au catalogue par defaut. Depuis l'ajout du calcul
+    # hydraulique, Materiau/DN/Classe ne sont plus saisis QUE via cet endpoint (fenetre Modifier le
+    # troncon ne les propose plus, consigne utilisateur — ils viennent soit du calcul, soit d'une
+    # correction manuelle depuis le profil Data).
+    # Toute modification des donnees du troncon invalide les resultats du dernier calcul pour ce
+    # segment (consigne utilisateur : les colonnes "depuis Debit vers la droite" du profil Data ne
+    # doivent jamais rester prereplies avec un resultat perime) — reinitialisees ici, elles ne
+    # sont reposees que par un nouveau passage du bouton Calculer.
     updates: dict = {
         "material": material,
         "dn": dn,
         "pressure_class": pressure_class,
         "di": resolved["di"],
         "de": resolved["de"],
-        "roughness": resolved["roughness"],
+        "roughness": roughness,
         "forced": True,
+        "flow": 0.0,
+        "velocity": None,
+        "head_loss_unit": None,
+        "head_loss_segment": None,
+        "head_loss_cumulative": None,
     }
     if payload.upstream_water_level_max is not None:
         updates["upstream_water_level_max"] = payload.upstream_water_level_max
+        # L'offset (relatif "+N") est reenvoye a CHAQUE sauvegarde par le frontend (resolveLevelInput
+        # le recalcule a chaque frappe) — toujours ecrase avec la cote, jamais laisse perime : None =
+        # cote absolue cette fois-ci, meme si une saisie relative existait avant.
+        updates["upstream_water_level_max_offset"] = payload.upstream_water_level_max_offset
+    if payload.head_flow is not None:
+        updates["head_flow"] = payload.head_flow
     if payload.upstream_water_level_min is not None:
         updates["upstream_water_level_min"] = payload.upstream_water_level_min
+        updates["upstream_water_level_min_offset"] = payload.upstream_water_level_min_offset
     if payload.min_pressure is not None:
         updates["min_pressure"] = payload.min_pressure
     if payload.downstream_residual_pressure is not None:
@@ -338,23 +598,274 @@ def patch_segment(session_id: str, variant_id: str, segment_id: str, payload: Pa
 
     updated = segment.model_copy(update=updates)
     package.segments[segment_id] = updated
+    _reset_node_calc_fields(package, str(updated.upstream_node_id))
+    _reset_node_calc_fields(package, str(updated.downstream_node_id))
     return updated.model_dump(mode="json", exclude_none=True)
 
 
-@router.post("/segments/{segment_id}/reset")
-def reset_segment(session_id: str, variant_id: str, segment_id: str, request: Request):
-    """Reinitialise un segment aux valeurs catalogue par defaut (materiau/DN/classe), et efface son
-    statut 'force' — equivalent d'une "suppression" de la mise en donnees d'un troncon (consigne
-    utilisateur) sans toucher a la topologie (noeuds/segments restent en place, seules leurs
-    caracteristiques hydrauliques reviennent au defaut pose a l'import)."""
+@router.post("/calcul")
+def run_calculation(session_id: str, variant_id: str, request: Request):
+    """Bouton Calcul > Calculer (consigne utilisateur). Precondition : TOUS les troncons de la
+    variante (toutes traces confondues) doivent avoir un regime determine (pas "indetermine") ET
+    etre valides (donnees hydrauliques enregistrees via "Modifier le troncon" — Segment.forced),
+    sinon 409 avec la liste de ce qui manque — le calcul ne se lance pas partiellement."""
     package = require_package(get_session_store(request), session_id)
     variant = _require_variant(package, variant_id)
     nodes = _nodes_for_variant(package, variant)
     segments = _segments_for_variant(package, nodes)
-    segment = next((s for s in segments if str(s.id) == segment_id), None)
-    if segment is None:
-        raise HTTPException(status_code=404, detail="segment inconnu")
+    nodes_by_id: dict[str, Node] = {str(n.id): n for n in nodes}
+    segments_by_id: dict[str, Segment] = {str(s.id): s for s in segments}
 
+    by_trace: dict[str, list[Node]] = {}
+    for n in nodes:
+        by_trace.setdefault(str(n.trace_id), []).append(n)
+
+    missing: list[str] = []
+    troncons_by_trace: dict[str, list] = {}
+    for trace_id, trace_nodes in by_trace.items():
+        ordered = sorted(trace_nodes, key=lambda n: n.pk)
+        ordered_tuples = [(str(n.id), n.type, n.pk) for n in ordered]
+        segment_by_edge = {(str(s.upstream_node_id), str(s.downstream_node_id)): str(s.id) for s in segments}
+        groups = group_into_troncons(ordered_tuples, segment_by_edge)
+        troncons_by_trace[trace_id] = groups
+        for group in groups:
+            start_node = nodes_by_id.get(group.start_node_id)
+            end_node = nodes_by_id.get(group.end_node_id)
+            regime = _troncon_regime(start_node)
+            forced = bool(group.segment_ids) and all(segments_by_id[sid].forced for sid in group.segment_ids)
+            if regime == "indetermine" or not forced:
+                start_label = (start_node.name or start_node.type) if start_node else "?"
+                end_label = (end_node.name or end_node.type) if end_node else "?"
+                reason = "régime indéterminé" if regime == "indetermine" else "données non validées"
+                missing.append(f"{start_label} → {end_label} ({reason})")
+    if missing:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Tous les tronçons doivent être déterminés (régime connu) et validés (Modifier le "
+                "tronçon) avant de lancer le calcul. Manquant : " + "; ".join(missing)
+            ),
+        )
+
+    prefs = package.calculation_preferences
+    roughness_by_material = dict(DEFAULT_ROUGHNESS_MM)
+    roughness_by_material.update(prefs.roughness_by_material)
+    catalog_rows = [
+        HCatalogPipe(
+            id=r.id, dn=r.dn, di_mm=r.di, material=r.material, pressure_class=r.pressure_class,
+            pms_m=r.pms, price=r.prix_aps, roughness_mm=roughness_by_material.get(r.material, 0.1),
+            active=r.active,
+        )
+        for r in catalog.list_pipe_rows()
+    ]
+    criteria: list[MaterialCriterionRule] = prefs.material_criteria or [
+        MaterialCriterionRule(**c) for c in DEFAULT_MATERIAL_CRITERIA
+    ]
+
+    def make_allowed_materials_fn(fluid: Optional[str]):
+        def fn(dn: int) -> Optional[frozenset[str]]:
+            matches = [
+                c for c in criteria
+                if (c.dn_min is None or dn >= c.dn_min)
+                and (c.dn_max is None or dn <= c.dn_max)
+                and (c.fluid is None or c.fluid == fluid)
+            ]
+            if not matches:
+                return None
+            allowed: set[str] = set()
+            for m in matches:
+                allowed.update(m.materials)
+            return frozenset(allowed) if allowed else None
+
+        return fn
+
+    all_alerts: list[str] = []
+    reposition_suggestions: list[dict] = []
+    updated_segments = 0
+    updated_nodes = 0
+
+    for trace_id, troncon_groups in troncons_by_trace.items():
+        trace_entry = package.traces.get(trace_id)
+        profile_points = (
+            trace_entry.geometry.elevation_profile.raw
+            if trace_entry and trace_entry.geometry.elevation_profile
+            else []
+        )
+        for group in troncon_groups:
+            troncon_segments = [segments_by_id[sid] for sid in group.segment_ids]
+            if not troncon_segments:
+                continue
+            start_node = nodes_by_id[group.start_node_id]
+            regime = _troncon_regime(start_node)
+            first_seg = troncon_segments[0]
+
+            troncon_node_ids: list[str] = [str(troncon_segments[0].upstream_node_id)]
+            troncon_node_ids += [str(seg.downstream_node_id) for seg in troncon_segments]
+            node_ground_z = {nid: nodes_by_id[nid].z for nid in troncon_node_ids}
+            node_pk = {nid: nodes_by_id[nid].pk for nid in troncon_node_ids}
+            # Le profil de terrain (DEM) entre les noeuds reels peut cacher un point haut jamais
+            # materialise par un noeud (consigne utilisateur : la pression minimale doit etre
+            # verifiee sur le terrain, pas seulement aux deux extremites d'un troncon de plusieurs
+            # kilometres) — cf. hydrops_engine.hydraulics:_check_terrain_pressure.
+            terrain_samples = [
+                (p.pk, p.z) for p in profile_points if group.pk_start - 1e-6 <= p.pk <= group.pk_end + 1e-6
+            ]
+
+            flow_by_node_id = _flow_by_node_within_troncon(troncon_node_ids, nodes_by_id, first_seg.head_flow or 0.0)
+
+            fluid = start_node.data.get("fluid") if start_node.data else None
+            allowed_fn = make_allowed_materials_fn(fluid if isinstance(fluid, str) else None)
+
+            segment_specs = [
+                HSegmentSpec(
+                    id=str(seg.id),
+                    length_m=seg.length,
+                    flow_m3s=flow_by_node_id.get(str(seg.upstream_node_id), 0.0) / 3600.0,
+                    max_velocity_ms=first_seg.max_velocity,
+                )
+                for seg in troncon_segments
+            ]
+
+            if regime == "gravitaire":
+                result = solve_gravitaire_troncon(
+                    node_ids_ordered=troncon_node_ids,
+                    node_ground_z=node_ground_z,
+                    segments_ordered=segment_specs,
+                    upstream_level_max=first_seg.upstream_water_level_max or 0.0,
+                    upstream_level_min=first_seg.upstream_water_level_min,
+                    min_pressure=first_seg.min_pressure,
+                    downstream_residual_pressure=first_seg.downstream_residual_pressure,
+                    catalog=catalog_rows,
+                    singular_loss_markup_pct=prefs.singular_loss_markup_pct,
+                    fluid_temperature_c=prefs.fluid_temperature_c,
+                    allowed_materials_fn=allowed_fn,
+                    node_pk=node_pk,
+                    terrain_samples=terrain_samples,
+                )
+            else:
+                result = solve_refoulement_troncon(
+                    node_ids_ordered=troncon_node_ids,
+                    node_ground_z=node_ground_z,
+                    segments_ordered=segment_specs,
+                    min_pressure=first_seg.min_pressure,
+                    downstream_residual_pressure=first_seg.downstream_residual_pressure,
+                    catalog=catalog_rows,
+                    singular_loss_markup_pct=prefs.singular_loss_markup_pct,
+                    fluid_temperature_c=prefs.fluid_temperature_c,
+                    allowed_materials_fn=allowed_fn,
+                    node_pk=node_pk,
+                    terrain_samples=terrain_samples,
+                )
+
+            all_alerts.extend(result.alerts)
+
+            if result.alerts:
+                # Alerte hydrostatique gravitaire (terrain incompatible avec la cote du reservoir
+                # amont, cf. hydraulics.py:_check_hydrostatic_feasibility) : proposer de deplacer
+                # le reservoir au pk compatible le plus proche plutot que de se contenter d'alerter
+                # (consigne utilisateur) — seulement si ce noeud n'est pas une extremite
+                # structurelle de trace (rien de sensé a deplacer sinon, cf. patch_node_position).
+                if regime == "gravitaire" and any("hydrostatique" in a.lower() for a in result.alerts):
+                    if not _is_structural_endpoint(package, start_node):
+                        trace_nodes_sorted = sorted(by_trace[trace_id], key=lambda n: n.pk)
+                        idx = next(
+                            (i for i, n in enumerate(trace_nodes_sorted) if str(n.id) == group.start_node_id), None
+                        )
+                        if idx is not None:
+                            lower_bound = trace_nodes_sorted[idx - 1].pk if idx > 0 else 0.0
+                            upper_bound = (
+                                trace_nodes_sorted[idx + 1].pk
+                                if idx < len(trace_nodes_sorted) - 1
+                                else (trace_entry.geometry.length if trace_entry else group.pk_end)
+                            )
+                            candidate_pk = _find_reposition_candidate_pk(
+                                current_pk=start_node.pk,
+                                lower_bound=lower_bound,
+                                upper_bound=upper_bound,
+                                troncon_end_pk=group.pk_end,
+                                offset=first_seg.upstream_water_level_min_offset,
+                                absolute_level=first_seg.upstream_water_level_min,
+                                terrain=[(p.pk, p.z) for p in profile_points],
+                            )
+                            if candidate_pk is not None:
+                                reposition_suggestions.append(
+                                    {
+                                        "node_id": group.start_node_id,
+                                        "node_label": start_node.name or start_node.type,
+                                        "current_pk": start_node.pk,
+                                        "candidate_pk": candidate_pk,
+                                    }
+                                )
+                # Un troncon dont le calcul produit une alerte n'a "pas abouti sans erreur"
+                # (consigne utilisateur) — aucun resultat partiel/degrade n'est applique : le
+                # dimensionnement retombe au catalogue par defaut et les noeuds sont remis a zero
+                # (memes helpers que la reinitialisation manuelle), pour ne jamais laisser un
+                # Materiau/DN ou une ligne piezo perimee affichee. Les autres troncons continuent
+                # normalement (le calcul global ne s'interrompt pas).
+                for seg in troncon_segments:
+                    _reset_segment_calc_outputs(package, str(seg.id))
+                    segments_by_id[str(seg.id)] = package.segments[str(seg.id)]
+                for nid in troncon_node_ids:
+                    _reset_node_calc_fields(package, nid)
+                    nodes_by_id[nid] = package.nodes[nid]
+                continue
+
+            for seg_result in result.segments:
+                seg = segments_by_id[seg_result.id]
+                updated_seg = seg.model_copy(
+                    update={
+                        "material": seg_result.material,
+                        "pressure_class": seg_result.pressure_class,
+                        "dn": seg_result.dn,
+                        "di": seg_result.di_mm,
+                        "de": float(seg_result.dn),
+                        "roughness": seg_result.roughness_mm,
+                        "flow": seg_result.flow_m3s * 3600.0,
+                        "velocity": seg_result.velocity_ms,
+                        "head_loss_unit": seg_result.head_loss_unit,
+                        "head_loss_segment": seg_result.head_loss_segment,
+                        "head_loss_cumulative": seg_result.head_loss_cumulative,
+                    }
+                )
+                package.segments[seg_result.id] = updated_seg
+                segments_by_id[seg_result.id] = updated_seg
+                updated_segments += 1
+
+            for node_result in result.nodes:
+                node = nodes_by_id[node_result.node_id]
+                updated_node = node.model_copy(
+                    update={
+                        "piezo_head": node_result.piezo_head,
+                        "pressure_dynamic": node_result.pressure_dynamic,
+                        "pressure_static_max": node_result.pressure_static_max,
+                        "pressure_static_min": node_result.pressure_static_min,
+                    }
+                )
+                package.nodes[node_result.node_id] = updated_node
+                nodes_by_id[node_result.node_id] = updated_node
+                updated_nodes += 1
+
+    package.variants[variant_id] = variant.model_copy(update={"status": "calculated"})
+
+    return {
+        "status": "calculated",
+        "segments_updated": updated_segments,
+        "nodes_updated": updated_nodes,
+        "alerts": all_alerts,
+        "reposition_suggestions": reposition_suggestions,
+    }
+
+
+def _reset_segment_to_default(package: ProjectPackage, segment_id: str) -> Optional[Segment]:
+    """Reinitialise un segment aux valeurs catalogue par defaut (materiau/DN/classe), et efface son
+    statut 'force' — equivalent d'une "suppression" de la mise en donnees d'un troncon (consigne
+    utilisateur) sans toucher a la topologie (noeuds/segments restent en place, seules leurs
+    caracteristiques hydrauliques reviennent au defaut pose a l'import). Reutilise par l'endpoint
+    "Réinitialiser le tronçon" ET par patch_node quand un changement de type d'ouvrage invalide les
+    troncons impactes (consigne utilisateur)."""
+    segment = package.segments.get(segment_id)
+    if segment is None:
+        return None
     default = catalog.default_selection()
     updated = segment.model_copy(
         update={
@@ -365,12 +876,87 @@ def reset_segment(session_id: str, variant_id: str, segment_id: str, request: Re
             "pressure_class": default["pressure_class"],
             "roughness": default["roughness"],
             "forced": False,
+            "head_flow": None,
             "upstream_water_level_max": None,
             "upstream_water_level_min": None,
+            "upstream_water_level_max_offset": None,
+            "upstream_water_level_min_offset": None,
             "min_pressure": None,
             "downstream_residual_pressure": None,
             "max_velocity": None,
+            "flow": 0.0,
+            "velocity": None,
+            "head_loss_unit": None,
+            "head_loss_segment": None,
+            "head_loss_cumulative": None,
         }
     )
     package.segments[segment_id] = updated
+    _reset_node_calc_fields(package, str(updated.upstream_node_id))
+    _reset_node_calc_fields(package, str(updated.downstream_node_id))
+    return updated
+
+
+def _reset_segment_calc_outputs(package: ProjectPackage, segment_id: str) -> Optional[Segment]:
+    """Efface uniquement les SORTIES du calcul (materiau/DN/classe/DI/DE/rugosite choisis par le
+    moteur, debit/vitesse/PDC) sans toucher aux parametres hydrauliques SAISIS (debit de tete,
+    niveaux amont, pressions, vitesse max) ni au statut 'force' — contrairement a
+    `_reset_segment_to_default`, utilise quand le calcul lui-meme echoue pour ce troncon (alerte,
+    cf. run_calculation) : les parametres saisis restent valides, seul le dimensionnement n'a pas
+    abouti (consigne utilisateur : "ces paramètres ne doivent être remplis que lorsque le calcul
+    aboutit sans erreur")."""
+    segment = package.segments.get(segment_id)
+    if segment is None:
+        return None
+    default = catalog.default_selection()
+    updated = segment.model_copy(
+        update={
+            "material": default["material"],
+            "dn": default["dn"],
+            "di": default["di"],
+            "de": default["de"],
+            "pressure_class": default["pressure_class"],
+            "roughness": default["roughness"],
+            "flow": 0.0,
+            "velocity": None,
+            "head_loss_unit": None,
+            "head_loss_segment": None,
+            "head_loss_cumulative": None,
+        }
+    )
+    package.segments[segment_id] = updated
+    return updated
+
+
+def _segment_ids_touching_node(package: ProjectPackage, variant, trace_id: str, node_id: str, node_pk: float) -> set[str]:
+    """Segments de TOUS les troncons de cette trace dont le PK du noeud tombe dans leur plage
+    [pk_start, pk_end] (bornes incluses) — capture aussi bien un noeud qui demarre/termine un
+    troncon (regime determine par son type) qu'un noeud transparent EN PLEIN MILIEU qui va devenir
+    (ou cesser d'etre) une frontiere de troncon (fusion/scission, cf. BOUNDARY_NODE_TYPES) : dans
+    tous ces cas, le(s) troncon(s) concerne(s) doi(ven)t perdre leur validation (consigne
+    utilisateur : "réinitialiser les tronçons qui sont impactés")."""
+    nodes = _nodes_for_variant(package, variant)
+    trace_nodes = [n for n in nodes if str(n.trace_id) == trace_id]
+    segments = _segments_for_variant(package, nodes)
+    ordered = [(str(n.id), n.type, n.pk) for n in sorted(trace_nodes, key=lambda n: n.pk)]
+    segment_by_edge = {(str(s.upstream_node_id), str(s.downstream_node_id)): str(s.id) for s in segments}
+    ids: set[str] = set()
+    for group in group_into_troncons(ordered, segment_by_edge):
+        if group.pk_start - 1e-6 <= node_pk <= group.pk_end + 1e-6:
+            ids.update(group.segment_ids)
+    return ids
+
+
+@router.post("/segments/{segment_id}/reset")
+def reset_segment(session_id: str, variant_id: str, segment_id: str, request: Request):
+    package = require_package(get_session_store(request), session_id)
+    variant = _require_variant(package, variant_id)
+    nodes = _nodes_for_variant(package, variant)
+    segments = _segments_for_variant(package, nodes)
+    segment = next((s for s in segments if str(s.id) == segment_id), None)
+    if segment is None:
+        raise HTTPException(status_code=404, detail="segment inconnu")
+
+    updated = _reset_segment_to_default(package, segment_id)
+    assert updated is not None
     return updated.model_dump(mode="json", exclude_none=True)

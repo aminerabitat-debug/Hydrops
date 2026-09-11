@@ -45,6 +45,22 @@ export function interpolateLonLatAtPk(vertices: Vertex[], pk: number): [number, 
   return [last.lon, last.lat]
 }
 
+// Sommet le plus proche (distance euclidienne en lon/lat, suffisant pour un survol interactif —
+// pas une projection exacte sur le segment) d'un point donne — sert au petit bouton d'information
+// carte/profil (consigne utilisateur : ID + PK du piquet survole).
+export function nearestPkForPoint(vertices: Vertex[], lon: number, lat: number): number {
+  let best = vertices[0]
+  let bestDist = Infinity
+  for (const v of vertices) {
+    const d = (v.lon - lon) ** 2 + (v.lat - lat) ** 2
+    if (d < bestDist) {
+      bestDist = d
+      best = v
+    }
+  }
+  return best.pk
+}
+
 // Sous-ensemble de coordonnees [lon,lat] couvrant [pkStart, pkEnd] le long d'une trace (extremites
 // interpolees + sommets intermediaires) — sert a calculer l'emprise carte d'un troncon au clic
 // dans l'arborescence (ProjectTree -> MapView:mapFocusRequest).

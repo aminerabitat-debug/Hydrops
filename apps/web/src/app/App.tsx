@@ -5,20 +5,31 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 
+import { CalcResultDialog } from './CalcResultDialog'
+import { ConduitesWindow } from './ConduitesWindow'
 import { ConfirmDialog } from './ConfirmDialog'
 import { MenuBar } from './MenuBar'
 import { NewVariantDialog } from './NewVariantDialog'
+import { PreferencesWindow } from './PreferencesWindow'
 import { ProjectDialog } from './ProjectDialog'
 import { QuickBar } from './QuickBar'
 import { Workspace, type LayoutMode } from './Workspace'
 import { ProjectTree } from '../features/project-tree/ProjectTree'
 import { api, type ProjectFormPayload } from '../shared/apiClient'
+import type { CalcRunResult, RepositionSuggestion } from '../shared/types'
 import { useAppStore } from '../state/store'
 import './App.css'
 
 const HEARTBEAT_INTERVAL_MS = 60_000
 
-type DialogState = 'none' | 'newProject' | 'editProject' | 'newVariant' | 'confirmDeleteVariant'
+type DialogState =
+  | 'none'
+  | 'newProject'
+  | 'editProject'
+  | 'newVariant'
+  | 'confirmDeleteVariant'
+  | 'conduites'
+  | 'preferences'
 
 export function App() {
   const sessionId = useAppStore((s) => s.sessionId)
@@ -36,6 +47,7 @@ export function App() {
   const [dialog, setDialog] = useState<DialogState>('none')
   const [backendUnreachable, setBackendUnreachable] = useState(false)
   const [pendingDeleteVariantId, setPendingDeleteVariantId] = useState<string | null>(null)
+  const [calcResult, setCalcResult] = useState<CalcRunResult | null>(null)
   const openInputRef = useRef<HTMLInputElement>(null)
 
   // Cree une session a la demande si aucune n'existe encore (mount initial rate, ou serveur
@@ -171,6 +183,44 @@ export function App() {
     setPendingDeleteVariantId(null)
   }
 
+  const handleRunCalcul = async () => {
+    if (!sessionId || !selectedVariantId) return
+    try {
+      setStatusMessage('Calcul en cours...')
+      const result = await api.runCalculation(sessionId, selectedVariantId)
+      await refreshNetwork()
+      setCalcResult(result)
+      setStatusMessage(
+        result.alerts.length > 0
+          ? `Calcul terminé avec ${result.alerts.length} alerte(s)`
+          : 'Calcul terminé sans alerte',
+      )
+    } catch (error) {
+      setStatusMessage(`Calcul impossible : ${(error as Error).message}`)
+    }
+  }
+
+  // Acceptation d'une proposition de deplacement de reservoir (consigne utilisateur, cf.
+  // CalcResultDialog) : deplace le noeud puis relance un calcul COMPLET (tous les tronçons, pas
+  // seulement celui qui a declenche la suggestion — annonce a l'utilisateur avant l'action).
+  const handleAcceptReposition = async (suggestion: RepositionSuggestion) => {
+    if (!sessionId || !selectedVariantId) return
+    try {
+      setStatusMessage(`Déplacement de ${suggestion.node_label} et relance du calcul pour l'ensemble des tronçons…`)
+      const moveResult = await api.patchNodePosition(sessionId, selectedVariantId, suggestion.node_id, suggestion.candidate_pk)
+      await refreshNetwork()
+      if (moveResult.needs_level_confirmation) {
+        setStatusMessage(
+          `${suggestion.node_label} déplacé — sa cote (saisie en valeur absolue) n'a pas été ajustée automatiquement : ` +
+            "vérifiez-la dans \"Modifier le tronçon\".",
+        )
+      }
+      await handleRunCalcul()
+    } catch (error) {
+      setStatusMessage(`Déplacement impossible : ${(error as Error).message}`)
+    }
+  }
+
   const pendingDeleteVariantName = variants.find((v) => v.id === pendingDeleteVariantId)?.name
 
   return (
@@ -187,6 +237,9 @@ export function App() {
         layoutMode={layoutMode}
         onLayoutModeChange={setLayoutMode}
         onAbout={() => setStatusMessage('HydroPS v0.1.0 — Lot 1 (socle, SIG/DEM, carte/profil/table)')}
+        onRunCalcul={handleRunCalcul}
+        onOpenPreferences={() => setDialog('preferences')}
+        onOpenConduites={() => setDialog('conduites')}
       />
 
       <QuickBar
@@ -234,6 +287,17 @@ export function App() {
           onClose={() => setDialog('none')}
           onConfirm={handleDeleteVariant}
         />
+      )}
+      {dialog === 'conduites' && <ConduitesWindow onClose={() => setDialog('none')} />}
+      {dialog === 'preferences' && sessionId && (
+        <PreferencesWindow
+          sessionId={sessionId}
+          onClose={() => setDialog('none')}
+          onSaved={() => setStatusMessage('Préférences enregistrées')}
+        />
+      )}
+      {calcResult && (
+        <CalcResultDialog result={calcResult} onClose={() => setCalcResult(null)} onAcceptReposition={handleAcceptReposition} />
       )}
     </div>
   )

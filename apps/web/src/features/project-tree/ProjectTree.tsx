@@ -11,7 +11,7 @@ import { nodeColor, nodeDisplayLabel, nodeInitials } from '../../shared/nodeLabe
 import { isOuvrageDataDefined } from '../../shared/ouvrageFields'
 import { useAppStore } from '../../state/store'
 import { REAL_OUVRAGE_TYPES, isStructuralEndpoint } from '../../shared/types'
-import type { CreatableNodeType, Node, TronconGroup, Variant } from '../../shared/types'
+import type { CalculationPreferences, CreatableNodeType, Node, TronconGroup, Variant } from '../../shared/types'
 import { TRONCON_REGIME_COLOR, TRONCON_REGIME_GLYPH, tronconIsForced, tronconRegime } from '../../shared/troncons'
 import { NodeDialog, type NodeSubmitPayload } from '../profile/NodeDialog'
 import { TronconDialog, type TronconHydraulicValues } from './TronconDialog'
@@ -99,6 +99,15 @@ export function ProjectTree({ onOpenProjectSettings, onNewVariant, onDuplicateVa
   const [editingOuvrage, setEditingOuvrage] = useState<Node | null>(null)
   const [editingTroncon, setEditingTroncon] = useState<{ troncon: TronconGroup; label: string } | null>(null)
 
+  // Valeurs par defaut des Preferences (Pression min/résiduelle/Vitesse Max), pour preremplir
+  // "Modifier le tronçon" quand il n'a pas encore sa propre valeur (consigne utilisateur) — chargees
+  // une fois, meme pattern que le catalogue de conduites dans ProfileTableView.
+  const [preferences, setPreferences] = useState<CalculationPreferences | null>(null)
+  useEffect(() => {
+    if (!sessionId) return
+    api.getPreferences(sessionId).then(setPreferences).catch(() => setPreferences(null))
+  }, [sessionId])
+
   const nodesById = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes])
   const segmentsById = useMemo(() => new Map(segments.map((s) => [s.id, s])), [segments])
   const tracesById = useMemo(() => new Map(traces.map((t) => [t.id, t])), [traces])
@@ -179,24 +188,20 @@ export function ProjectTree({ onOpenProjectSettings, onNewVariant, onDuplicateVa
     }
   }
 
-  // "Modifier" un troncon applique la meme donnee Materiau/DN/Classe + parametres hydrauliques a
-  // TOUS ses segments (un troncon peut en regrouper plusieurs si des jonctions/piquages
-  // transparents s'y trouvent).
-  const handleSaveTroncon = async (
-    material: string,
-    dn: number,
-    pressureClass: string,
-    hydraulics: TronconHydraulicValues,
-  ) => {
+  // "Modifier" un troncon applique les MEMES parametres de calcul a TOUS ses segments (un troncon
+  // peut en regrouper plusieurs si des jonctions/piquages transparents s'y trouvent). Materiau/DN/
+  // Classe ne sont plus saisis ici (consigne utilisateur, cf. TronconDialog) — patchSegment les
+  // laisse a leur valeur courante (payload sans material/dn/pressure_class).
+  const handleSaveTroncon = async (hydraulics: TronconHydraulicValues) => {
     if (!sessionId || !selectedVariantId || !editingTroncon) return
     await Promise.all(
       editingTroncon.troncon.segment_ids.map((id) =>
         api.patchSegment(sessionId, selectedVariantId, id, {
-          material,
-          dn,
-          pressure_class: pressureClass,
+          head_flow: hydraulics.headFlow,
           upstream_water_level_max: hydraulics.upstreamWaterLevelMax,
           upstream_water_level_min: hydraulics.upstreamWaterLevelMin,
+          upstream_water_level_max_offset: hydraulics.upstreamWaterLevelMaxOffset,
+          upstream_water_level_min_offset: hydraulics.upstreamWaterLevelMinOffset,
           min_pressure: hydraulics.minPressure,
           downstream_residual_pressure: hydraulics.downstreamResidualPressure,
           max_velocity: hydraulics.maxVelocity,
@@ -511,7 +516,7 @@ export function ProjectTree({ onOpenProjectSettings, onNewVariant, onDuplicateVa
                           <button
                             type="button"
                             className="tree-row-btn"
-                            title="Modifier le tronçon (matériau/DN/classe)"
+                            title="Modifier les paramètres de calcul du tronçon"
                             aria-label="Modifier le tronçon"
                             onClick={(e) => {
                               e.stopPropagation()
@@ -565,19 +570,31 @@ export function ProjectTree({ onOpenProjectSettings, onNewVariant, onDuplicateVa
         (() => {
           const firstSegmentId = editingTroncon.troncon.segment_ids[0]
           const firstSegment = firstSegmentId ? segmentsById.get(firstSegmentId) : undefined
+          // Tronçon precedent (le plus proche en amont, meme trace) — sert a heriter le debit de
+          // tete quand celui-ci n'est pas encore saisi (consigne utilisateur : "de même pour les
+          // tronçons"). Les autres defauts (pression min/résiduelle/vitesse max) viennent des
+          // Préférences plutôt que du tronçon precedent (valeurs plus "normes" que "propagees").
+          const precedingTroncon = troncons
+            .filter((t) => t.trace_id === editingTroncon.troncon.trace_id && t.pk_end <= editingTroncon.troncon.pk_start + 1e-6)
+            .sort((a, b) => b.pk_end - a.pk_end)[0]
+          const precedingHeadFlow = precedingTroncon
+            ? segmentsById.get(precedingTroncon.segment_ids[0])?.head_flow ?? undefined
+            : undefined
           return (
             <TronconDialog
               label={editingTroncon.label}
               regime={tronconRegime(editingTroncon.troncon, nodesById)}
-              initialMaterial={firstSegment?.material ?? 'pehd_pe100'}
-              initialPressureClass={firstSegment?.pressure_class ?? 'pn10'}
-              initialDn={firstSegment?.dn ?? 160}
+              startNodeGroundZ={nodesById.get(editingTroncon.troncon.start_node_id)?.z}
               initialHydraulics={{
+                headFlow: firstSegment?.head_flow ?? precedingHeadFlow ?? undefined,
                 upstreamWaterLevelMax: firstSegment?.upstream_water_level_max ?? undefined,
                 upstreamWaterLevelMin: firstSegment?.upstream_water_level_min ?? undefined,
-                minPressure: firstSegment?.min_pressure ?? undefined,
-                downstreamResidualPressure: firstSegment?.downstream_residual_pressure ?? undefined,
-                maxVelocity: firstSegment?.max_velocity ?? undefined,
+                upstreamWaterLevelMaxOffset: firstSegment?.upstream_water_level_max_offset ?? undefined,
+                upstreamWaterLevelMinOffset: firstSegment?.upstream_water_level_min_offset ?? undefined,
+                minPressure: firstSegment?.min_pressure ?? preferences?.default_min_pressure ?? undefined,
+                downstreamResidualPressure:
+                  firstSegment?.downstream_residual_pressure ?? preferences?.default_downstream_residual_pressure ?? undefined,
+                maxVelocity: firstSegment?.max_velocity ?? preferences?.default_max_velocity ?? undefined,
               }}
               onClose={() => setEditingTroncon(null)}
               onSubmit={handleSaveTroncon}

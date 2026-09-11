@@ -12,7 +12,7 @@ from datetime import date, datetime
 from typing import Literal, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class Metadata(BaseModel):
@@ -175,8 +175,8 @@ class Node(BaseModel):
     variant_id: UUID
     type: Literal[
         "junction", "high_point", "low_point", "sectioning_valve", "control_valve",
-        "pressure_break", "reservoir", "pumping_station", "intake", "treatment_plant",
-        "tie_in", "terminal",
+        "pressure_break", "storage_reservoir", "surge_reservoir", "pumping_station", "intake",
+        "treatment_plant", "tie_in", "terminal",
     ]
     name: Optional[str] = None
     pk: float
@@ -192,7 +192,28 @@ class Node(BaseModel):
     # Mise en donnees detaillee specifique au type d'ouvrage (cdc §8) — champs libres varient selon
     # le type (station de pompage, reservoir, brise charge, station de traitement...), definis cote
     # frontend (shared/ouvrageFields.ts) ; le backend les stocke tels quels sans validation par champ.
+    # Pour un Piquage (tie_in), `data` ne porte qu'un seul champ optionnel,
+    # `include_withdrawal_in_sizing` (bool) : coche par defaut, decoche = le debit preleve par ce
+    # piquage n'est PAS soustrait du debit de dimensionnement des troncons aval (consigne
+    # utilisateur : "des fois on veut dimensionner...pour ce debit [de tete], d'autres fois on veut
+    # optimiser et soustraire le debit de prelevement en route").
     data: Optional[dict] = None
+    # Sorties du calcul hydraulique (bouton Calculer), par piquet — cf.
+    # packages/hydrops-engine/hydrops_engine/hydraulics.py. None tant qu'aucun calcul n'a ete lance
+    # ou que le noeud n'appartient pas a un troncon calculable.
+    piezo_head: Optional[float] = None
+    pressure_dynamic: Optional[float] = None
+    pressure_static_max: Optional[float] = None
+    pressure_static_min: Optional[float] = None
+
+    @field_validator("type", mode="before")
+    @classmethod
+    def _map_legacy_reservoir_type(cls, value: object) -> object:
+        """Alias de lecture (consigne utilisateur) : l'ancien type "reservoir" (avant la scission
+        Reservoir de stockage / Reservoir de mise en charge) reste lisible sur un .hydrops deja
+        exporte — mappe vers "storage_reservoir", jamais propose en creation (CreatableNodeType,
+        cote API, ne connait plus "reservoir")."""
+        return "storage_reservoir" if value == "reservoir" else value
 
 
 class Segment(BaseModel):
@@ -212,9 +233,55 @@ class Segment(BaseModel):
     forced: bool = False
     # Parametres hydrauliques du troncon (cdc §8), saisis depuis la fenetre "Modifier le troncon" —
     # le sous-ensemble pertinent depend du regime (gravitaire vs refoulement, cf.
-    # shared/troncons.ts:tronconRegime cote frontend).
+    # shared/troncons.ts:tronconRegime cote frontend). `head_flow` (debit de tete, m3/h) est
+    # renseigne au niveau du troncon quel que soit son regime (consigne utilisateur : pas de champ
+    # Debit sur la station de pompage, un troncon peut demarrer sur n'importe quel ouvrage).
+    head_flow: Optional[float] = None
     upstream_water_level_max: Optional[float] = None
     upstream_water_level_min: Optional[float] = None
+    # Non-null = la cote correspondante a ete saisie en relatif ("+N" cote frontend) : valeur = N,
+    # permet de la recalculer automatiquement si le noeud de depart du tronçon est deplace
+    # (consigne utilisateur — cf. routers/network.py:patch_node_position). None = cote absolue,
+    # jamais recalculee automatiquement.
+    upstream_water_level_max_offset: Optional[float] = None
+    upstream_water_level_min_offset: Optional[float] = None
     min_pressure: Optional[float] = None
     downstream_residual_pressure: Optional[float] = None
     max_velocity: Optional[float] = None
+    # Sorties du calcul hydraulique (bouton Calculer) pour ce segment — cf.
+    # packages/hydrops-engine/hydrops_engine/hydraulics.py. `flow`/`roughness` (deja existants
+    # ci-dessus) sont aussi ecrases par le calcul : `flow` devient le debit reellement transite
+    # (apres soustraction eventuelle des piquages amont), `roughness` la valeur de Preferences pour
+    # le materiau retenu. None tant qu'aucun calcul n'a ete lance.
+    velocity: Optional[float] = None
+    head_loss_unit: Optional[float] = None  # J, pertes de charge lineaires unitaires (m/m)
+    head_loss_segment: Optional[float] = None  # J * longueur * (1 + majoration singulieres) (m)
+    head_loss_cumulative: Optional[float] = None  # cumul depuis le debut du troncon calcule (m)
+
+
+class MaterialCriterionRule(BaseModel):
+    """Une ligne du tableau "Critères de choix des matériaux des conduites" (menu Calcul >
+    Preferences, consigne utilisateur) : materiaux autorises pour une plage de DN et,
+    eventuellement, un type de fluide precis (None = s'applique a tous les fluides)."""
+
+    dn_min: Optional[int] = None
+    dn_max: Optional[int] = None
+    fluid: Optional[str] = None
+    materials: list[str] = Field(default_factory=list)
+
+
+class CalculationPreferences(BaseModel):
+    """Hypotheses de calcul hydraulique (menu Calcul > Preferences, consigne utilisateur) —
+    document auxiliaire au niveau du projet (comme TechnoEconomicAssumptions), partage par toutes
+    les variantes. Un point de depart editable (cdc §15), pas une verite figee."""
+
+    roughness_by_material: dict[str, float] = Field(default_factory=dict)
+    fluid_temperature_c: float = 20.0
+    singular_loss_markup_pct: float = 10.0
+    material_criteria: list[MaterialCriterionRule] = Field(default_factory=list)
+    # Valeurs par defaut proposees a l'ouverture de "Modifier le tronçon" quand le tronçon n'a pas
+    # encore sa propre valeur (consigne utilisateur) — n'influencent jamais un calcul directement,
+    # seulement le prereplissage cote frontend.
+    default_min_pressure: Optional[float] = None
+    default_downstream_residual_pressure: Optional[float] = None
+    default_max_velocity: Optional[float] = None

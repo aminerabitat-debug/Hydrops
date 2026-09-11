@@ -101,12 +101,18 @@ export function ProjectTree({ onOpenProjectSettings, onNewVariant, onDuplicateVa
 
   // Valeurs par defaut des Preferences (Pression min/résiduelle/Vitesse Max), pour preremplir
   // "Modifier le tronçon" quand il n'a pas encore sa propre valeur (consigne utilisateur) — chargees
-  // une fois, meme pattern que le catalogue de conduites dans ProfileTableView.
+  // une fois par projet ouvert, meme pattern que le catalogue de conduites dans ProfileTableView.
+  // `sessionId` est un jeton de SESSION stable (une seule fois par onglet, cf. App.tsx:ensureSession)
+  // — un nouveau projet cree/ouvert dans le MEME onglet ne le change jamais, donc `[sessionId]` seul
+  // ne redeclencherait cette recuperation qu'une fois pour toute la session : si ce premier appel
+  // tombe avant qu'un projet existe (413/409, aucun projet actif), les Préférences resteraient
+  // vides pour tous les projets ouverts ensuite. On depend donc aussi de `project?.id`, et on
+  // n'appelle meme pas l'API tant qu'aucun projet n'est ouvert.
   const [preferences, setPreferences] = useState<CalculationPreferences | null>(null)
   useEffect(() => {
-    if (!sessionId) return
+    if (!sessionId || !project) return
     api.getPreferences(sessionId).then(setPreferences).catch(() => setPreferences(null))
-  }, [sessionId])
+  }, [sessionId, project?.id])
 
   const nodesById = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes])
   const segmentsById = useMemo(() => new Map(segments.map((s) => [s.id, s])), [segments])

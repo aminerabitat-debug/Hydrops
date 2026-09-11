@@ -281,7 +281,8 @@ class CalculationPreferences(BaseModel):
     material_criteria: list[MaterialCriterionRule] = Field(default_factory=list)
     # Valeurs par defaut proposees a l'ouverture de "Modifier le tronçon" quand le tronçon n'a pas
     # encore sa propre valeur (consigne utilisateur) — n'influencent jamais un calcul directement,
-    # seulement le prereplissage cote frontend.
-    default_min_pressure: Optional[float] = None
-    default_downstream_residual_pressure: Optional[float] = None
-    default_max_velocity: Optional[float] = None
+    # seulement le prereplissage cote frontend. Valeurs de depart usuelles (consigne utilisateur),
+    # modifiables dans la fenetre Preferences — pas une verite figee.
+    default_min_pressure: Optional[float] = 5.0
+    default_downstream_residual_pressure: Optional[float] = 10.0
+    default_max_velocity: Optional[float] = 2.0

@@ -148,6 +148,6 @@ class CalculationPreferencesRequest(BaseModel):
     fluid_temperature_c: float = 20.0
     singular_loss_markup_pct: float = 10.0
     material_criteria: list[MaterialCriterionRuleRequest] = []
-    default_min_pressure: Optional[float] = None
-    default_downstream_residual_pressure: Optional[float] = None
-    default_max_velocity: Optional[float] = None
+    default_min_pressure: Optional[float] = 5.0
+    default_downstream_residual_pressure: Optional[float] = 10.0
+    default_max_velocity: Optional[float] = 2.0

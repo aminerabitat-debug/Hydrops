@@ -400,18 +400,18 @@ def patch_node(session_id: str, variant_id: str, node_id: str, payload: PatchNod
 def patch_node_position(session_id: str, variant_id: str, node_id: str, payload: PatchNodePositionRequest, request: Request):
     """Deplace un noeud existant le long de sa trace (consigne utilisateur : proposer de decaler
     le reservoir amont d'un tronçon gravitaire sur une alerte de terrain incompatible avec sa cote
-    hydrostatique — cf. reposition_suggestions dans run_calculation). Refuse sur une extremite
-    structurelle (pk 0/longueur — aucun sens a la deplacer, la trace elle-meme commence/finit la)
-    et sur un pk qui ne reste pas strictement entre les deux noeuds voisins immediats de la meme
-    trace (jamais de croisement d'un autre noeud)."""
+    hydrostatique — cf. reposition_suggestions dans run_calculation). Une extremite structurelle
+    (pk 0/longueur) PEUT etre deplacee — c'est au contraire le cas le plus frequent en pratique (un
+    reservoir amont demarre presque toujours au premier noeud de sa trace) — les bornes ci-dessous
+    (0.0 / longueur de trace pour un noeud sans voisin de ce cote) l'autorisent deja naturellement.
+    Refuse seulement sur un pk qui ne reste pas strictement entre les deux noeuds voisins immediats
+    de la meme trace (jamais de croisement d'un autre noeud)."""
     package = require_package(get_session_store(request), session_id)
     variant = _require_variant(package, variant_id)
     nodes = _nodes_for_variant(package, variant)
     node = next((n for n in nodes if str(n.id) == node_id), None)
     if node is None:
         raise HTTPException(status_code=404, detail="noeud inconnu")
-    if _is_structural_endpoint(package, node):
-        raise HTTPException(status_code=400, detail="une extremite de trace ne peut pas etre deplacee")
 
     trace_entry = package.traces.get(str(node.trace_id))
     if trace_entry is None:
@@ -763,39 +763,40 @@ def run_calculation(session_id: str, variant_id: str, request: Request):
                 # Alerte hydrostatique gravitaire (terrain incompatible avec la cote du reservoir
                 # amont, cf. hydraulics.py:_check_hydrostatic_feasibility) : proposer de deplacer
                 # le reservoir au pk compatible le plus proche plutot que de se contenter d'alerter
-                # (consigne utilisateur) — seulement si ce noeud n'est pas une extremite
-                # structurelle de trace (rien de sensé a deplacer sinon, cf. patch_node_position).
+                # (consigne utilisateur) — y compris quand ce noeud est l'extremite structurelle de
+                # la trace (pk 0), le cas le plus frequent en pratique pour un reservoir amont ; les
+                # bornes ci-dessous l'autorisent deja a se deplacer vers l'aval jusqu'a son voisin
+                # suivant, cf. patch_node_position.
                 if regime == "gravitaire" and any("hydrostatique" in a.lower() for a in result.alerts):
-                    if not _is_structural_endpoint(package, start_node):
-                        trace_nodes_sorted = sorted(by_trace[trace_id], key=lambda n: n.pk)
-                        idx = next(
-                            (i for i, n in enumerate(trace_nodes_sorted) if str(n.id) == group.start_node_id), None
+                    trace_nodes_sorted = sorted(by_trace[trace_id], key=lambda n: n.pk)
+                    idx = next(
+                        (i for i, n in enumerate(trace_nodes_sorted) if str(n.id) == group.start_node_id), None
+                    )
+                    if idx is not None:
+                        lower_bound = trace_nodes_sorted[idx - 1].pk if idx > 0 else 0.0
+                        upper_bound = (
+                            trace_nodes_sorted[idx + 1].pk
+                            if idx < len(trace_nodes_sorted) - 1
+                            else (trace_entry.geometry.length if trace_entry else group.pk_end)
                         )
-                        if idx is not None:
-                            lower_bound = trace_nodes_sorted[idx - 1].pk if idx > 0 else 0.0
-                            upper_bound = (
-                                trace_nodes_sorted[idx + 1].pk
-                                if idx < len(trace_nodes_sorted) - 1
-                                else (trace_entry.geometry.length if trace_entry else group.pk_end)
+                        candidate_pk = _find_reposition_candidate_pk(
+                            current_pk=start_node.pk,
+                            lower_bound=lower_bound,
+                            upper_bound=upper_bound,
+                            troncon_end_pk=group.pk_end,
+                            offset=first_seg.upstream_water_level_min_offset,
+                            absolute_level=first_seg.upstream_water_level_min,
+                            terrain=[(p.pk, p.z) for p in profile_points],
+                        )
+                        if candidate_pk is not None:
+                            reposition_suggestions.append(
+                                {
+                                    "node_id": group.start_node_id,
+                                    "node_label": start_node.name or start_node.type,
+                                    "current_pk": start_node.pk,
+                                    "candidate_pk": candidate_pk,
+                                }
                             )
-                            candidate_pk = _find_reposition_candidate_pk(
-                                current_pk=start_node.pk,
-                                lower_bound=lower_bound,
-                                upper_bound=upper_bound,
-                                troncon_end_pk=group.pk_end,
-                                offset=first_seg.upstream_water_level_min_offset,
-                                absolute_level=first_seg.upstream_water_level_min,
-                                terrain=[(p.pk, p.z) for p in profile_points],
-                            )
-                            if candidate_pk is not None:
-                                reposition_suggestions.append(
-                                    {
-                                        "node_id": group.start_node_id,
-                                        "node_label": start_node.name or start_node.type,
-                                        "current_pk": start_node.pk,
-                                        "candidate_pk": candidate_pk,
-                                    }
-                                )
                 # Un troncon dont le calcul produit une alerte n'a "pas abouti sans erreur"
                 # (consigne utilisateur) — aucun resultat partiel/degrade n'est applique : le
                 # dimensionnement retombe au catalogue par defaut et les noeuds sont remis a zero

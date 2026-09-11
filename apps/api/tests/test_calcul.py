@@ -191,9 +191,14 @@ def test_calcul_gravitaire_hydrostatic_alert_clears_segment_and_nodes_but_keeps_
     assert body["segments_updated"] == 0
     assert body["nodes_updated"] == 0
     assert any("hydrostatique" in a.lower() for a in body["alerts"])
-    # Le reservoir est a l'extremite structurelle de la trace (pk 0) — rien de sense a deplacer,
-    # aucune suggestion ne doit etre proposee.
-    assert body["reposition_suggestions"] == []
+    # Le reservoir est a l'extremite structurelle de la trace (pk 0) — c'est le cas le plus
+    # frequent en pratique pour un reservoir amont, il reste deplacable (consigne utilisateur) :
+    # une suggestion doit etre proposee, pas seulement pour un reservoir en noeud interieur.
+    assert len(body["reposition_suggestions"]) == 1
+    suggestion = body["reposition_suggestions"][0]
+    assert suggestion["node_id"] == upstream_id
+    assert suggestion["current_pk"] == pytest.approx(0.0)
+    assert suggestion["candidate_pk"] != suggestion["current_pk"]
 
 
 def test_calcul_gravitaire_hydrostatic_alert_suggests_reposition_for_non_structural_reservoir(

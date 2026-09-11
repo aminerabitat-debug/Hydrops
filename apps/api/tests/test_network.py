@@ -513,16 +513,21 @@ def test_patch_node_position_moves_node_and_adjusts_adjacent_segments(
     assert downstream_seg["pk_start"] == pytest.approx(new_pk)
 
 
-def test_patch_node_position_rejects_structural_endpoint(
+def test_patch_node_position_moves_structural_endpoint(
     client, session_id, project_state, sample_kml_bytes, import_trace
 ):
+    # Un reservoir amont demarre presque toujours au premier noeud (structurel) de sa trace — ce
+    # cas doit rester deplacable (consigne utilisateur), pas rejete : seules les bornes
+    # (voisins immediats de la meme trace) contraignent le deplacement, jamais le type d'extremite.
     variant_id, trace = _import_sample(client, session_id, project_state, sample_kml_bytes, import_trace)
     nodes = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes").json()
+    new_pk = trace["length"] / 2
     response = client.patch(
         f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes/{nodes[0]['id']}/position",
-        json={"pk": trace["length"] / 2},
+        json={"pk": new_pk},
     )
-    assert response.status_code == 400
+    assert response.status_code == 200, response.text
+    assert response.json()["node"]["pk"] == pytest.approx(new_pk)
 
 
 def test_patch_node_position_rejects_pk_beyond_neighbors(

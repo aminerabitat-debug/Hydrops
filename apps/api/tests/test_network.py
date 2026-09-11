@@ -154,6 +154,82 @@ def test_reset_segment_also_clears_hydraulic_fields(client, session_id, project_
     assert "min_velocity" not in reset
 
 
+def test_patch_segment_forces_material_dn_resolves_cheapest_pressure_class(
+    client, session_id, project_state, sample_kml_bytes, import_trace
+):
+    # Consigne utilisateur : "fixer des contraintes Materiau et DN au niveau de la fenetre
+    # tronçon" — aucune classe de pression demandee, la moins chere disponible pour ce (materiau,
+    # DN) est retenue automatiquement.
+    variant_id, trace = _import_sample(client, session_id, project_state, sample_kml_bytes, import_trace)
+    segments = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments").json()
+    segment_id = segments[0]["id"]
+
+    response = client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/segments/{segment_id}",
+        json={"forced_material": "PEHD", "forced_dn": 110},
+    )
+    assert response.status_code == 200, response.text
+    updated = response.json()
+    assert updated["forced_material"] == "PEHD"
+    assert updated["forced_dn"] == 110
+    assert updated["material"] == "PEHD"
+    assert updated["dn"] == 110
+    assert updated["forced"] is True
+
+
+def test_patch_segment_rejects_unknown_forced_material_dn_combination(
+    client, session_id, project_state, sample_kml_bytes, import_trace
+):
+    variant_id, trace = _import_sample(client, session_id, project_state, sample_kml_bytes, import_trace)
+    segments = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments").json()
+    segment_id = segments[0]["id"]
+
+    response = client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/segments/{segment_id}",
+        json={"forced_material": "PEHD", "forced_dn": 999999},
+    )
+    assert response.status_code == 422
+
+
+def test_patch_segment_clears_forced_material_dn_with_empty_string(
+    client, session_id, project_state, sample_kml_bytes, import_trace
+):
+    variant_id, trace = _import_sample(client, session_id, project_state, sample_kml_bytes, import_trace)
+    segments = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments").json()
+    segment_id = segments[0]["id"]
+    client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/segments/{segment_id}",
+        json={"forced_material": "PEHD", "forced_dn": 110},
+    )
+
+    response = client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/segments/{segment_id}",
+        json={"forced_material": ""},
+    )
+    assert response.status_code == 200, response.text
+    updated = response.json()
+    assert "forced_material" not in updated
+    assert "forced_dn" not in updated
+    default = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments").json()[0]
+    assert default["material"] == "PEHD" and default["dn"] == 160  # catalogue par defaut
+
+
+def test_reset_segment_clears_forced_material_dn(client, session_id, project_state, sample_kml_bytes, import_trace):
+    variant_id, trace = _import_sample(client, session_id, project_state, sample_kml_bytes, import_trace)
+    segments = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments").json()
+    segment_id = segments[0]["id"]
+    client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/segments/{segment_id}",
+        json={"forced_material": "PEHD", "forced_dn": 110},
+    )
+
+    response = client.post(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments/{segment_id}/reset")
+    assert response.status_code == 200, response.text
+    reset = response.json()
+    assert "forced_material" not in reset
+    assert "forced_dn" not in reset
+
+
 def test_patch_node_sets_ouvrage_data_and_flows(client, session_id, project_state, sample_kml_bytes, import_trace):
     variant_id, trace = _import_sample(client, session_id, project_state, sample_kml_bytes, import_trace)
     nodes = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes").json()

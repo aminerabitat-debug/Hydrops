@@ -96,6 +96,32 @@ def resolve(material: str, dn: int, pressure_class: str) -> dict:
     raise CatalogLookupError(f"DN {dn} indisponible pour {material}/{pressure_class}")
 
 
+def material_dn_exists(material: str, dn: int) -> bool:
+    """Existe-t-il au moins une ligne ACTIVE (materiau, DN), quelle que soit la classe de pression
+    — utilise pour valider un DN "force" (fenetre Modifier le tronçon, consigne utilisateur :
+    contraindre Materiau/DN sans imposer une classe precise, cf. resolve_forced_selection qui
+    choisit la classe la moins chere satisfaisant le PMS requis)."""
+    return any(r.active and r.material == material and r.dn == dn for r in _CATALOG.values())
+
+
+def resolve_forced_selection(material: str, dn: int, min_pms_m: float = 0.0) -> dict:
+    """Pour un (materiau, DN) force (pas de classe imposee) : retient la classe de pression la
+    moins chere parmi les lignes actives qui respectent `min_pms_m`, ou a defaut (aucune ne le
+    respecte) la moins chere tout court — jamais un echec silencieux, l'appelant doit alerter si
+    `pms_ok` est faux. Leve CatalogLookupError si la combinaison n'existe meme pas (devrait avoir
+    ete ecartee a la saisie, cf. material_dn_exists)."""
+    matches = [r for r in _CATALOG.values() if r.active and r.material == material and r.dn == dn]
+    if not matches:
+        raise CatalogLookupError(f"aucune conduite active {material} DN{dn}")
+    meeting_pms = [r for r in matches if r.pms >= min_pms_m - 1e-9]
+    pool = meeting_pms or matches
+    row = min(pool, key=lambda r: (r.prix_aps, r.pressure_class))
+    return {
+        "material": row.material, "dn": row.dn, "pressure_class": row.pressure_class,
+        "di": row.di, "de": float(row.dn), "pms": row.pms, "pms_ok": bool(meeting_pms),
+    }
+
+
 def default_roughness(material: str) -> float:
     return DEFAULT_ROUGHNESS_MM.get(material, 0.1)
 

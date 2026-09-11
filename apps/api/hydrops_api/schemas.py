@@ -115,6 +115,12 @@ class PatchSegmentRequest(BaseModel):
     downstream_residual_pressure: Optional[float] = None
     max_velocity: Optional[float] = None
     min_velocity: Optional[float] = None
+    # Contrainte Materiau/DN forcee (consigne utilisateur) — "" (chaine vide) sur forced_material
+    # revient au dimensionnement automatique (meme convention que PatchNodeRequest.name), une
+    # valeur non-vide exige forced_dn en meme temps (cf. patch_segment). Absent des deux = ne pas
+    # toucher a la contrainte existante.
+    forced_material: Optional[str] = None
+    forced_dn: Optional[int] = None
 
 
 class PatchNodePositionRequest(BaseModel):

@@ -252,6 +252,16 @@ class Segment(BaseModel):
     # iterative du DN gravitaire pour resoudre un defaut de pression (cf.
     # hydrops_engine.hydraulics.solve_gravitaire_troncon) ne descend jamais sous cette vitesse.
     min_velocity: Optional[float] = None
+    # Contrainte Materiau/DN forcee (fenetre "Modifier le tronçon", consigne utilisateur) : le
+    # calcul hydraulique n'auto-dimensionne plus ce segment (aucune recherche catalogue par
+    # vitesse/PMS) — il retient telle quelle la classe de pression la moins chere disponible pour
+    # ce (materiau, DN) satisfaisant si possible le PMS requis (cf.
+    # hydrops_engine.hydraulics.SegmentSpec.forced_material/forced_dn), et le calcul s'applique
+    # meme si la pression ou la vitesse resultante viole une contrainte (une alerte le signale
+    # sans jamais bloquer, contrairement au dimensionnement automatique). Les deux vont toujours
+    # ensemble : aucun sens a forcer l'un sans l'autre.
+    forced_material: Optional[str] = None
+    forced_dn: Optional[int] = None
     # Sorties du calcul hydraulique (bouton Calculer) pour ce segment — cf.
     # packages/hydrops-engine/hydrops_engine/hydraulics.py. `flow`/`roughness` (deja existants
     # ci-dessus) sont aussi ecrases par le calcul : `flow` devient le debit reellement transite

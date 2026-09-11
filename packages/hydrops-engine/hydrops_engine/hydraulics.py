@@ -167,6 +167,14 @@ class SegmentSpec:
     # d'augmentation du DN gravitaire (cf. max_di_mm_for_velocity), qui s'arrete des qu'elle
     # l'atteindrait plutot que de grossir indefiniment.
     min_velocity_ms: Optional[float] = None
+    # Contrainte Materiau/DN forcee (fenetre "Modifier le tronçon", consigne utilisateur) : ce
+    # segment n'est plus auto-dimensionne (aucune recherche catalogue par vitesse/PMS, cf.
+    # _resolve_forced_pipe) — la classe de pression la moins chere disponible pour ce (materiau,
+    # DN) est retenue, et le calcul s'applique meme si la pression/vitesse resultante viole une
+    # contrainte (alerte informative, jamais bloquante, contrairement au dimensionnement
+    # automatique). Toujours ensemble : aucun sens a l'un sans l'autre.
+    forced_material: Optional[str] = None
+    forced_dn: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -229,6 +237,22 @@ def _candidates(
         ),
         key=lambda p: (p.price, p.dn, p.di_mm),
     )
+
+
+def _resolve_forced_pipe(catalog: list[CatalogPipe], material: str, dn: int, min_pms_m: float) -> tuple[Optional[CatalogPipe], bool]:
+    """Pour un (materiau, DN) force (consigne utilisateur, aucune classe de pression imposee) :
+    retient la ligne active la moins chere satisfaisant `min_pms_m`, ou a defaut (aucune ne le
+    respecte) la moins chere tout court — jamais un echec silencieux, le 2e element du tuple
+    (`pms_ok`) indique si le PMS requis est effectivement tenu, a charge de l'appelant d'alerter
+    si non. `None` si la combinaison n'existe meme pas dans le catalogue actif (ne devrait pas
+    arriver, ecarte a la saisie cote API — cf. services/catalog.py:material_dn_exists)."""
+    matches = [p for p in catalog if p.active and p.material == material and p.dn == dn]
+    if not matches:
+        return None, False
+    meeting_pms = [p for p in matches if p.pms_m >= min_pms_m - 1e-9]
+    pool = meeting_pms or matches
+    chosen = min(pool, key=lambda p: (p.price, p.pressure_class))
+    return chosen, bool(meeting_pms)
 
 
 def _node_label(node_id: str, node_pk: Optional[dict[str, float]]) -> str:
@@ -382,21 +406,54 @@ def _gravitaire_pass(
             nodes[upstream_node].pressure_static_max or 0.0,
             nodes[downstream_node].pressure_static_max or 0.0,
         )
-        effective_dn_floor = dn_floor
-        forced_min_dn = min_dn_by_segment.get(seg.id)
-        if forced_min_dn is not None:
-            effective_dn_floor = forced_min_dn if effective_dn_floor is None else max(effective_dn_floor, forced_min_dn)
+        seg_label = f"Segment entre {_node_label(upstream_node, node_pk)} et {_node_label(downstream_node, node_pk)}"
+        if seg.forced_material is not None and seg.forced_dn is not None:
+            # Materiau/DN forces (consigne utilisateur) : plus d'auto-dimensionnement pour ce
+            # segment — la classe de pression la moins chere disponible est retenue, et le calcul
+            # s'applique meme si le PMS/la vitesse n'est pas respecte (alerte informative,
+            # jamais bloquante contrairement au dimensionnement automatique).
+            cand, pms_ok = _resolve_forced_pipe(catalog, seg.forced_material, seg.forced_dn, max_pms_needed)
+            if cand is None:
+                alerts.append(
+                    f"{seg_label} : aucune conduite active {seg.forced_material} DN{seg.forced_dn} au "
+                    f"catalogue — vérifier la fenêtre Conduites."
+                )
+                candidates = _candidates(catalog, 0.0, None, None, None) or list(catalog)
+                cand = candidates[0]
+            elif not pms_ok:
+                alerts.append(
+                    f"{seg_label} : le DN {seg.forced_dn} force en {seg.forced_material} ne respecte pas "
+                    f"le PMS requis ({max_pms_needed:.1f} m, classe {cand.pressure_class} = {cand.pms_m:.1f} m) "
+                    f"— calcul effectué malgré la contrainte matériau/DN forcée."
+                )
+        else:
+            effective_dn_floor = dn_floor
+            forced_min_dn = min_dn_by_segment.get(seg.id)
+            if forced_min_dn is not None:
+                effective_dn_floor = forced_min_dn if effective_dn_floor is None else max(effective_dn_floor, forced_min_dn)
 
-        candidates = _candidates(catalog, min_di, effective_dn_floor, None, allowed_materials_fn, max_pms_needed, max_di)
-        if not candidates:
-            alerts.append(
-                f"Segment entre {_node_label(upstream_node, node_pk)} et {_node_label(downstream_node, node_pk)} : "
-                f"aucune conduite active ne respecte vitesse/PMS/matériaux autorisés "
-                f"(DN plancher {effective_dn_floor}) — vérifier le catalogue Conduites."
-            )
-            candidates = _candidates(catalog, 0.0, effective_dn_floor, None, None) or list(catalog)
-        cand = candidates[0]
+            candidates = _candidates(catalog, min_di, effective_dn_floor, None, allowed_materials_fn, max_pms_needed, max_di)
+            if not candidates:
+                alerts.append(
+                    f"{seg_label} : aucune conduite active ne respecte vitesse/PMS/matériaux autorisés "
+                    f"(DN plancher {effective_dn_floor}) — vérifier le catalogue Conduites."
+                )
+                candidates = _candidates(catalog, 0.0, effective_dn_floor, None, None) or list(catalog)
+            cand = candidates[0]
         velocity, j = segment_hydraulics(seg.flow_m3s, cand.di_mm, cand.roughness_mm, viscosity)
+        if seg.forced_dn is not None:
+            if seg.max_velocity_ms and velocity > seg.max_velocity_ms + 1e-6:
+                alerts.append(
+                    f"{seg_label} : vitesse {velocity:.2f} m/s supérieure à la vitesse max "
+                    f"({seg.max_velocity_ms:.2f} m/s) pour le DN {seg.forced_dn} forcé — calcul "
+                    f"effectué malgré la contrainte matériau/DN forcée."
+                )
+            if seg.min_velocity_ms and velocity < seg.min_velocity_ms - 1e-6:
+                alerts.append(
+                    f"{seg_label} : vitesse {velocity:.2f} m/s inférieure à la vitesse min "
+                    f"({seg.min_velocity_ms:.2f} m/s) pour le DN {seg.forced_dn} forcé — calcul "
+                    f"effectué malgré la contrainte matériau/DN forcée."
+                )
         loss = j * seg.length_m * (1 + singular_loss_markup_pct / 100)
         cote_upstream = nodes[downstream_node].piezo_head + loss
         pressure_upstream = cote_upstream - node_ground_z[upstream_node]
@@ -523,6 +580,11 @@ def solve_gravitaire_troncon(
             if idx == 0:
                 continue
             seg = segments_ordered[idx - 1]
+            if seg.forced_dn is not None:
+                # Materiau/DN force (consigne utilisateur) : jamais touche par l'augmentation
+                # iterative, meme si le noeud aval viole la pression — l'alerte de pression
+                # persiste (le segment force garde son DN quoi qu'il arrive).
+                continue
             current_dn = dn_by_segment_id.get(seg.id)
             if current_dn is None:
                 continue
@@ -582,19 +644,47 @@ def solve_refoulement_troncon(
     dn_ceiling: Optional[int] = None
     prelim: list[tuple[SegmentSpec, CatalogPipe, float, float]] = []
     for i, seg in enumerate(segments_ordered):
-        min_di = min_di_mm_for_velocity(seg.flow_m3s, seg.max_velocity_ms)
-        max_di = max_di_mm_for_velocity(seg.flow_m3s, seg.min_velocity_ms)
-        candidates = _candidates(catalog, min_di, None, dn_ceiling, allowed_materials_fn, max_di_mm=max_di)
-        if not candidates:
-            alerts.append(
-                f"Segment entre {_node_label(node_ids_ordered[i], node_pk)} et "
-                f"{_node_label(node_ids_ordered[i + 1], node_pk)} : aucune conduite active ne "
-                f"respecte vitesse/matériaux autorisés (DN plafonné à {dn_ceiling}) — vérifier le "
-                f"catalogue Conduites."
-            )
-            candidates = _candidates(catalog, 0.0, None, dn_ceiling, None) or list(catalog)
-        cand = candidates[0]
+        seg_label = (
+            f"Segment entre {_node_label(node_ids_ordered[i], node_pk)} et "
+            f"{_node_label(node_ids_ordered[i + 1], node_pk)}"
+        )
+        if seg.forced_material is not None and seg.forced_dn is not None:
+            # Materiau/DN forces (consigne utilisateur) : le PMS requis n'est connu qu'une fois H0
+            # determine plus bas (meme controle que le dimensionnement automatique, cf. boucle
+            # `results` ci-dessous) — on retient ici la classe la moins chere, sans egard au PMS.
+            cand, _pms_ok = _resolve_forced_pipe(catalog, seg.forced_material, seg.forced_dn, 0.0)
+            if cand is None:
+                alerts.append(
+                    f"{seg_label} : aucune conduite active {seg.forced_material} DN{seg.forced_dn} "
+                    f"au catalogue — vérifier la fenêtre Conduites."
+                )
+                candidates = _candidates(catalog, 0.0, None, None, None) or list(catalog)
+                cand = candidates[0]
+        else:
+            min_di = min_di_mm_for_velocity(seg.flow_m3s, seg.max_velocity_ms)
+            max_di = max_di_mm_for_velocity(seg.flow_m3s, seg.min_velocity_ms)
+            candidates = _candidates(catalog, min_di, None, dn_ceiling, allowed_materials_fn, max_di_mm=max_di)
+            if not candidates:
+                alerts.append(
+                    f"{seg_label} : aucune conduite active ne respecte vitesse/matériaux autorisés "
+                    f"(DN plafonné à {dn_ceiling}) — vérifier le catalogue Conduites."
+                )
+                candidates = _candidates(catalog, 0.0, None, dn_ceiling, None) or list(catalog)
+            cand = candidates[0]
         velocity, j = segment_hydraulics(seg.flow_m3s, cand.di_mm, cand.roughness_mm, viscosity)
+        if seg.forced_dn is not None:
+            if seg.max_velocity_ms and velocity > seg.max_velocity_ms + 1e-6:
+                alerts.append(
+                    f"{seg_label} : vitesse {velocity:.2f} m/s supérieure à la vitesse max "
+                    f"({seg.max_velocity_ms:.2f} m/s) pour le DN {seg.forced_dn} forcé — calcul "
+                    f"effectué malgré la contrainte matériau/DN forcée."
+                )
+            if seg.min_velocity_ms and velocity < seg.min_velocity_ms - 1e-6:
+                alerts.append(
+                    f"{seg_label} : vitesse {velocity:.2f} m/s inférieure à la vitesse min "
+                    f"({seg.min_velocity_ms:.2f} m/s) pour le DN {seg.forced_dn} forcé — calcul "
+                    f"effectué malgré la contrainte matériau/DN forcée."
+                )
         prelim.append((seg, cand, velocity, j))
         dn_ceiling = cand.dn
 

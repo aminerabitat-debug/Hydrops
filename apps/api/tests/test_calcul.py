@@ -201,6 +201,61 @@ def test_calcul_gravitaire_hydrostatic_alert_clears_segment_and_nodes_but_keeps_
     assert suggestion["candidate_pk"] != suggestion["current_pk"]
 
 
+def test_calcul_forced_material_dn_applies_despite_violated_constraints(
+    client, session_id, project_state, sample_kml_bytes, import_trace
+):
+    # Consigne utilisateur : "fixer des contraintes Materiau et DN au niveau de la fenetre
+    # tronçon [...] le calcul hydraulique doit se faire meme si certaines contraintes de pression
+    # et de vitesse sont violees" — DN110 force est bien trop petit pour ce debit : la vitesse
+    # depasse largement la vitesse max demandee, mais le calcul s'applique quand meme (segments et
+    # noeuds mis a jour, jamais reinitialises comme pour un dimensionnement automatique en echec).
+    variant_id, trace = _import_sample(client, session_id, project_state, sample_kml_bytes, import_trace)
+    nodes = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes").json()
+    upstream_id, downstream_id = nodes[0]["id"], nodes[1]["id"]
+
+    client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes/{upstream_id}",
+        json={"type": "storage_reservoir", "name": "Res1", "data": {"fluid": "Eau potable"}},
+    )
+    client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes/{downstream_id}",
+        json={"type": "pressure_break", "name": "BC1"},
+    )
+
+    trace_detail = client.get(f"/api/v1/projects/{session_id}/traces/{trace['id']}").json()
+    max_z = max(p["z"] for p in trace_detail["elevation_profile"]["raw"])
+
+    segments = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments").json()
+    segment_id = segments[0]["id"]
+    client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/segments/{segment_id}",
+        json={
+            "head_flow": 300.0,
+            "upstream_water_level_max": max_z + 51.0,
+            "upstream_water_level_min": max_z + 50.0,  # large marge -> pas d'alerte hydrostatique
+            "min_pressure": 5.0,
+            "downstream_residual_pressure": 10.0,
+            "max_velocity": 0.5,  # DN110 le violera largement, garanti
+            "forced_material": "PEHD",
+            "forced_dn": 110,
+        },
+    )
+
+    response = client.post(f"/api/v1/projects/{session_id}/variants/{variant_id}/calcul")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["segments_updated"] == 1
+    assert body["nodes_updated"] == 2
+    assert any("vitesse" in a.lower() for a in body["alerts"])
+
+    updated_segment = client.get(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/segments"
+    ).json()[0]
+    assert updated_segment["material"] == "PEHD"
+    assert updated_segment["dn"] == 110
+    assert updated_segment["velocity"] is not None  # calcul reellement applique, pas reinitialise
+
+
 def test_calcul_gravitaire_hydrostatic_alert_suggests_reposition_for_non_structural_reservoir(
     client, session_id, project_state, sample_kml_bytes, import_trace
 ):

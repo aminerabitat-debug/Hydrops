@@ -13,6 +13,7 @@
 import { useMemo, useState } from 'react'
 
 import { Modal } from '../../app/Modal'
+import type { PipeCatalogRow } from '../../shared/types'
 import type { TronconRegime } from '../../shared/troncons'
 
 export interface TronconHydraulicValues {
@@ -28,6 +29,12 @@ export interface TronconHydraulicValues {
   downstreamResidualPressure?: number
   maxVelocity?: number
   minVelocity?: number
+  // Contrainte Materiau/DN forcee (consigne utilisateur) : desactive l'auto-dimensionnement pour
+  // ce tronçon — le calcul retient la classe de pression la moins chere disponible pour ce
+  // (materiau, DN) et s'applique meme si la pression/vitesse resultante viole une contrainte.
+  // Toujours ensemble (undefined = dimensionnement automatique).
+  forcedMaterial?: string
+  forcedDn?: number
 }
 
 interface TronconDialogProps {
@@ -38,6 +45,9 @@ interface TronconDialogProps {
   // "+N" dans les champs de niveau amont (consigne utilisateur). Absente (troncon sans noeud de
   // depart connu) : une saisie "+N" est alors refusee plutot que silencieusement mal interpretee.
   startNodeGroundZ?: number
+  // Catalogue "Conduites" (menu Base de données) — sert uniquement a peupler les listes
+  // Materiau/DN forces (consigne utilisateur), filtre aux lignes actives.
+  pipeCatalog: PipeCatalogRow[]
   onClose: () => void
   onSubmit: (hydraulics: TronconHydraulicValues) => Promise<void>
 }
@@ -71,7 +81,15 @@ function formatInitialLevel(value: number | undefined, offset: number | undefine
   return value?.toString() ?? ''
 }
 
-export function TronconDialog({ label, regime, initialHydraulics, startNodeGroundZ, onClose, onSubmit }: TronconDialogProps) {
+export function TronconDialog({
+  label,
+  regime,
+  initialHydraulics,
+  startNodeGroundZ,
+  pipeCatalog,
+  onClose,
+  onSubmit,
+}: TronconDialogProps) {
   const [hydraulics, setHydraulics] = useState<TronconHydraulicValues>(initialHydraulics)
   const [rawUpstreamMax, setRawUpstreamMax] = useState(
     formatInitialLevel(initialHydraulics.upstreamWaterLevelMax, initialHydraulics.upstreamWaterLevelMaxOffset),
@@ -88,6 +106,27 @@ export function TronconDialog({ label, regime, initialHydraulics, startNodeGroun
 
   const resolvedMax = useMemo(() => resolveLevelInput(rawUpstreamMax, startNodeGroundZ), [rawUpstreamMax, startNodeGroundZ])
   const resolvedMin = useMemo(() => resolveLevelInput(rawUpstreamMin, startNodeGroundZ), [rawUpstreamMin, startNodeGroundZ])
+
+  // Materiaux/DN disponibles pour la contrainte forcee (consigne utilisateur) — aucune classe de
+  // pression demandee ici (la moins chere disponible est retenue automatiquement, cf.
+  // routers/network.py:patch_segment), donc les DN listes ignorent la classe.
+  const forcedMaterials = useMemo(
+    () => [...new Set(pipeCatalog.filter((r) => r.active).map((r) => r.material))].sort(),
+    [pipeCatalog],
+  )
+  const forcedDns = useMemo(() => {
+    if (!hydraulics.forcedMaterial) return []
+    return [...new Set(pipeCatalog.filter((r) => r.active && r.material === hydraulics.forcedMaterial).map((r) => r.dn))].sort(
+      (a, b) => a - b,
+    )
+  }, [pipeCatalog, hydraulics.forcedMaterial])
+
+  const handleForcedMaterialChange = (value: string) => {
+    setHydraulics((h) => ({ ...h, forcedMaterial: value === '' ? undefined : value, forcedDn: undefined }))
+  }
+  const handleForcedDnChange = (value: string) => {
+    setHydraulics((h) => ({ ...h, forcedDn: value === '' ? undefined : Number(value) }))
+  }
 
   const handleConfirm = async () => {
     setSubmitting(true)
@@ -116,7 +155,8 @@ export function TronconDialog({ label, regime, initialHydraulics, startNodeGroun
     hydraulics.headFlow != null &&
     (isGravitaire
       ? resolvedMax.value != null && resolvedMin.value != null
-      : hydraulics.downstreamResidualPressure != null)
+      : hydraulics.downstreamResidualPressure != null) &&
+    (hydraulics.forcedMaterial == null || hydraulics.forcedDn != null)
 
   return (
     <Modal
@@ -203,6 +243,37 @@ export function TronconDialog({ label, regime, initialHydraulics, startNodeGroun
           Gravitaire : plafonne l'augmentation du DN tentée pour résoudre un défaut de pression.
         </span>
       </div>
+      <div className="modal-field">
+        <label htmlFor="troncon-forced-material">Matériau forcé</label>
+        <select
+          id="troncon-forced-material"
+          value={hydraulics.forcedMaterial ?? ''}
+          onChange={(e) => handleForcedMaterialChange(e.target.value)}
+        >
+          <option value="">Aucun (dimensionnement automatique)</option>
+          {forcedMaterials.map((m) => (
+            <option key={m} value={m}>
+              {m}
+            </option>
+          ))}
+        </select>
+      </div>
+      {hydraulics.forcedMaterial && (
+        <div className="modal-field">
+          <label htmlFor="troncon-forced-dn">DN forcé</label>
+          <select id="troncon-forced-dn" value={hydraulics.forcedDn ?? ''} onChange={(e) => handleForcedDnChange(e.target.value)}>
+            <option value="">— choisir —</option>
+            {forcedDns.map((dn) => (
+              <option key={dn} value={dn}>
+                {dn}
+              </option>
+            ))}
+          </select>
+          <span className="modal-field-hint">
+            Le calcul s'applique même si la pression ou la vitesse résultante viole une contrainte (alerte informative).
+          </span>
+        </div>
+      )}
     </Modal>
   )
 }

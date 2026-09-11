@@ -530,29 +530,60 @@ def patch_segment(session_id: str, variant_id: str, segment_id: str, payload: Pa
     if segment is None:
         raise HTTPException(status_code=404, detail="segment inconnu")
 
-    # Materiau/DN/classe TOUS absents du payload = edition pure des parametres hydrauliques
-    # (fenetre "Modifier le tronçon"), pas une correction manuelle de conduite depuis le profil
-    # Data — dans ce cas, le dimensionnement affiche jusqu'ici n'est plus valide pour rien (il
-    # provenait d'un calcul avec d'anciens parametres, ou du catalogue par defaut) et ne doit pas
-    # etre conserve silencieusement : retour au catalogue par defaut, exactement comme un
-    # segment jamais calcule (consigne utilisateur — "ne remplir qu'une fois le calcul abouti").
-    # Un payload qui fournit au moins un des trois reste une correction manuelle intentionnelle,
-    # traitee comme avant (resolution via le catalogue).
-    is_pure_hydraulic_edit = payload.material is None and payload.dn is None and payload.pressure_class is None
-    if is_pure_hydraulic_edit:
+    # Contrainte Materiau/DN forcee (fenetre "Modifier le tronçon", consigne utilisateur) : prime
+    # sur la logique material/dn/pressure_class ci-dessous (reservee a la correction manuelle
+    # depuis le profil Data, jamais soumise en meme temps par le frontend). "" (chaine vide) sur
+    # forced_material revient au dimensionnement automatique (meme convention que
+    # PatchNodeRequest.name) ; une valeur non-vide exige forced_dn et resout immediatement la
+    # classe de pression la moins chere disponible (sans egard au PMS, inconnu a ce stade — cf.
+    # run_calculation qui alerte si le PMS n'est finalement pas respecte).
+    forced_material_update: Optional[str] = None
+    forced_dn_update: Optional[int] = None
+    forced_touched = payload.forced_material is not None
+    if forced_touched and payload.forced_material != "":
+        if payload.forced_dn is None:
+            raise HTTPException(status_code=422, detail="forced_dn requis avec forced_material")
+        if not catalog.material_dn_exists(payload.forced_material, payload.forced_dn):
+            raise HTTPException(
+                status_code=422, detail=f"aucune conduite active {payload.forced_material} DN{payload.forced_dn}"
+            )
+        forced_material_update = payload.forced_material
+        forced_dn_update = payload.forced_dn
+        selection = catalog.resolve_forced_selection(payload.forced_material, payload.forced_dn)
+        material, dn, pressure_class = selection["material"], selection["dn"], selection["pressure_class"]
+        resolved = {"di": selection["di"], "de": selection["de"]}
+        roughness = package.calculation_preferences.roughness_by_material.get(material, catalog.default_roughness(material))
+    elif forced_touched:
+        # forced_material == "" : retour au dimensionnement automatique, comme un segment jamais
+        # contraint (meme repli que is_pure_hydraulic_edit ci-dessous).
         default = catalog.default_selection()
         material, dn, pressure_class = default["material"], default["dn"], default["pressure_class"]
         resolved = {"di": default["di"], "de": default["de"]}
         roughness = default["roughness"]
     else:
-        material = payload.material or segment.material
-        pressure_class = payload.pressure_class or segment.pressure_class
-        dn = payload.dn if payload.dn is not None else segment.dn
-        try:
-            resolved = catalog.resolve(material, dn, pressure_class)
-        except catalog.CatalogLookupError as e:
-            raise HTTPException(status_code=422, detail=str(e)) from e
-        roughness = package.calculation_preferences.roughness_by_material.get(material, catalog.default_roughness(material))
+        # Materiau/DN/classe TOUS absents du payload = edition pure des parametres hydrauliques
+        # (fenetre "Modifier le tronçon"), pas une correction manuelle de conduite depuis le profil
+        # Data — dans ce cas, le dimensionnement affiche jusqu'ici n'est plus valide pour rien (il
+        # provenait d'un calcul avec d'anciens parametres, ou du catalogue par defaut) et ne doit pas
+        # etre conserve silencieusement : retour au catalogue par defaut, exactement comme un
+        # segment jamais calcule (consigne utilisateur — "ne remplir qu'une fois le calcul abouti").
+        # Un payload qui fournit au moins un des trois reste une correction manuelle intentionnelle,
+        # traitee comme avant (resolution via le catalogue).
+        is_pure_hydraulic_edit = payload.material is None and payload.dn is None and payload.pressure_class is None
+        if is_pure_hydraulic_edit:
+            default = catalog.default_selection()
+            material, dn, pressure_class = default["material"], default["dn"], default["pressure_class"]
+            resolved = {"di": default["di"], "de": default["de"]}
+            roughness = default["roughness"]
+        else:
+            material = payload.material or segment.material
+            pressure_class = payload.pressure_class or segment.pressure_class
+            dn = payload.dn if payload.dn is not None else segment.dn
+            try:
+                resolved = catalog.resolve(material, dn, pressure_class)
+            except catalog.CatalogLookupError as e:
+                raise HTTPException(status_code=422, detail=str(e)) from e
+            roughness = package.calculation_preferences.roughness_by_material.get(material, catalog.default_roughness(material))
 
     # "force" marque desormais simplement "les donnees de ce troncon ont ete validees via la
     # fenetre Modifier" (consigne utilisateur : couleur du texte une fois valide/reinitialise) —
@@ -597,6 +628,9 @@ def patch_segment(session_id: str, variant_id: str, segment_id: str, payload: Pa
         updates["max_velocity"] = payload.max_velocity
     if payload.min_velocity is not None:
         updates["min_velocity"] = payload.min_velocity
+    if forced_touched:
+        updates["forced_material"] = forced_material_update
+        updates["forced_dn"] = forced_dn_update
 
     updated = segment.model_copy(update=updates)
     package.segments[segment_id] = updated
@@ -725,9 +759,18 @@ def run_calculation(session_id: str, variant_id: str, request: Request):
                     flow_m3s=flow_by_node_id.get(str(seg.upstream_node_id), 0.0) / 3600.0,
                     max_velocity_ms=first_seg.max_velocity,
                     min_velocity_ms=first_seg.min_velocity,
+                    forced_material=seg.forced_material,
+                    forced_dn=seg.forced_dn,
                 )
                 for seg in troncon_segments
             ]
+            # Materiau/DN force (fenetre "Modifier le tronçon", consigne utilisateur) : le calcul
+            # doit s'appliquer meme si une contrainte de pression/vitesse est violee — cf. plus bas,
+            # la reinitialisation-sur-alerte est alors sautee pour ce tronçon (sauf absence totale
+            # de resultats exploitables, ex. alerte hydrostatique).
+            troncon_has_forced_pipe = any(
+                seg.forced_material is not None and seg.forced_dn is not None for seg in troncon_segments
+            )
 
             if regime == "gravitaire":
                 result = solve_gravitaire_troncon(
@@ -806,13 +849,19 @@ def run_calculation(session_id: str, variant_id: str, request: Request):
                 # (memes helpers que la reinitialisation manuelle), pour ne jamais laisser un
                 # Materiau/DN ou une ligne piezo perimee affichee. Les autres troncons continuent
                 # normalement (le calcul global ne s'interrompt pas).
-                for seg in troncon_segments:
-                    _reset_segment_calc_outputs(package, str(seg.id))
-                    segments_by_id[str(seg.id)] = package.segments[str(seg.id)]
-                for nid in troncon_node_ids:
-                    _reset_node_calc_fields(package, nid)
-                    nodes_by_id[nid] = package.nodes[nid]
-                continue
+                # EXCEPTION (consigne utilisateur) : un tronçon a Materiau/DN force n'est jamais
+                # reinitialise pour une alerte de pression/vitesse — le calcul s'applique quand
+                # meme (l'alerte reste informative). Seule l'absence totale de resultats
+                # exploitables (`result.segments` vide — alerte hydrostatique, precheck avant tout
+                # dimensionnement) impose encore la reinitialisation, meme force.
+                if not troncon_has_forced_pipe or not result.segments:
+                    for seg in troncon_segments:
+                        _reset_segment_calc_outputs(package, str(seg.id))
+                        segments_by_id[str(seg.id)] = package.segments[str(seg.id)]
+                    for nid in troncon_node_ids:
+                        _reset_node_calc_fields(package, nid)
+                        nodes_by_id[nid] = package.nodes[nid]
+                    continue
 
             for seg_result in result.segments:
                 seg = segments_by_id[seg_result.id]
@@ -889,6 +938,8 @@ def _reset_segment_to_default(package: ProjectPackage, segment_id: str) -> Optio
             "downstream_residual_pressure": None,
             "max_velocity": None,
             "min_velocity": None,
+            "forced_material": None,
+            "forced_dn": None,
             "flow": 0.0,
             "velocity": None,
             "head_loss_unit": None,
@@ -909,11 +960,26 @@ def _reset_segment_calc_outputs(package: ProjectPackage, segment_id: str) -> Opt
     `_reset_segment_to_default`, utilise quand le calcul lui-meme echoue pour ce troncon (alerte,
     cf. run_calculation) : les parametres saisis restent valides, seul le dimensionnement n'a pas
     abouti (consigne utilisateur : "ces paramètres ne doivent être remplis que lorsque le calcul
-    aboutit sans erreur")."""
+    aboutit sans erreur"). Un Materiau/DN force (consigne utilisateur) reste la contrainte de
+    l'utilisateur, jamais effacee ici — l'affichage revient a CE pipeage (classe la moins chere
+    disponible), pas au catalogue par defaut generique."""
     segment = package.segments.get(segment_id)
     if segment is None:
         return None
-    default = catalog.default_selection()
+    if segment.forced_material is not None and segment.forced_dn is not None:
+        try:
+            selection = catalog.resolve_forced_selection(segment.forced_material, segment.forced_dn)
+            default = {
+                "material": selection["material"], "dn": selection["dn"],
+                "pressure_class": selection["pressure_class"], "di": selection["di"], "de": selection["de"],
+                "roughness": package.calculation_preferences.roughness_by_material.get(
+                    selection["material"], catalog.default_roughness(selection["material"])
+                ),
+            }
+        except catalog.CatalogLookupError:
+            default = catalog.default_selection()
+    else:
+        default = catalog.default_selection()
     updated = segment.model_copy(
         update={
             "material": default["material"],

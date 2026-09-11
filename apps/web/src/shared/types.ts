@@ -218,6 +218,11 @@ export interface Segment {
   downstream_residual_pressure?: number | null
   max_velocity?: number | null
   min_velocity?: number | null
+  // Contrainte Materiau/DN forcee (fenetre "Modifier le tronçon", consigne utilisateur) : le
+  // calcul n'auto-dimensionne plus ce segment et s'applique meme si la pression/vitesse
+  // resultante viole une contrainte (alerte informative, jamais bloquante). Toujours ensemble.
+  forced_material?: string | null
+  forced_dn?: number | null
   // Sorties du calcul hydraulique (bouton Calculer) — cf. shared/apiClient.ts:runCalculation.
   // `flow`/`roughness` (ci-dessus) sont aussi ecrases par le calcul.
   velocity?: number | null

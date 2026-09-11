@@ -520,3 +520,119 @@ def test_solve_gravitaire_troncon_pressure_violation_persists_when_no_bigger_dn_
     assert any("pression insuffisante" in a.lower() for a in result.alerts)
     seg_s1 = next(s for s in result.segments if s.id == "s1")
     assert seg_s1.dn == 110
+
+
+def test_solve_gravitaire_troncon_forced_dn_never_bumped_alert_persists():
+    # Meme scenario que test_..._bumps_upstream_dn_to_resolve_pressure_violation, mais s1 a un
+    # DN force (consigne utilisateur : "fixer des contraintes Materiau et DN... le calcul doit se
+    # faire meme si certaines contraintes de pression... sont violees") — l'augmentation
+    # iterative ne doit JAMAIS toucher un segment force : le DN reste 110, la pression insuffisante
+    # au noeud M persiste comme alerte informative, mais le calcul aboutit quand meme (segments et
+    # noeuds bien renseignes, pas un echec bloquant).
+    catalog = _catalog()
+    nodes_z = {"A": 100.0, "M": 50.0, "B": 0.0}
+    segments = [
+        SegmentSpec(id="s1", length_m=6000.0, flow_m3s=0.008, max_velocity_ms=2.0, forced_material="PVC", forced_dn=110),
+        SegmentSpec(id="s2", length_m=1000.0, flow_m3s=0.008, max_velocity_ms=2.0),
+    ]
+    result = solve_gravitaire_troncon(
+        node_ids_ordered=["A", "M", "B"],
+        node_ground_z=nodes_z,
+        segments_ordered=segments,
+        upstream_level_max=100.5,
+        upstream_level_min=100.0,
+        min_pressure=20.0,
+        downstream_residual_pressure=0.0,
+        catalog=catalog,
+        singular_loss_markup_pct=10.0,
+        fluid_temperature_c=20.0,
+    )
+    assert any("pression insuffisante" in a.lower() for a in result.alerts)
+    seg_s1 = next(s for s in result.segments if s.id == "s1")
+    assert seg_s1.dn == 110
+    assert seg_s1.material == "PVC"
+    node_m = next(n for n in result.nodes if n.node_id == "M")
+    assert node_m.pressure_dynamic is not None  # calcul quand meme abouti, pas de reset
+
+
+def test_solve_gravitaire_troncon_forced_dn_alerts_on_velocity_violation():
+    # DN force bien plus gros que necessaire pour ce debit -> vitesse tres en dessous de la
+    # vitesse min demandee : une alerte dediee doit le signaler, sans jamais changer le DN (a la
+    # difference du plafond de vitesse min qui s'applique seulement au dimensionnement automatique).
+    catalog = _catalog()
+    nodes_z = {"A": 100.0, "B": 0.0}
+    segments = [
+        SegmentSpec(
+            id="s1", length_m=1000.0, flow_m3s=0.001, min_velocity_ms=1.0,
+            forced_material="PVC", forced_dn=200,
+        ),
+    ]
+    result = solve_gravitaire_troncon(
+        node_ids_ordered=["A", "B"],
+        node_ground_z=nodes_z,
+        segments_ordered=segments,
+        upstream_level_max=105.0,
+        upstream_level_min=104.0,
+        min_pressure=None,
+        downstream_residual_pressure=None,
+        catalog=catalog,
+        singular_loss_markup_pct=10.0,
+        fluid_temperature_c=20.0,
+    )
+    assert any("inférieure à la vitesse min" in a for a in result.alerts)
+    seg_s1 = result.segments[0]
+    assert seg_s1.dn == 200
+    assert seg_s1.material == "PVC"
+
+
+def test_solve_gravitaire_troncon_forced_dn_unknown_combination_alerts_and_falls_back():
+    # Materiau/DN force absent du catalogue (ne devrait pas arriver, ecarte a la saisie cote API —
+    # cf. services/catalog.py:material_dn_exists) : ne doit jamais lever d'exception, une alerte
+    # explicite et un repli sur une conduite quelconque suffisent.
+    catalog = _catalog()  # ne contient aucun DN 999
+    nodes_z = {"A": 100.0, "B": 0.0}
+    segments = [
+        SegmentSpec(id="s1", length_m=1000.0, flow_m3s=0.001, forced_material="PVC", forced_dn=999),
+    ]
+    result = solve_gravitaire_troncon(
+        node_ids_ordered=["A", "B"],
+        node_ground_z=nodes_z,
+        segments_ordered=segments,
+        upstream_level_max=105.0,
+        upstream_level_min=104.0,
+        min_pressure=None,
+        downstream_residual_pressure=None,
+        catalog=catalog,
+        singular_loss_markup_pct=10.0,
+        fluid_temperature_c=20.0,
+    )
+    assert any("aucune conduite active" in a.lower() for a in result.alerts)
+    assert len(result.segments) == 1
+
+
+def test_solve_refoulement_troncon_forced_dn_alerts_on_pms_exceeded():
+    # DN force dont le PMS est insuffisant face a la pression statique+dynamique resultante — le
+    # controle PMS existant (partage avec le dimensionnement automatique) doit s'appliquer aussi a
+    # un segment force, sans jamais changer le DN retenu.
+    catalog = [
+        CatalogPipe(id=1, dn=110, di_mm=99.4, material="PVC", pressure_class="PN6", pms_m=61.2, price=50.0, roughness_mm=0.01),
+        CatalogPipe(id=2, dn=110, di_mm=99.4, material="PVC", pressure_class="PN16", pms_m=163.1, price=90.0, roughness_mm=0.01),
+    ]
+    nodes_z = {"A": 0.0, "B": 0.0}
+    segments = [
+        SegmentSpec(id="s1", length_m=100.0, flow_m3s=0.01, forced_material="PVC", forced_dn=110),
+    ]
+    result = solve_refoulement_troncon(
+        node_ids_ordered=["A", "B"],
+        node_ground_z=nodes_z,
+        segments_ordered=segments,
+        min_pressure=None,
+        downstream_residual_pressure=100.0,  # exige H0 tres eleve -> pression statique > PN6 (61.2 m)
+        catalog=catalog,
+        singular_loss_markup_pct=10.0,
+        fluid_temperature_c=20.0,
+    )
+    seg_s1 = result.segments[0]
+    assert seg_s1.dn == 110
+    assert seg_s1.pressure_class == "PN6"  # la moins chere retenue par defaut (PMS inconnu au 1er passage)
+    assert any("dépasse le pms" in a.lower() for a in result.alerts)

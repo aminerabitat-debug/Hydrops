@@ -11,7 +11,7 @@ import { nodeColor, nodeDisplayLabel, nodeInitials } from '../../shared/nodeLabe
 import { isOuvrageDataDefined } from '../../shared/ouvrageFields'
 import { useAppStore } from '../../state/store'
 import { REAL_OUVRAGE_TYPES, isStructuralEndpoint } from '../../shared/types'
-import type { CalculationPreferences, CreatableNodeType, Node, TronconGroup, Variant } from '../../shared/types'
+import type { CalculationPreferences, CreatableNodeType, Node, PipeCatalogRow, TronconGroup, Variant } from '../../shared/types'
 import { TRONCON_REGIME_COLOR, TRONCON_REGIME_GLYPH, tronconIsForced, tronconRegime } from '../../shared/troncons'
 import { NodeDialog, type NodeSubmitPayload } from '../profile/NodeDialog'
 import { TronconDialog, type TronconHydraulicValues } from './TronconDialog'
@@ -114,6 +114,13 @@ export function ProjectTree({ onOpenProjectSettings, onNewVariant, onDuplicateVa
     api.getPreferences(sessionId).then(setPreferences).catch(() => setPreferences(null))
   }, [sessionId, project?.id])
 
+  // Catalogue "Conduites" — sert a peupler les listes Materiau/DN forces de TronconDialog
+  // (consigne utilisateur), meme pattern que pipeCatalog dans ProfileTableView.
+  const [pipeCatalog, setPipeCatalog] = useState<PipeCatalogRow[]>([])
+  useEffect(() => {
+    api.listConduites().then(setPipeCatalog).catch(() => setPipeCatalog([]))
+  }, [])
+
   const nodesById = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes])
   const segmentsById = useMemo(() => new Map(segments.map((s) => [s.id, s])), [segments])
   const tracesById = useMemo(() => new Map(traces.map((t) => [t.id, t])), [traces])
@@ -196,8 +203,9 @@ export function ProjectTree({ onOpenProjectSettings, onNewVariant, onDuplicateVa
 
   // "Modifier" un troncon applique les MEMES parametres de calcul a TOUS ses segments (un troncon
   // peut en regrouper plusieurs si des jonctions/piquages transparents s'y trouvent). Materiau/DN/
-  // Classe ne sont plus saisis ici (consigne utilisateur, cf. TronconDialog) — patchSegment les
-  // laisse a leur valeur courante (payload sans material/dn/pressure_class).
+  // Classe CALCULES ne sont pas saisis ici (payload sans material/dn/pressure_class, ils viennent
+  // du calcul) — seule la contrainte forced_material/forced_dn (consigne utilisateur) l'est,
+  // "" sur forced_material revenant au dimensionnement automatique (cf. TronconDialog).
   const handleSaveTroncon = async (hydraulics: TronconHydraulicValues) => {
     if (!sessionId || !selectedVariantId || !editingTroncon) return
     await Promise.all(
@@ -212,6 +220,8 @@ export function ProjectTree({ onOpenProjectSettings, onNewVariant, onDuplicateVa
           downstream_residual_pressure: hydraulics.downstreamResidualPressure,
           max_velocity: hydraulics.maxVelocity,
           min_velocity: hydraulics.minVelocity,
+          forced_material: hydraulics.forcedMaterial ?? '',
+          forced_dn: hydraulics.forcedDn,
         }),
       ),
     )
@@ -603,7 +613,10 @@ export function ProjectTree({ onOpenProjectSettings, onNewVariant, onDuplicateVa
                   firstSegment?.downstream_residual_pressure ?? preferences?.default_downstream_residual_pressure ?? undefined,
                 maxVelocity: firstSegment?.max_velocity ?? preferences?.default_max_velocity ?? undefined,
                 minVelocity: firstSegment?.min_velocity ?? preferences?.default_min_velocity ?? undefined,
+                forcedMaterial: firstSegment?.forced_material ?? undefined,
+                forcedDn: firstSegment?.forced_dn ?? undefined,
               }}
+              pipeCatalog={pipeCatalog}
               onClose={() => setEditingTroncon(null)}
               onSubmit={handleSaveTroncon}
             />

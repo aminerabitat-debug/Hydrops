@@ -277,6 +277,8 @@ export const api = {
       downstream_residual_pressure?: number
       max_velocity?: number
       min_velocity?: number
+      forced_material?: string
+      forced_dn?: number
     },
   ): Promise<Segment> {
     const response = await fetch(

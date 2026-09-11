@@ -32,6 +32,8 @@
     "downstream_residual_pressure": { "type": ["number", "null"], "description": "Pression residuelle aval (m) — gravitaire et refoulement" },
     "max_velocity": { "type": ["number", "null"], "description": "Vitesse max (m/s) — gravitaire et refoulement" },
     "min_velocity": { "type": ["number", "null"], "description": "Vitesse min (m/s) — gravitaire et refoulement" },
+    "forced_material": { "type": ["string", "null"], "description": "Materiau force (fenetre Modifier le tronçon) — desactive l'auto-dimensionnement, toujours associe a forced_dn" },
+    "forced_dn": { "type": ["integer", "null"], "description": "DN force — la classe de pression la moins chere disponible est retenue automatiquement" },
     "velocity": { "type": ["number", "null"], "description": "Vitesse calculee (m/s) — sortie du calcul hydraulique" },
     "head_loss_unit": { "type": ["number", "null"], "description": "Perte de charge lineaire unitaire J (m/m) — Darcy-Weisbach/Colebrook-White" },
     "head_loss_segment": { "type": ["number", "null"], "description": "Perte de charge totale du segment, majoration singulieres incluse (m)" },

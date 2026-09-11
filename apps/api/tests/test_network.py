@@ -123,6 +123,7 @@ def test_patch_segment_applies_hydraulic_fields_and_marks_forced_even_unchanged(
             "min_pressure": 15.0,
             "downstream_residual_pressure": 20.0,
             "max_velocity": 1.5,
+            "min_velocity": 0.3,
         },
     )
     assert response.status_code == 200, response.text
@@ -133,6 +134,7 @@ def test_patch_segment_applies_hydraulic_fields_and_marks_forced_even_unchanged(
     assert updated["min_pressure"] == 15.0
     assert updated["downstream_residual_pressure"] == 20.0
     assert updated["max_velocity"] == 1.5
+    assert updated["min_velocity"] == 0.3
 
 
 def test_reset_segment_also_clears_hydraulic_fields(client, session_id, project_state, sample_kml_bytes, import_trace):
@@ -142,13 +144,14 @@ def test_reset_segment_also_clears_hydraulic_fields(client, session_id, project_
 
     client.patch(
         f"/api/v1/projects/{session_id}/variants/{variant_id}/segments/{segment_id}",
-        json={"material": "FD", "dn": 200, "pressure_class": "K9", "max_velocity": 1.5},
+        json={"material": "FD", "dn": 200, "pressure_class": "K9", "max_velocity": 1.5, "min_velocity": 0.3},
     )
     response = client.post(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments/{segment_id}/reset")
     assert response.status_code == 200, response.text
     reset = response.json()
     assert reset["forced"] is False
     assert "max_velocity" not in reset
+    assert "min_velocity" not in reset
 
 
 def test_patch_node_sets_ouvrage_data_and_flows(client, session_id, project_state, sample_kml_bytes, import_trace):

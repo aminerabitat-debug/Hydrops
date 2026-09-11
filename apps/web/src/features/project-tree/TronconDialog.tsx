@@ -27,6 +27,7 @@ export interface TronconHydraulicValues {
   minPressure?: number
   downstreamResidualPressure?: number
   maxVelocity?: number
+  minVelocity?: number
 }
 
 interface TronconDialogProps {
@@ -189,6 +190,18 @@ export function TronconDialog({ label, regime, initialHydraulics, startNodeGroun
           value={hydraulics.maxVelocity ?? ''}
           onChange={(e) => setHydraulicField('maxVelocity', e.target.value)}
         />
+      </div>
+      <div className="modal-field">
+        <label htmlFor="troncon-min-velocity">Vitesse Min (m/s)</label>
+        <input
+          id="troncon-min-velocity"
+          type="number"
+          value={hydraulics.minVelocity ?? ''}
+          onChange={(e) => setHydraulicField('minVelocity', e.target.value)}
+        />
+        <span className="modal-field-hint">
+          Gravitaire : plafonne l'augmentation du DN tentée pour résoudre un défaut de pression.
+        </span>
       </div>
     </Modal>
   )

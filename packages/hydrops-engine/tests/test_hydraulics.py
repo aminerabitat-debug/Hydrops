@@ -9,6 +9,7 @@ from hydrops_engine.hydraulics import (
     SegmentSpec,
     colebrook_white,
     kinematic_viscosity_m2s,
+    max_di_mm_for_velocity,
     min_di_mm_for_velocity,
     segment_hydraulics,
     solve_gravitaire_troncon,
@@ -48,6 +49,18 @@ def test_segment_hydraulics_velocity_matches_area_formula():
 def test_min_di_for_velocity_zero_without_vmax():
     assert min_di_mm_for_velocity(0.1, None) == 0.0
     assert min_di_mm_for_velocity(0.1, 0) == 0.0
+
+
+def test_max_di_for_velocity_infinite_without_vmin():
+    assert max_di_mm_for_velocity(0.1, None) == math.inf
+    assert max_di_mm_for_velocity(0.1, 0) == math.inf
+
+
+def test_max_di_for_velocity_matches_area_formula():
+    flow, min_v = 0.05, 0.3
+    max_di = max_di_mm_for_velocity(flow, min_v)
+    area_m2 = math.pi * (max_di / 1000) ** 2 / 4
+    assert flow / area_m2 == pytest.approx(min_v)
 
 
 def _catalog() -> list[CatalogPipe]:
@@ -449,6 +462,35 @@ def test_solve_gravitaire_troncon_bumps_upstream_dn_to_resolve_pressure_violatio
     assert node_m.pressure_dynamic >= 20.0 - 1e-6
     seg_s1 = next(s for s in result.segments if s.id == "s1")
     assert seg_s1.dn > 110  # DN le moins cher initialement choisi, avant augmentation
+
+
+def test_solve_gravitaire_troncon_bump_stops_at_min_velocity_ceiling():
+    # Meme scenario que le bump ci-dessus (DN110 -> insuffisant, DN160 dispo et resoudrait le
+    # deficit), mais avec une vitesse min (Preferences, consigne utilisateur) plus haute que la
+    # vitesse qu'aurait le segment une fois passe a DN160 (~0.47 m/s) — l'augmentation doit
+    # s'arreter la (aucune conduite ne respecte a la fois vitesse min et le palier superieur),
+    # l'alerte "pression insuffisante" doit donc persister plutot que d'ignorer la vitesse min.
+    catalog = _catalog()
+    nodes_z = {"A": 100.0, "M": 50.0, "B": 0.0}
+    segments = [
+        SegmentSpec(id="s1", length_m=6000.0, flow_m3s=0.008, max_velocity_ms=2.0, min_velocity_ms=0.6),
+        SegmentSpec(id="s2", length_m=1000.0, flow_m3s=0.008, max_velocity_ms=2.0),
+    ]
+    result = solve_gravitaire_troncon(
+        node_ids_ordered=["A", "M", "B"],
+        node_ground_z=nodes_z,
+        segments_ordered=segments,
+        upstream_level_max=100.5,
+        upstream_level_min=100.0,
+        min_pressure=20.0,
+        downstream_residual_pressure=0.0,
+        catalog=catalog,
+        singular_loss_markup_pct=10.0,
+        fluid_temperature_c=20.0,
+    )
+    assert any("pression insuffisante" in a.lower() for a in result.alerts)
+    seg_s1 = next(s for s in result.segments if s.id == "s1")
+    assert seg_s1.dn == 110  # le palier 160 existe mais violerait la vitesse min, donc refuse
 
 
 def test_solve_gravitaire_troncon_pressure_violation_persists_when_no_bigger_dn_available():

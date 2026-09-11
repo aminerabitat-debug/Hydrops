@@ -211,6 +211,7 @@ export function ProjectTree({ onOpenProjectSettings, onNewVariant, onDuplicateVa
           min_pressure: hydraulics.minPressure,
           downstream_residual_pressure: hydraulics.downstreamResidualPressure,
           max_velocity: hydraulics.maxVelocity,
+          min_velocity: hydraulics.minVelocity,
         }),
       ),
     )
@@ -601,6 +602,7 @@ export function ProjectTree({ onOpenProjectSettings, onNewVariant, onDuplicateVa
                 downstreamResidualPressure:
                   firstSegment?.downstream_residual_pressure ?? preferences?.default_downstream_residual_pressure ?? undefined,
                 maxVelocity: firstSegment?.max_velocity ?? preferences?.default_max_velocity ?? undefined,
+                minVelocity: firstSegment?.min_velocity ?? preferences?.default_min_velocity ?? undefined,
               }}
               onClose={() => setEditingTroncon(null)}
               onSubmit={handleSaveTroncon}

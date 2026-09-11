@@ -50,6 +50,12 @@ interface ProfileChartProps {
   // Bouton d'info deplace dans la barre d'outils (consigne utilisateur, a droite de "+ Nœud") —
   // controle depuis le parent plutot que par un etat/bouton internes a ce composant.
   infoMode: boolean
+  // Zoom manuel (consigne utilisateur : "prevoir la possibilite de zoomer... et un bouton de
+  // reinitialisation") — pilote a la molette ici, mais l'etat vit dans le parent pour exposer le
+  // bouton de reinitialisation dans la barre d'outils, a cote du bouton d'info. `null` = pas de
+  // zoom manuel, la plage affichee reste celle deduite de tableScope (trace entiere/troncon).
+  zoomRange: { min: number; max: number } | null
+  onZoomChange: (range: { min: number; max: number } | null) => void
   onAddNode: (pk: number) => void
   onEditNode: (node: Node) => void
   onAssignNode: (node: Node) => void
@@ -103,6 +109,8 @@ export function ProfileChart({
   pipeCatalog,
   addNodeMode,
   infoMode,
+  zoomRange,
+  onZoomChange,
   onAddNode,
   onEditNode,
   onAssignNode,
@@ -134,8 +142,13 @@ export function ProfileChart({
   // toujours montrer le trace entier — consigne utilisateur ("cliquer sur un troncon... afficher le
   // profil correspondant"), meme logique que le filtrage deja applique a la table (Mode Data).
   const rawPkMax = profile && profile.raw.length > 0 ? Math.max(...profile.raw.map((p) => p.pk)) || 1 : 1
-  const pkMin = tableScope.kind === 'troncon' ? Math.max(0, tableScope.pkStart) : 0
-  const pkMax = tableScope.kind === 'troncon' ? Math.min(rawPkMax, tableScope.pkEnd) : rawPkMax
+  const baselinePkMin = tableScope.kind === 'troncon' ? Math.max(0, tableScope.pkStart) : 0
+  const baselinePkMax = tableScope.kind === 'troncon' ? Math.min(rawPkMax, tableScope.pkEnd) : rawPkMax
+  // Le zoom manuel (molette, cf. handleWheel plus bas) affine la plage deduite de tableScope sans
+  // jamais en sortir — changer de troncon selectionne redefinit donc naturellement la fenetre
+  // zoomable (le parent reinitialise aussi `zoomRange` a ce moment, cf. ProfileTableView).
+  const pkMin = zoomRange ? Math.max(baselinePkMin, zoomRange.min) : baselinePkMin
+  const pkMax = zoomRange ? Math.min(baselinePkMax, zoomRange.max) : baselinePkMax
 
   // Ligne(s) piezometrique(s) (consigne utilisateur) : un point par noeud calcule (cote piezo
   // deja resolue par le moteur hydraulique, cf. Node.piezo_head), coupee en plusieurs segments —
@@ -233,6 +246,38 @@ export function ProfileChart({
     observer.observe(canvasEl)
     return () => observer.disconnect()
   }, [canvasEl])
+
+  // Zoom a la molette (consigne utilisateur) : centre sur le pk sous le curseur, dans la limite
+  // de la plage deduite de tableScope (jamais plus large que ce qui est deja affiche). Ecouteur
+  // natif (pas onWheel React, passif par defaut depuis React 17 — preventDefault y serait sans
+  // effet et la page defilerait pendant le zoom) attache/detache a chaque changement de plage.
+  useEffect(() => {
+    const canvas = canvasEl
+    if (!canvas) return
+    const MIN_ZOOM_SPAN_M = 5
+    const handleWheel = (event: WheelEvent) => {
+      const rect = canvas.getBoundingClientRect()
+      const plotWidth = rect.width - PADDING.left - PADDING.right
+      if (plotWidth <= 0) return
+      event.preventDefault()
+      const x = event.clientX - rect.left
+      const pkAtCursor = pkMin + ((x - PADDING.left) / plotWidth) * (pkMax - pkMin)
+      // Molette vers le haut/avant = zoom avant (la plage retrecit), vers le bas/arriere = zoom arriere.
+      const factor = event.deltaY < 0 ? 0.85 : 1 / 0.85
+      let newMin = pkAtCursor - (pkAtCursor - pkMin) * factor
+      let newMax = pkAtCursor + (pkMax - pkAtCursor) * factor
+      newMin = Math.max(baselinePkMin, newMin)
+      newMax = Math.min(baselinePkMax, newMax)
+      if (newMax - newMin < MIN_ZOOM_SPAN_M) return
+      if (newMin <= baselinePkMin + 1e-6 && newMax >= baselinePkMax - 1e-6) {
+        onZoomChange(null)
+        return
+      }
+      onZoomChange({ min: newMin, max: newMax })
+    }
+    canvas.addEventListener('wheel', handleWheel, { passive: false })
+    return () => canvas.removeEventListener('wheel', handleWheel)
+  }, [canvasEl, pkMin, pkMax, baselinePkMin, baselinePkMax, onZoomChange])
 
   useEffect(() => {
     const canvas = canvasEl

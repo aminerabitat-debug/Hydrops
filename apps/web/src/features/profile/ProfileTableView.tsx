@@ -52,6 +52,12 @@ export function ProfileTableView() {
   // dans cette barre d'outils (a droite de "+ Nœud") pour ne plus chevaucher la bande de
   // caracteristiques de conduite, desormais au-dessus du graphique.
   const [infoMode, setInfoMode] = useState(false)
+  // Zoom du profil graphique (consigne utilisateur : "prevoir la possibilite de zoomer... et un
+  // bouton de reinitialisation du zoom"), pilote a la molette dans ProfileChart mais l'etat vit
+  // ici pour exposer le bouton de reinitialisation a cote du bouton d'info. `null` = pas de zoom
+  // manuel, la plage affichee reste celle deduite de tableScope (trace entiere ou troncon
+  // selectionne, cf. ProfileChart).
+  const [zoomRange, setZoomRange] = useState<{ min: number; max: number } | null>(null)
 
   useEffect(() => {
     api.listConduites().then(setPipeCatalog).catch(() => setPipeCatalog([]))
@@ -68,8 +74,15 @@ export function ProfileTableView() {
   const setStatusMessage = useAppStore((s) => s.setStatusMessage)
   const traces = useAppStore((s) => s.traces)
   const selectedTraceId = useAppStore((s) => s.selection.selectedTraceId)
+  const tableScope = useAppStore((s) => s.selection.tableScope)
   const trace = traces.find((t) => t.id === selectedTraceId) ?? traces[0]
   const profile = trace?.elevation_profile
+
+  // Changer de trace ou de troncon selectionne (arborescence) invalide un zoom manuel en cours —
+  // la plage n'a plus forcement de sens sur le nouveau profil affiche.
+  useEffect(() => {
+    setZoomRange(null)
+  }, [selectedTraceId, tableScope])
 
   // Les courbes derivees du calcul (piezo/PMS/hydrostatiques) et la bande de caracteristiques ne
   // doivent apparaitre qu'une fois un calcul reussi pour cette trace, et redisparaitre des qu'une
@@ -231,6 +244,18 @@ export function ProfileTableView() {
               ℹ
             </button>
           )}
+          {mode === 'graph' && (
+            <button
+              type="button"
+              className="metric btn-toggle-node"
+              onClick={() => setZoomRange(null)}
+              disabled={zoomRange == null}
+              title="Réinitialiser le zoom du profil (molette pour zoomer/dézoomer)"
+              aria-label="Réinitialiser le zoom du profil"
+            >
+              ⤢ Réinitialiser le zoom
+            </button>
+          )}
         </div>
       </div>
       <div className="profile-content">
@@ -244,6 +269,8 @@ export function ProfileTableView() {
             pipeCatalog={pipeCatalog}
             addNodeMode={addNodeMode}
             infoMode={infoMode}
+            zoomRange={zoomRange}
+            onZoomChange={setZoomRange}
             onAddNode={(pk) => setPendingAdd({ pk })}
             onEditNode={(node) => setEditingNode(node)}
             onAssignNode={(node) => setPendingAdd({ pk: node.pk, placeholderNodeId: node.id })}

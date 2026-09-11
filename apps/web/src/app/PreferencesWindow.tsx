@@ -241,6 +241,17 @@ export function PreferencesWindow({ sessionId, onClose, onSaved }: PreferencesWi
             }
           />
         </div>
+        <div className="modal-field">
+          <label htmlFor="pref-min-velocity">Vitesse Min (m/s)</label>
+          <input
+            id="pref-min-velocity"
+            type="number"
+            value={prefs.default_min_velocity ?? ''}
+            onChange={(e) =>
+              setPrefs((p) => (p ? { ...p, default_min_velocity: e.target.value === '' ? null : Number(e.target.value) } : p))
+            }
+          />
+        </div>
       </div>
     </Modal>
   )

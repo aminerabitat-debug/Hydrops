@@ -162,6 +162,7 @@ def _preferences_response(package: ProjectPackage) -> dict:
         "default_min_pressure": prefs.default_min_pressure,
         "default_downstream_residual_pressure": prefs.default_downstream_residual_pressure,
         "default_max_velocity": prefs.default_max_velocity,
+        "default_min_velocity": prefs.default_min_velocity,
     }
 
 
@@ -186,6 +187,7 @@ def put_preferences(session_id: str, payload: CalculationPreferencesRequest, req
         default_min_pressure=payload.default_min_pressure,
         default_downstream_residual_pressure=payload.default_downstream_residual_pressure,
         default_max_velocity=payload.default_max_velocity,
+        default_min_velocity=payload.default_min_velocity,
     )
     return _preferences_response(package)
 

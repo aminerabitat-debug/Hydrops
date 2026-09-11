@@ -46,11 +46,19 @@ CALCULES EN SENS OPPOSE, parce que leur cote de depart n'a pas le meme statut ph
     PMS de la conduite retenue reste signale par alerte (la pression, elle, ne peut pas etre
     "silencieusement" acceptee au-dela de ce que la conduite supporte).
   - Choix DN/materiau/classe par segment : parmi les lignes ACTIVES du catalogue respectant la
-    vitesse max, la contrainte de decroissance du DN vers l'aval (en gravitaire, le DN choisi en
-    remontant ne peut jamais etre INFERIEUR a celui du segment deja fixe plus a l'aval — en
-    refoulement, en descendant, il ne peut jamais DEPASSER celui du segment amont deja fixe), le
+    vitesse max ET min (Preferences, consigne utilisateur — defaut 0.2 m/s, cf.
+    max_di_mm_for_velocity), la contrainte de decroissance du DN vers l'aval (en gravitaire, le DN
+    choisi en remontant ne peut jamais etre INFERIEUR a celui du segment deja fixe plus a l'aval —
+    en refoulement, en descendant, il ne peut jamais DEPASSER celui du segment amont deja fixe), le
     PMS (>= pression max que verra la conduite) et les materiaux autorises (criteres de choix), on
     retient la ligne la moins chere.
+  - Gravitaire, augmentation iterative du DN (consigne utilisateur) : quand la pression minimale
+    n'est pas tenue a un noeud, le DN du segment AMONT de ce noeud est augmente au palier
+    catalogue superieur, en balayant les noeuds en defaut de l'amont vers l'aval (cf.
+    solve_gravitaire_troncon), puis toute la passe est recalculee — plusieurs passes successives
+    si besoin (plafonnees, garde-fou anti-boucle infinie). Cette augmentation ne va jamais au-dela
+    du DN qui ferait tomber la vitesse sous la vitesse min (meme plafond que ci-dessus) : au-dela,
+    l'alerte "pression insuffisante" persiste plutot que de continuer a grossir indefiniment.
   - Darcy-Weisbach + Colebrook-White (resolution iterative, pas d'approximation) pour la perte de
     charge lineaire unitaire ; regime laminaire (Re<2300) via f=64/Re. Majoration (%) appliquee a
     la perte lineaire pour approcher les pertes de charge singulieres (Preferences).
@@ -123,6 +131,18 @@ def min_di_mm_for_velocity(flow_m3s: float, max_velocity_ms: Optional[float]) ->
     return math.sqrt(4 * area_m2 / math.pi) * 1000.0
 
 
+def max_di_mm_for_velocity(flow_m3s: float, min_velocity_ms: Optional[float]) -> float:
+    """DI au-dela duquel la vitesse tomberait sous `min_velocity_ms` — plafond symetrique de
+    `min_di_mm_for_velocity` (Preferences, consigne utilisateur : vitesse min par defaut 0.2 m/s).
+    Sert a empecher la tentative iterative d'augmentation du DN gravitaire (cf.
+    solve_gravitaire_troncon) de grossir un segment au point de rendre l'ecoulement trop lent —
+    pas de plafond (`inf`) si aucune vitesse min n'est configuree."""
+    if not min_velocity_ms or min_velocity_ms <= 0 or flow_m3s <= 0:
+        return math.inf
+    area_m2 = abs(flow_m3s) / min_velocity_ms
+    return math.sqrt(4 * area_m2 / math.pi) * 1000.0
+
+
 @dataclass(frozen=True)
 class CatalogPipe:
     id: int
@@ -142,6 +162,11 @@ class SegmentSpec:
     length_m: float
     flow_m3s: float
     max_velocity_ms: Optional[float] = None
+    # Preferences, consigne utilisateur (defaut 0.2 m/s) : plafonne le DN choisi pour ne jamais
+    # tomber sous cette vitesse — sizing initial (les deux regimes) ET tentative iterative
+    # d'augmentation du DN gravitaire (cf. max_di_mm_for_velocity), qui s'arrete des qu'elle
+    # l'atteindrait plutot que de grossir indefiniment.
+    min_velocity_ms: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -182,6 +207,7 @@ def _candidates(
     dn_max: Optional[int],
     allowed_materials_fn: Optional[AllowedMaterialsFn],
     min_pms_m: float = 0.0,
+    max_di_mm: float = math.inf,
 ) -> list[CatalogPipe]:
     def material_ok(p: CatalogPipe) -> bool:
         if allowed_materials_fn is None:
@@ -195,6 +221,7 @@ def _candidates(
             for p in catalog
             if p.active
             and p.di_mm >= min_di_mm - 1e-9
+            and p.di_mm <= max_di_mm + 1e-9
             and p.pms_m >= min_pms_m - 1e-9
             and (dn_min is None or p.dn >= dn_min)
             and (dn_max is None or p.dn <= dn_max)
@@ -350,6 +377,7 @@ def _gravitaire_pass(
         upstream_node = node_ids_ordered[i]
         downstream_node = node_ids_ordered[i + 1]
         min_di = min_di_mm_for_velocity(seg.flow_m3s, seg.max_velocity_ms)
+        max_di = max_di_mm_for_velocity(seg.flow_m3s, seg.min_velocity_ms)
         max_pms_needed = max(
             nodes[upstream_node].pressure_static_max or 0.0,
             nodes[downstream_node].pressure_static_max or 0.0,
@@ -359,7 +387,7 @@ def _gravitaire_pass(
         if forced_min_dn is not None:
             effective_dn_floor = forced_min_dn if effective_dn_floor is None else max(effective_dn_floor, forced_min_dn)
 
-        candidates = _candidates(catalog, min_di, effective_dn_floor, None, allowed_materials_fn, max_pms_needed)
+        candidates = _candidates(catalog, min_di, effective_dn_floor, None, allowed_materials_fn, max_pms_needed, max_di)
         if not candidates:
             alerts.append(
                 f"Segment entre {_node_label(upstream_node, node_pk)} et {_node_label(downstream_node, node_pk)} : "
@@ -498,7 +526,12 @@ def solve_gravitaire_troncon(
             current_dn = dn_by_segment_id.get(seg.id)
             if current_dn is None:
                 continue
-            bigger = _candidates(catalog, 0.0, current_dn + 1, None, allowed_materials_fn)
+            # Plafond de vitesse min (Preferences, consigne utilisateur) : ne pas grossir ce
+            # segment au point de repasser sous cette vitesse — l'augmentation s'arrete la pour ce
+            # segment (l'alerte "pression insuffisante" persiste alors, cf. verification finale de
+            # la passe) plutot que de continuer indefiniment.
+            max_di = max_di_mm_for_velocity(seg.flow_m3s, seg.min_velocity_ms)
+            bigger = _candidates(catalog, 0.0, current_dn + 1, None, allowed_materials_fn, max_di_mm=max_di)
             if not bigger:
                 continue
             new_floor = bigger[0].dn
@@ -550,7 +583,8 @@ def solve_refoulement_troncon(
     prelim: list[tuple[SegmentSpec, CatalogPipe, float, float]] = []
     for i, seg in enumerate(segments_ordered):
         min_di = min_di_mm_for_velocity(seg.flow_m3s, seg.max_velocity_ms)
-        candidates = _candidates(catalog, min_di, None, dn_ceiling, allowed_materials_fn)
+        max_di = max_di_mm_for_velocity(seg.flow_m3s, seg.min_velocity_ms)
+        candidates = _candidates(catalog, min_di, None, dn_ceiling, allowed_materials_fn, max_di_mm=max_di)
         if not candidates:
             alerts.append(
                 f"Segment entre {_node_label(node_ids_ordered[i], node_pk)} et "

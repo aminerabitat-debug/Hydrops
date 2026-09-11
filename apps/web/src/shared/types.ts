@@ -217,6 +217,7 @@ export interface Segment {
   min_pressure?: number | null
   downstream_residual_pressure?: number | null
   max_velocity?: number | null
+  min_velocity?: number | null
   // Sorties du calcul hydraulique (bouton Calculer) — cf. shared/apiClient.ts:runCalculation.
   // `flow`/`roughness` (ci-dessus) sont aussi ecrases par le calcul.
   velocity?: number | null
@@ -289,6 +290,7 @@ export interface CalculationPreferences {
   default_min_pressure?: number | null
   default_downstream_residual_pressure?: number | null
   default_max_velocity?: number | null
+  default_min_velocity?: number | null
 }
 
 export interface RepositionSuggestion {

@@ -276,6 +276,7 @@ export const api = {
       min_pressure?: number
       downstream_residual_pressure?: number
       max_velocity?: number
+      min_velocity?: number
     },
   ): Promise<Segment> {
     const response = await fetch(

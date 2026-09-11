@@ -248,6 +248,10 @@ class Segment(BaseModel):
     min_pressure: Optional[float] = None
     downstream_residual_pressure: Optional[float] = None
     max_velocity: Optional[float] = None
+    # Preferences, consigne utilisateur (defaut 0.2 m/s) : plancher de vitesse — l'augmentation
+    # iterative du DN gravitaire pour resoudre un defaut de pression (cf.
+    # hydrops_engine.hydraulics.solve_gravitaire_troncon) ne descend jamais sous cette vitesse.
+    min_velocity: Optional[float] = None
     # Sorties du calcul hydraulique (bouton Calculer) pour ce segment — cf.
     # packages/hydrops-engine/hydrops_engine/hydraulics.py. `flow`/`roughness` (deja existants
     # ci-dessus) sont aussi ecrases par le calcul : `flow` devient le debit reellement transite
@@ -286,3 +290,4 @@ class CalculationPreferences(BaseModel):
     default_min_pressure: Optional[float] = 5.0
     default_downstream_residual_pressure: Optional[float] = 10.0
     default_max_velocity: Optional[float] = 2.0
+    default_min_velocity: Optional[float] = 0.2

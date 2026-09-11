@@ -114,6 +114,7 @@ class PatchSegmentRequest(BaseModel):
     min_pressure: Optional[float] = None
     downstream_residual_pressure: Optional[float] = None
     max_velocity: Optional[float] = None
+    min_velocity: Optional[float] = None
 
 
 class PatchNodePositionRequest(BaseModel):
@@ -151,3 +152,4 @@ class CalculationPreferencesRequest(BaseModel):
     default_min_pressure: Optional[float] = 5.0
     default_downstream_residual_pressure: Optional[float] = 10.0
     default_max_velocity: Optional[float] = 2.0
+    default_min_velocity: Optional[float] = 0.2

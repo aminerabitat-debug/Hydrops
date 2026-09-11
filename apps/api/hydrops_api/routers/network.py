@@ -595,6 +595,8 @@ def patch_segment(session_id: str, variant_id: str, segment_id: str, payload: Pa
         updates["downstream_residual_pressure"] = payload.downstream_residual_pressure
     if payload.max_velocity is not None:
         updates["max_velocity"] = payload.max_velocity
+    if payload.min_velocity is not None:
+        updates["min_velocity"] = payload.min_velocity
 
     updated = segment.model_copy(update=updates)
     package.segments[segment_id] = updated
@@ -722,6 +724,7 @@ def run_calculation(session_id: str, variant_id: str, request: Request):
                     length_m=seg.length,
                     flow_m3s=flow_by_node_id.get(str(seg.upstream_node_id), 0.0) / 3600.0,
                     max_velocity_ms=first_seg.max_velocity,
+                    min_velocity_ms=first_seg.min_velocity,
                 )
                 for seg in troncon_segments
             ]
@@ -885,6 +888,7 @@ def _reset_segment_to_default(package: ProjectPackage, segment_id: str) -> Optio
             "min_pressure": None,
             "downstream_residual_pressure": None,
             "max_velocity": None,
+            "min_velocity": None,
             "flow": 0.0,
             "velocity": None,
             "head_loss_unit": None,

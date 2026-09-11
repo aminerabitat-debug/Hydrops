@@ -31,6 +31,7 @@
     "min_pressure": { "type": ["number", "null"], "description": "Pression min (m) — troncon gravitaire" },
     "downstream_residual_pressure": { "type": ["number", "null"], "description": "Pression residuelle aval (m) — gravitaire et refoulement" },
     "max_velocity": { "type": ["number", "null"], "description": "Vitesse max (m/s) — gravitaire et refoulement" },
+    "min_velocity": { "type": ["number", "null"], "description": "Vitesse min (m/s) — gravitaire et refoulement" },
     "velocity": { "type": ["number", "null"], "description": "Vitesse calculee (m/s) — sortie du calcul hydraulique" },
     "head_loss_unit": { "type": ["number", "null"], "description": "Perte de charge lineaire unitaire J (m/m) — Darcy-Weisbach/Colebrook-White" },
     "head_loss_segment": { "type": ["number", "null"], "description": "Perte de charge totale du segment, majoration singulieres incluse (m)" },

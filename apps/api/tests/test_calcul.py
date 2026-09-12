@@ -308,6 +308,76 @@ def test_calcul_min_pressure_exclusion_zone_is_informative_not_blocking(
     assert updated_segment["velocity"] is not None  # calcul reellement applique, pas reinitialise
 
 
+def test_calcul_scoped_to_one_troncon_ignores_other_unvalidated_troncons(
+    client, session_id, project_state, sample_kml_bytes, import_trace
+):
+    # Consigne utilisateur : un tronçon deja selectionne et valide se calcule seul, sans exiger que
+    # les AUTRES tronçons de la variante soient valides — a l'inverse du calcul non scope (variante
+    # selectionnee), qui exige toujours tout.
+    variant_id, trace = _import_sample(client, session_id, project_state, sample_kml_bytes, import_trace)
+    mid_pk = trace["length"] / 2
+    nodes = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes").json()
+    start_id = next(n["id"] for n in nodes if n["pk"] == 0.0)
+    end_id = next(n["id"] for n in nodes if n["pk"] == trace["length"])
+    client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes/{start_id}",
+        json={"type": "storage_reservoir", "name": "Res1", "data": {"fluid": "Eau potable"}},
+    )
+    mid = client.post(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes",
+        json={"trace_id": trace["id"], "pk": mid_pk, "type": "pressure_break", "name": "BC1"},
+    ).json()
+    client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes/{end_id}",
+        json={"type": "pressure_break", "name": "BC2"},
+    )
+
+    trace_detail = client.get(f"/api/v1/projects/{session_id}/traces/{trace['id']}").json()
+    max_z = max(p["z"] for p in trace_detail["elevation_profile"]["raw"])
+
+    segments = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments").json()
+    seg1_id = next(s["id"] for s in segments if s["upstream_node_id"] == start_id)
+    # seg2 (BC1 -> BC2) reste volontairement non valide (pas de PATCH => forced=False).
+    client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/segments/{seg1_id}",
+        json={
+            "head_flow": 10.0, "upstream_water_level_max": max_z + 6.0, "upstream_water_level_min": max_z + 5.0,
+            "min_pressure": 1.0, "downstream_residual_pressure": 1.0, "max_velocity": 2.0,
+        },
+    )
+
+    unscoped = client.post(f"/api/v1/projects/{session_id}/variants/{variant_id}/calcul")
+    assert unscoped.status_code == 409  # Tr2 (BC1 -> BC2) toujours non valide
+
+    scoped = client.post(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/calcul",
+        params={"scope_trace_id": trace["id"], "scope_start_node_id": start_id},
+    )
+    assert scoped.status_code == 200, scoped.text
+    body = scoped.json()
+    assert body["segments_updated"] == 1
+    assert body["nodes_updated"] == 2
+
+    updated_segments = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments").json()
+    seg1 = next(s for s in updated_segments if s["id"] == seg1_id)
+    assert seg1["velocity"] is not None  # Tr1 bien calcule
+    seg2 = next(s for s in updated_segments if s["upstream_node_id"] == mid["id"])
+    assert seg2.get("velocity") is None  # Tr2 non touche
+
+
+def test_calcul_scoped_to_one_troncon_still_requires_that_troncon_valid(
+    client, session_id, project_state, sample_kml_bytes, import_trace
+):
+    variant_id, trace = _import_sample(client, session_id, project_state, sample_kml_bytes, import_trace)
+    nodes = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes").json()
+    start_id = nodes[0]["id"]
+    response = client.post(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/calcul",
+        params={"scope_trace_id": trace["id"], "scope_start_node_id": start_id},
+    )
+    assert response.status_code == 409
+
+
 def test_calcul_gravitaire_hydrostatic_alert_suggests_reposition_for_non_structural_reservoir(
     client, session_id, project_state, sample_kml_bytes, import_trace
 ):
@@ -381,4 +451,5 @@ def test_calcul_gravitaire_hydrostatic_alert_suggests_reposition_for_non_structu
     assert move_response.status_code == 200, move_response.text
     recalc = client.post(f"/api/v1/projects/{session_id}/variants/{variant_id}/calcul").json()
     assert not any("hydrostatique" in a.lower() for a in recalc["alerts"])
+
 

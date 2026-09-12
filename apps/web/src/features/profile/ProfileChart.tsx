@@ -3,7 +3,7 @@
 // (V1-02). Le brut et les points hauts/bas candidats restent calcules cote backend (utiles au
 // Lot 3 pour la creation des noeuds brise-charge/vantouses) mais ne sont plus affiches ici.
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { isPlaceholderNode, nodeColor, nodeInitials } from '../../shared/nodeLabels'
 import { useAppStore } from '../../state/store'
@@ -79,6 +79,20 @@ function interpolateZAtPk(points: { pk: number; z: number }[], pk: number): numb
   return points[points.length - 1].z
 }
 
+// Meme interpolation, mais sur un ENSEMBLE de segments disjoints (piezoSegments, ou une des deux
+// lignes hydrostatiques) — trouve celui qui couvre le pk demande, `null` si aucun (pas encore
+// calcule a cet endroit, ou troncon non gravitaire pour les lignes hydrostatiques). Sert au
+// panneau d'info (bouton i, consigne utilisateur) pour afficher les cotes sous le curseur.
+function valueAtPkFromLines(lines: { pk: number; z: number }[][], pk: number): number | null {
+  for (const line of lines) {
+    if (line.length === 0) continue
+    const first = line[0]
+    const last = line[line.length - 1]
+    if (pk >= first.pk - 1e-6 && pk <= last.pk + 1e-6) return interpolateZAtPk(line, pk)
+  }
+  return null
+}
+
 // Restreint une courbe a [pkMin, pkMax] (cliquer un troncon dans l'arborescence doit "afficher le
 // profil correspondant", consigne utilisateur) — les deux bornes sont interpolees pour que la
 // courbe reste continue meme si aucun point echantillonne ne tombe exactement dessus.
@@ -125,7 +139,22 @@ export function ProfileChart({
   const [canvasEl, setCanvasEl] = useState<HTMLCanvasElement | null>(null)
   const canvasCallbackRef = useCallback((node: HTMLCanvasElement | null) => setCanvasEl(node), [])
   const [size, setSize] = useState({ width: 0, height: 0 })
-  const [hoverInfo, setHoverInfo] = useState<{ x: number; y: number; text: string } | null>(null)
+  // Une ligne par info (consigne utilisateur : "empilées sur la verticale", chacune coloree comme
+  // la courbe dont elle provient — le PK reste blanc, cf. rendu plus bas).
+  const [hoverInfo, setHoverInfo] = useState<{ x: number; y: number; lines: { text: string; color: string }[] } | null>(null)
+  // Pan au clic droit (cf. l'effet plus bas) — sur des refs, pas du state : suivies a chaque
+  // frame pendant un drag, un `useState` y redeclencherait un rendu (donc l'effet lui-meme) a
+  // chaque pixel, ce qui est exactement le souci de saccades qu'on evite par ailleurs (curseur).
+  const panOriginRef = useRef<{ clientX: number; pkMin: number; pkMax: number } | null>(null)
+  const pendingPanFrameRef = useRef<number | null>(null)
+  const pendingHoverFrameRef = useRef<number | null>(null)
+  useEffect(
+    () => () => {
+      if (pendingHoverFrameRef.current != null) cancelAnimationFrame(pendingHoverFrameRef.current)
+      if (pendingPanFrameRef.current != null) cancelAnimationFrame(pendingPanFrameRef.current)
+    },
+    [],
+  )
 
   const traces = useAppStore((s) => s.traces)
   const nodes = useAppStore((s) => s.nodes)
@@ -285,6 +314,69 @@ export function ProfileChart({
     }
     canvas.addEventListener('wheel', handleWheel, { passive: false })
     return () => canvas.removeEventListener('wheel', handleWheel)
+  }, [canvasEl, pkMin, pkMax, baselinePkMin, baselinePkMax, onZoomChange])
+
+  // Deplacement (pan) au clic droit maintenu (consigne utilisateur : "se deplacer... en restant
+  // appuye sur le bouton droit, principalement lorsqu'on zoome") — le clic droit n'a aucun autre
+  // usage ici (pas de menu contextuel sur le profil), reutilisable sans ambiguite. Ecouteurs sur
+  // `window` pour mousemove/mouseup (pas seulement le canvas) : un drag rapide sort facilement du
+  // canvas en cours de route, le relachement doit quand meme etre detecte. `contextmenu` est
+  // desactive sur le canvas pour que le clic droit ne fasse jamais apparaitre le menu du navigateur.
+  useEffect(() => {
+    const canvas = canvasEl
+    if (!canvas) return
+    // Sur un `ref` (pas un `let` local a l'effet) : `onZoomChange` pendant le drag fait changer
+    // `pkMin`/`pkMax`, qui re-declenche cet effet (ils sont en dependance) — un `let` perdrait
+    // l'origine du drag en cours de route a chaque frame, un ref survit au reattachement des
+    // ecouteurs.
+    const handleContextMenu = (event: MouseEvent) => event.preventDefault()
+    const handleMouseDown = (event: MouseEvent) => {
+      if (event.button !== 2) return
+      event.preventDefault()
+      panOriginRef.current = { clientX: event.clientX, pkMin, pkMax }
+    }
+    const applyPan = (clientX: number) => {
+      const origin = panOriginRef.current
+      if (!origin) return
+      const rect = canvas.getBoundingClientRect()
+      const plotWidth = rect.width - PADDING.left - PADDING.right
+      if (plotWidth <= 0) return
+      const span = origin.pkMax - origin.pkMin
+      const deltaPk = -((clientX - origin.clientX) / plotWidth) * span
+      let newMin = origin.pkMin + deltaPk
+      let newMax = origin.pkMax + deltaPk
+      if (newMin < baselinePkMin) {
+        newMin = baselinePkMin
+        newMax = newMin + span
+      }
+      if (newMax > baselinePkMax) {
+        newMax = baselinePkMax
+        newMin = newMax - span
+      }
+      onZoomChange({ min: newMin, max: newMax })
+    }
+    const handleWindowMouseMove = (event: MouseEvent) => {
+      if (!panOriginRef.current) return
+      if (pendingPanFrameRef.current != null) cancelAnimationFrame(pendingPanFrameRef.current)
+      const clientX = event.clientX
+      pendingPanFrameRef.current = requestAnimationFrame(() => applyPan(clientX))
+    }
+    const handleWindowMouseUp = (event: MouseEvent) => {
+      if (event.button !== 2) return
+      panOriginRef.current = null
+    }
+
+    canvas.addEventListener('contextmenu', handleContextMenu)
+    canvas.addEventListener('mousedown', handleMouseDown)
+    window.addEventListener('mousemove', handleWindowMouseMove)
+    window.addEventListener('mouseup', handleWindowMouseUp)
+    return () => {
+      if (pendingPanFrameRef.current != null) cancelAnimationFrame(pendingPanFrameRef.current)
+      canvas.removeEventListener('contextmenu', handleContextMenu)
+      canvas.removeEventListener('mousedown', handleMouseDown)
+      window.removeEventListener('mousemove', handleWindowMouseMove)
+      window.removeEventListener('mouseup', handleWindowMouseUp)
+    }
   }, [canvasEl, pkMin, pkMax, baselinePkMin, baselinePkMax, onZoomChange])
 
   useEffect(() => {
@@ -470,28 +562,57 @@ export function ProfileChart({
     return (pk: number) => PADDING.left + ((pk - pkMin) / pkSpan) * plotWidth
   }, [size.width, pkMin, pkMax])
 
+  // Le curseur "sautait" sur la carte (consigne utilisateur) : chaque pixel de mousemove
+  // declenchait setHoveredPk, donc un redessin COMPLET du canvas (effet ci-dessus, tres charge —
+  // toutes les courbes + noeuds), plus une mise a jour du marqueur carte dans un composant
+  // separe — sur un mouvement rapide, le thread principal n'arrivait pas a suivre et sautait des
+  // positions plutot que de les enchainer. On ne retient donc que la DERNIERE position par frame
+  // d'affichage (requestAnimationFrame), jamais plus d'une mise a jour d'etat par frame — le
+  // navigateur ne peut de toute facon pas peindre plus souvent, inutile de lui en demander plus.
   const handleMouseMove: React.MouseEventHandler<HTMLCanvasElement> = (event) => {
     if (!profile || profile.raw.length === 0) return
     const canvas = canvasEl
     if (!canvas) return
     const rect = canvas.getBoundingClientRect()
-    const x = event.clientX - rect.left
-    const plotWidth = rect.width - PADDING.left - PADDING.right
-    const pk = pkMin + ((x - PADDING.left) / plotWidth) * (pkMax - pkMin)
-    if (pk >= pkMin && pk <= pkMax) setHoveredPk(pk)
-    if (infoMode && pk >= pkMin && pk <= pkMax) {
-      const hitToleranceInPk = (8 / plotWidth) * (pkMax - pkMin)
-      const nearNode = traceNodes.find((n) => Math.abs(n.pk - pk) <= hitToleranceInPk && !isPlaceholderNode(n))
-      // Un vrai noeud garde son ID (deja connu, pas de calcul) ; un point de terrain quelconque
-      // n'a pas d'identifiant propre en base (decision utilisateur) — seulement PK + altitude,
-      // interpolee sur le profil "Terrain" deja trace.
-      const text = nearNode
-        ? `id ${nearNode.id} · PK ${Math.round(nearNode.pk)} m · Z ${Math.round(nearNode.z)} m`
-        : `PK ${Math.round(pk)} m · Z ${interpolateZAtPk(profile.raw, pk).toFixed(1)} m`
-      setHoverInfo({ x, y: event.clientY - rect.top, text })
-    } else if (infoMode) {
-      setHoverInfo(null)
-    }
+    const clientX = event.clientX
+    const clientY = event.clientY
+    if (pendingHoverFrameRef.current != null) cancelAnimationFrame(pendingHoverFrameRef.current)
+    pendingHoverFrameRef.current = requestAnimationFrame(() => {
+      const x = clientX - rect.left
+      const plotWidth = rect.width - PADDING.left - PADDING.right
+      const pk = pkMin + ((x - PADDING.left) / plotWidth) * (pkMax - pkMin)
+      if (pk >= pkMin && pk <= pkMax) setHoveredPk(pk)
+      if (infoMode && pk >= pkMin && pk <= pkMax) {
+        const hitToleranceInPk = (8 / plotWidth) * (pkMax - pkMin)
+        const nearNode = traceNodes.find((n) => Math.abs(n.pk - pk) <= hitToleranceInPk && !isPlaceholderNode(n))
+        // Un vrai noeud garde son ID (deja connu, pas de calcul) ; un point de terrain quelconque
+        // n'a pas d'identifiant propre en base (decision utilisateur) — seulement PK + altitude,
+        // interpolee sur le profil "Terrain" deja trace.
+        const displayPk = nearNode ? nearNode.pk : pk
+        const z = nearNode ? nearNode.z : interpolateZAtPk(profile.raw, pk)
+        // Pression hydrodynamique/hydrostatique (consigne utilisateur, "si applicable" — un
+        // troncon non encore calcule, ou en refoulement pour les hydrostatiques, n'en affiche
+        // simplement pas la ligne) : cote de la courbe correspondante moins l'altitude du
+        // terrain a ce PK, memes courbes (deja clippees a la vue) que celles tracees au canvas.
+        const piezoZ = valueAtPkFromLines(piezoSegments, displayPk)
+        const hydroMaxZ = valueAtPkFromLines(hydrostaticLines.maxLines, displayPk)
+        const hydroMinZ = valueAtPkFromLines(hydrostaticLines.minLines, displayPk)
+        const lines: { text: string; color: string }[] = [
+          { text: `PK ${Math.round(displayPk)} m${nearNode ? ` · id ${nearNode.id}` : ''}`, color: '#ffffff' },
+          { text: `Z ${z.toFixed(1)} m`, color: TERRAIN_LINE_COLOR },
+        ]
+        if (piezoZ != null) lines.push({ text: `Pression hydrodynamique ${(piezoZ - z).toFixed(1)} m`, color: PIEZO_LINE_COLOR })
+        if (hydroMaxZ != null) {
+          lines.push({ text: `Pression hydrostatique max ${(hydroMaxZ - z).toFixed(1)} m`, color: HYDROSTATIC_MAX_COLOR })
+        }
+        if (hydroMinZ != null) {
+          lines.push({ text: `Pression hydrostatique min ${(hydroMinZ - z).toFixed(1)} m`, color: HYDROSTATIC_MIN_COLOR })
+        }
+        setHoverInfo({ x, y: clientY - rect.top, lines })
+      } else if (infoMode) {
+        setHoverInfo(null)
+      }
+    })
   }
 
   // Clic sur un marqueur de noeud existant (n'importe quel type, y compris une extremite — cdc §6 :
@@ -562,6 +683,10 @@ export function ProfileChart({
           style={{ cursor: addNodeMode ? 'crosshair' : 'default' }}
           onMouseMove={handleMouseMove}
           onMouseLeave={() => {
+            // Annule toute frame en attente (cf. handleMouseMove) : sans ça, une mise a jour
+            // programmee juste avant la sortie du curseur s'appliquerait APRES ces resets et
+            // laisserait une position perimee affichee.
+            if (pendingHoverFrameRef.current != null) cancelAnimationFrame(pendingHoverFrameRef.current)
             setHoveredPk(null)
             setHoverInfo(null)
           }}
@@ -569,7 +694,11 @@ export function ProfileChart({
         />
         {hoverInfo && (
           <div className="profile-hover-tooltip" style={{ left: hoverInfo.x + 12, top: hoverInfo.y + 12 }}>
-            {hoverInfo.text}
+            {hoverInfo.lines.map((line, i) => (
+              <div key={i} style={{ color: line.color }}>
+                {line.text}
+              </div>
+            ))}
           </div>
         )}
       </div>

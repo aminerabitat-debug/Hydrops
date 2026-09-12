@@ -34,6 +34,13 @@ interface Row {
   z: number
   node: Node | null
   partialDistance: number
+  // Piquet "bis" (consigne utilisateur : ajout d'un ouvrage, ou changement de DN/PN/materiau —
+  // deux segments DIFFERENTS peuvent se rejoindre au meme PK cumule) : duplique le piquet pour
+  // afficher les valeurs AVANT (piquet d'origine, segment qui se termine ici) ET APRES (piquet
+  // "bis", segment qui commence ici) sans ambiguite — jamais persiste, recalcule a chaque rendu
+  // (donc "supprime" des que la condition ne tient plus, et regenere des qu'elle tient a nouveau,
+  // y compris apres un nouveau calcul qui changerait les DN de part et d'autre).
+  isBis: boolean
 }
 
 const TOPO_COLUMNS = ['N° Piquet', 'Type', 'Distance partielle (m)', 'PK cumulé (m)', 'X', 'Y', 'Z (m)']
@@ -135,6 +142,13 @@ export function DataTable({ onAddNode, onEditNode, onAssignNode, onDeleteNode, a
     [tableScope.kind],
   )
 
+  // Segment qui se TERMINE / COMMENCE exactement a ce PK (bornes de segment, pas juste "le
+  // contient") — distingue sans ambiguite le "avant"/"après" a un piquet frontiere entre deux
+  // segments (consigne utilisateur, cf. Row.isBis), la ou l'ancien segmentAtPk (qui contient le
+  // pk) pouvait retourner arbitrairement l'un ou l'autre des deux a la frontiere exacte.
+  const segmentEndingAt = (pk: number): Segment | null => segments.find((s) => Math.abs(s.pk_end - pk) < 1e-6) ?? null
+  const segmentStartingAt = (pk: number): Segment | null => segments.find((s) => Math.abs(s.pk_start - pk) < 1e-6) ?? null
+
   const rows = useMemo<Row[]>(() => {
     if (!trace || !profile || profile.raw.length === 0) return []
     const traceNodes = nodes.filter((n) => n.trace_id === trace.id)
@@ -160,10 +174,28 @@ export function DataTable({ onAddNode, onEditNode, onAssignNode, onDeleteNode, a
       }
     }
 
-    // Numero de piquet attribue sur la liste COMPLETE et triee, avant tout filtrage par troncon —
-    // un piquet garde le meme numero quelle que soit la vue (indexe, incremente, unique).
     const fullSorted = Array.from(merged.values()).sort((a, b) => a.pk - b.pk)
-    const numbered = fullSorted.map((r, i) => ({ ...r, piquetNumber: i + 1 }))
+
+    // Piquet "bis" (consigne utilisateur) : a tout ouvrage REEL qui n'est pas une extremite de
+    // trace (donc toujours frontiere entre deux segments distincts — celui qui se termine et
+    // celui qui commence ici, potentiellement de DN/materiau/classe differents une fois calcules)
+    // — un ouvrage placeholder ("junction" pas encore affecte) n'en a jamais. Duplique juste APRES
+    // le piquet d'origine, distance partielle 0 (meme PK cumule).
+    const expanded: { pk: number; z: number; node: Node | null; isBis: boolean }[] = []
+    for (const entry of fullSorted) {
+      expanded.push({ ...entry, isBis: false })
+      if (!entry.node || isPlaceholderNode(entry.node)) continue
+      const before = segmentEndingAt(entry.pk)
+      const after = segmentStartingAt(entry.pk)
+      if (!before || !after) continue // extremite de trace : un seul cote, pas de "bis"
+      expanded.push({ pk: entry.pk, z: entry.z, node: entry.node, isBis: true })
+    }
+
+    // Numero de piquet attribue sur la liste COMPLETE et triee (bis inclus), avant tout filtrage
+    // par troncon — un piquet garde le meme numero quelle que soit la vue (indexe, incremente,
+    // unique) ; un "bis" en fait partie integrante (ephemere : il disparait/reapparait selon
+    // isPlaceholderNode/pipeChanged, jamais un numero fige a l'avance).
+    const numbered = expanded.map((r, i) => ({ ...r, piquetNumber: i + 1 }))
 
     let filtered = numbered
     if (tableScope.kind === 'troncon') {
@@ -179,12 +211,21 @@ export function DataTable({ onAddNode, onEditNode, onAssignNode, onDeleteNode, a
         y: lat,
         z: r.z,
         node: r.node,
+        isBis: r.isBis,
         partialDistance: i === 0 ? 0 : r.pk - filtered[i - 1].pk,
       }
     })
-  }, [trace, profile, nodes, tableScope])
+  }, [trace, profile, nodes, segments, tableScope])
 
   const segmentAtPk = (pk: number): Segment | null => segments.find((s) => s.pk_start - 1e-6 <= pk && pk <= s.pk_end + 1e-6) ?? null
+
+  // Pour un piquet AVANT/APRES (cf. Row.isBis) : segment explicite plutot que segmentAtPk (qui
+  // choisirait arbitrairement l'un des deux a la frontiere exacte) — pour un piquet ordinaire
+  // (aucun segment ne se termine/commence exactement ici), retombe sur segmentAtPk inchange.
+  const segmentForRow = (row: { pk: number; isBis: boolean }): Segment | null => {
+    if (row.isBis) return segmentStartingAt(row.pk)
+    return segmentEndingAt(row.pk) ?? segmentAtPk(row.pk)
+  }
 
   const nodesById = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes])
 
@@ -196,7 +237,7 @@ export function DataTable({ onAddNode, onEditNode, onAssignNode, onDeleteNode, a
     if (tableScope.kind !== 'troncon') return []
     let cumulative = 0
     return rows.map((row) => {
-      const segment = segmentAtPk(row.pk)
+      const segment = segmentForRow(row)
       if (!segment) {
         return {
           calculated: false,
@@ -273,7 +314,7 @@ export function DataTable({ onAddNode, onEditNode, onAssignNode, onDeleteNode, a
         </thead>
         <tbody>
           {rows.map((row, rowIndex) => {
-            const segment = tableScope.kind === 'troncon' ? segmentAtPk(row.pk) : null
+            const segment = tableScope.kind === 'troncon' ? segmentForRow(row) : null
             const hydraulics = hydraulicRows[rowIndex]
             // Materiau/DN/Classe/DI/Rugosite ne doivent etre affiches QUE si le calcul a abouti
             // pour ce segment (consigne utilisateur) — sinon le catalogue par defaut (jamais
@@ -303,7 +344,7 @@ export function DataTable({ onAddNode, onEditNode, onAssignNode, onDeleteNode, a
                 title={addableByRowClick ? 'Cliquer pour ajouter un nœud à ce piquet' : undefined}
               >
                 <td>{row.piquetNumber}</td>
-                <td>{hasRealNode ? nodeDisplayLabel(row.node!) : ''}</td>
+                <td>{hasRealNode ? nodeDisplayLabel(row.node!) + (row.isBis ? ' (bis)' : '') : ''}</td>
                 <td>{row.partialDistance.toFixed(1)}</td>
                 <td>{row.pk.toFixed(1)}</td>
                 <td>{row.x.toFixed(6)}</td>

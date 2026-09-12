@@ -336,8 +336,18 @@ export const api = {
     return handleJson(response)
   },
 
-  async runCalculation(sessionId: string, variantId: string): Promise<CalcRunResult> {
-    const response = await fetch(`${API_BASE}/projects/${sessionId}/variants/${variantId}/calcul`, { method: 'POST' })
+  // `scope` (consigne utilisateur : un tronçon deja selectionne et valide se calcule seul, sans
+  // exiger les autres) restreint le calcul a CE tronçon precis — omis (ou absent), le calcul reste
+  // celui de toute la variante (comportement historique, exige tous les tronçons valides).
+  async runCalculation(
+    sessionId: string,
+    variantId: string,
+    scope?: { traceId: string; startNodeId: string },
+  ): Promise<CalcRunResult> {
+    const query = scope
+      ? `?${new URLSearchParams({ scope_trace_id: scope.traceId, scope_start_node_id: scope.startNodeId })}`
+      : ''
+    const response = await fetch(`${API_BASE}/projects/${sessionId}/variants/${variantId}/calcul${query}`, { method: 'POST' })
     return handleJson(response)
   },
 }

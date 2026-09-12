@@ -136,9 +136,9 @@ export function ProjectTree({ onOpenProjectSettings, onNewVariant, onDuplicateVa
     requestMapFocus({ kind: 'node', nodeId })
   }
 
-  const handleSelectTroncon = (traceId: string, pkStart: number, pkEnd: number, label: string) => {
+  const handleSelectTroncon = (traceId: string, startNodeId: string, pkStart: number, pkEnd: number, label: string) => {
     setSelectedTrace(traceId)
-    setTableScope({ kind: 'troncon', pkStart, pkEnd, label })
+    setTableScope({ kind: 'troncon', pkStart, pkEnd, label, traceId, startNodeId })
     requestMapFocus({ kind: 'troncon', traceId, pkStart, pkEnd })
   }
 
@@ -508,7 +508,7 @@ export function ProjectTree({ onOpenProjectSettings, onNewVariant, onDuplicateVa
                       <li key={`${t.start_node_id}-${t.end_node_id}`} className={isTronconSelected ? 'selected' : ''}>
                         <span
                           className={`tree-item-main ${forced ? 'tree-item-defined' : ''}`}
-                          onClick={() => handleSelectTroncon(t.trace_id, t.pk_start, t.pk_end, label)}
+                          onClick={() => handleSelectTroncon(t.trace_id, t.start_node_id, t.pk_start, t.pk_end, label)}
                         >
                           <span
                             className="troncon-regime-glyph"

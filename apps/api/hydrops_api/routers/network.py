@@ -641,11 +641,21 @@ def patch_segment(session_id: str, variant_id: str, segment_id: str, payload: Pa
 
 
 @router.post("/calcul")
-def run_calculation(session_id: str, variant_id: str, request: Request):
-    """Bouton Calcul > Calculer (consigne utilisateur). Precondition : TOUS les troncons de la
+def run_calculation(
+    session_id: str,
+    variant_id: str,
+    request: Request,
+    scope_trace_id: Optional[str] = None,
+    scope_start_node_id: Optional[str] = None,
+):
+    """Bouton Calcul > Calculer (consigne utilisateur). Par defaut (variante selectionnee dans
+    l'arborescence, aucun tronçon precis) : precondition inchangee, TOUS les tronçons de la
     variante (toutes traces confondues) doivent avoir un regime determine (pas "indetermine") ET
     etre valides (donnees hydrauliques enregistrees via "Modifier le troncon" — Segment.forced),
-    sinon 409 avec la liste de ce qui manque — le calcul ne se lance pas partiellement."""
+    sinon 409 avec la liste de ce qui manque — le calcul ne se lance pas partiellement. Si
+    `scope_trace_id`/`scope_start_node_id` identifient un tronçon precis (consigne utilisateur :
+    un tronçon deja selectionne et valide se calcule seul, sans exiger les autres) : SEUL ce
+    tronçon est exige valide et (re)calcule, les autres tronçons de la variante restent inchanges."""
     package = require_package(get_session_store(request), session_id)
     variant = _require_variant(package, variant_id)
     nodes = _nodes_for_variant(package, variant)
@@ -657,14 +667,20 @@ def run_calculation(session_id: str, variant_id: str, request: Request):
     for n in nodes:
         by_trace.setdefault(str(n.trace_id), []).append(n)
 
+    scoped_to_one_troncon = scope_trace_id is not None and scope_start_node_id is not None
+
     missing: list[str] = []
     troncons_by_trace: dict[str, list] = {}
-    for trace_id, trace_nodes in by_trace.items():
+    for tid, trace_nodes in by_trace.items():
+        if scoped_to_one_troncon and tid != scope_trace_id:
+            continue
         ordered = sorted(trace_nodes, key=lambda n: n.pk)
         ordered_tuples = [(str(n.id), n.type, n.pk) for n in ordered]
         segment_by_edge = {(str(s.upstream_node_id), str(s.downstream_node_id)): str(s.id) for s in segments}
         groups = group_into_troncons(ordered_tuples, segment_by_edge)
-        troncons_by_trace[trace_id] = groups
+        if scoped_to_one_troncon:
+            groups = [g for g in groups if g.start_node_id == scope_start_node_id]
+        troncons_by_trace[tid] = groups
         for group in groups:
             start_node = nodes_by_id.get(group.start_node_id)
             end_node = nodes_by_id.get(group.end_node_id)
@@ -675,12 +691,16 @@ def run_calculation(session_id: str, variant_id: str, request: Request):
                 end_label = (end_node.name or end_node.type) if end_node else "?"
                 reason = "régime indéterminé" if regime == "indetermine" else "données non validées"
                 missing.append(f"{start_label} → {end_label} ({reason})")
+    if scoped_to_one_troncon and not any(troncons_by_trace.values()):
+        raise HTTPException(status_code=404, detail="tronçon introuvable (données modifiées depuis la sélection ?)")
     if missing:
         raise HTTPException(
             status_code=409,
             detail=(
-                "Tous les tronçons doivent être déterminés (régime connu) et validés (Modifier le "
-                "tronçon) avant de lancer le calcul. Manquant : " + "; ".join(missing)
+                ("Le tronçon sélectionné doit être déterminé (régime connu) et validé (Modifier le "
+                 "tronçon) avant de lancer le calcul. Manquant : " if scoped_to_one_troncon else
+                 "Tous les tronçons doivent être déterminés (régime connu) et validés (Modifier le "
+                 "tronçon) avant de lancer le calcul. Manquant : ") + "; ".join(missing)
             ),
         )
 

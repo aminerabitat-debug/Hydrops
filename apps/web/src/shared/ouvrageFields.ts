@@ -18,7 +18,17 @@ export const FLUIDE_OPTIONS = [
 
 export type OuvrageFieldSpec =
   | { key: string; label: string; kind: 'select'; options: string[]; showIf?: (data: Record<string, unknown>) => boolean }
-  | { key: string; label: string; kind: 'number'; unit?: string; showIf?: (data: Record<string, unknown>) => boolean }
+  | {
+      key: string
+      label: string
+      kind: 'number'
+      unit?: string
+      // Valeur proposee a la creation quand rien n'est herite de l'ouvrage precedent (consigne
+      // utilisateur : "maintenir des valeurs par defaut" pour la pression a l'aspiration et les
+      // pertes de charge station) — cf. applyFieldDefaults, jamais imposee si deja saisie/heritee.
+      defaultValue?: number
+      showIf?: (data: Record<string, unknown>) => boolean
+    }
   | { key: string; label: string; kind: 'checkbox-group'; options: string[]; showIf?: (data: Record<string, unknown>) => boolean }
 
 const PUMPING_STATION_FIELDS: OuvrageFieldSpec[] = [
@@ -36,17 +46,16 @@ const PUMPING_STATION_FIELDS: OuvrageFieldSpec[] = [
     showIf: (d) => d.installation_type === 'En cale sèche',
   },
   { key: 'fluid', label: 'Fluide', kind: 'select', options: FLUIDE_OPTIONS },
-  { key: 'suction_pressure', label: "Pression à l'aspiration", kind: 'number', unit: 'm' },
-  { key: 'head_losses', label: 'Pertes de charge dans la station', kind: 'number', unit: 'm' },
+  { key: 'suction_pressure', label: "Pression à l'aspiration", kind: 'number', unit: 'm', defaultValue: 3 },
+  { key: 'head_losses', label: 'Pertes de charge dans la station', kind: 'number', unit: 'm', defaultValue: 1 },
 ]
 
 // Débit + autonomie plutôt qu'une capacité saisie directement (consigne utilisateur) — la
-// capacité s'en déduit (NodeDialog affiche la valeur calculée, en lecture seule). Partagé par les
-// deux types issus de la scission de "Réservoir" (stockage / mise en charge, consigne
-// utilisateur) : mêmes champs, seuls le libellé/les initiales/la couleur du type diffèrent.
-export const RESERVOIR_AUTONOMY_UNITS = ['minutes', 'heures']
-
-const RESERVOIR_FIELDS: OuvrageFieldSpec[] = [
+// capacité s'en déduit (NodeDialog affiche la valeur calculée, en lecture seule). L'unité de
+// l'autonomie n'est plus un choix de l'utilisateur (consigne utilisateur) : heures pour un
+// réservoir de stockage, minutes pour un réservoir de mise en charge — fixée par le TYPE
+// d'ouvrage, cf. computeReservoirCapacity qui en tient lieu plutôt que de la stocker dans `data`.
+const STORAGE_RESERVOIR_FIELDS: OuvrageFieldSpec[] = [
   {
     key: 'reservoir_type',
     label: 'Type',
@@ -55,8 +64,19 @@ const RESERVOIR_FIELDS: OuvrageFieldSpec[] = [
   },
   { key: 'fluid', label: 'Fluide', kind: 'select', options: FLUIDE_OPTIONS },
   { key: 'flow', label: 'Débit', kind: 'number', unit: 'm³/h' },
-  { key: 'autonomy', label: 'Autonomie', kind: 'number' },
-  { key: 'autonomy_unit', label: "Unité de l'autonomie", kind: 'select', options: RESERVOIR_AUTONOMY_UNITS },
+  { key: 'autonomy', label: 'Autonomie (heures)', kind: 'number' },
+]
+
+const SURGE_RESERVOIR_FIELDS: OuvrageFieldSpec[] = [
+  {
+    key: 'reservoir_type',
+    label: 'Type',
+    kind: 'select',
+    options: ['Semi-enterré couvert', 'Semi-enterré non couvert', 'Surélevé'],
+  },
+  { key: 'fluid', label: 'Fluide', kind: 'select', options: FLUIDE_OPTIONS },
+  { key: 'flow', label: 'Débit', kind: 'number', unit: 'm³/h' },
+  { key: 'autonomy', label: 'Autonomie (minutes)', kind: 'number' },
 ]
 
 const PRESSURE_BREAK_FIELDS: OuvrageFieldSpec[] = [
@@ -77,19 +97,24 @@ const PRESSURE_BREAK_FIELDS: OuvrageFieldSpec[] = [
 // Injection reutilisent directement Node.injected_flow/withdrawn_flow.
 export const OUVRAGE_FIELDS: Partial<Record<CreatableNodeType, OuvrageFieldSpec[]>> = {
   pumping_station: PUMPING_STATION_FIELDS,
-  storage_reservoir: RESERVOIR_FIELDS,
-  surge_reservoir: RESERVOIR_FIELDS,
+  storage_reservoir: STORAGE_RESERVOIR_FIELDS,
+  surge_reservoir: SURGE_RESERVOIR_FIELDS,
   pressure_break: PRESSURE_BREAK_FIELDS,
 }
 
 // Capacité déduite du débit + de l'autonomie (consigne utilisateur : "l'utilisateur va introduire
 // un débit et une autonomie") — affichée en lecture seule dans NodeDialog, jamais stockée
-// séparément (une seule source de vérité, pas de désynchronisation possible).
-export function computeReservoirCapacity(data: Record<string, unknown> | null | undefined): number | null {
+// séparément (une seule source de vérité, pas de désynchronisation possible). L'unité de
+// l'autonomie est fixée par le TYPE d'ouvrage (consigne utilisateur), pas par un choix stocké
+// dans `data` : heures pour un réservoir de stockage, minutes pour un réservoir de mise en charge.
+export function computeReservoirCapacity(
+  data: Record<string, unknown> | null | undefined,
+  type: CreatableNodeType,
+): number | null {
   const flow = typeof data?.flow === 'number' ? data.flow : null
   const autonomy = typeof data?.autonomy === 'number' ? data.autonomy : null
   if (flow == null || autonomy == null || flow <= 0 || autonomy <= 0) return null
-  const autonomyHours = data?.autonomy_unit === 'minutes' ? autonomy / 60 : autonomy
+  const autonomyHours = type === 'surge_reservoir' ? autonomy / 60 : autonomy
   return flow * autonomyHours
 }
 
@@ -130,6 +155,24 @@ export function inheritableOuvrageData(
   if (!precedingData || !fieldSpecs) return {}
   const keys = new Set(fieldSpecs.map((f) => f.key))
   return Object.fromEntries(Object.entries(precedingData).filter(([k]) => keys.has(k)))
+}
+
+// Complete `data` (deja herite d'un eventuel ouvrage precedent, cf. inheritableOuvrageData) avec les
+// `defaultValue` des champs numeriques qui n'ont encore aucune valeur — consigne utilisateur :
+// "maintenir des valeurs par defaut" (pression a l'aspiration, pertes de charge station...),
+// jamais imposees si deja saisies/heritees.
+export function applyFieldDefaults(
+  data: Record<string, unknown>,
+  fieldSpecs: OuvrageFieldSpec[] | undefined,
+): Record<string, unknown> {
+  if (!fieldSpecs) return data
+  const withDefaults = { ...data }
+  for (const spec of fieldSpecs) {
+    if (spec.kind === 'number' && spec.defaultValue != null && withDefaults[spec.key] === undefined) {
+      withDefaults[spec.key] = spec.defaultValue
+    }
+  }
+  return withDefaults
 }
 
 const COMMON_UTILITY_FILIERES = [

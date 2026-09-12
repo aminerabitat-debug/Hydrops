@@ -16,6 +16,7 @@ import { Modal } from '../../app/Modal'
 import {
   OUVRAGE_FIELDS,
   TREATMENT_PLANT_SUBTYPES,
+  applyFieldDefaults,
   computeReservoirCapacity,
   inheritableOuvrageData,
   type OuvrageFieldSpec,
@@ -103,7 +104,13 @@ export function NodeDialog({
   const [type, setType] = useState<CreatableNodeType>(resolveInitialType(initialType))
   const [name, setName] = useState(initialName ?? '')
   const [data, setData] = useState<Record<string, unknown>>(
-    initialData ?? (mode === 'create' ? inheritableOuvrageData(precedingOuvrage?.data, OUVRAGE_FIELDS[resolveInitialType(initialType)]) : {}),
+    initialData ??
+      (mode === 'create'
+        ? applyFieldDefaults(
+            inheritableOuvrageData(precedingOuvrage?.data, OUVRAGE_FIELDS[resolveInitialType(initialType)]),
+            OUVRAGE_FIELDS[resolveInitialType(initialType)],
+          )
+        : {}),
   )
   const initialFlow = resolveInitialFlow(initialInjectedFlow ?? 0, initialWithdrawnFlow ?? 0)
   const [flowDirection, setFlowDirection] = useState<FlowDirection>(initialFlow.direction)
@@ -113,7 +120,7 @@ export function NodeDialog({
 
   const namePrefix = useMemo(() => TYPE_OPTIONS.find((o) => o.value === type)?.namePrefix, [type])
   const fieldSpecs = OUVRAGE_FIELDS[type]
-  const reservoirCapacity = useMemo(() => computeReservoirCapacity(data), [data])
+  const reservoirCapacity = useMemo(() => computeReservoirCapacity(data, type), [data, type])
   const selectedSubtype = useMemo(
     () => TREATMENT_PLANT_SUBTYPES.find((s) => s.value === data.plant_subtype),
     [data.plant_subtype],
@@ -126,7 +133,11 @@ export function NodeDialog({
     // Les champs de mise en donnees sont entierement differents d'un type a l'autre — repartir
     // d'un formulaire vierge evite de soumettre des cles d'un autre type par erreur. En creation,
     // reheriter fluide/débit de l'ouvrage precedent pour le NOUVEAU type (consigne utilisateur).
-    setData(mode === 'create' ? inheritableOuvrageData(precedingOuvrage?.data, OUVRAGE_FIELDS[newType]) : {})
+    setData(
+      mode === 'create'
+        ? applyFieldDefaults(inheritableOuvrageData(precedingOuvrage?.data, OUVRAGE_FIELDS[newType]), OUVRAGE_FIELDS[newType])
+        : {},
+    )
   }
 
   const setField = (key: string, value: unknown) => {

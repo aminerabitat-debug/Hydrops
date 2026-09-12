@@ -37,6 +37,7 @@ export function App() {
   const project = useAppStore((s) => s.project)
   const variants = useAppStore((s) => s.variants)
   const selectedVariantId = useAppStore((s) => s.selection.selectedVariantId)
+  const tableScope = useAppStore((s) => s.selection.tableScope)
   const setProjectState = useAppStore((s) => s.setProjectState)
   const setSelectedVariant = useAppStore((s) => s.setSelectedVariant)
   const refreshNetwork = useAppStore((s) => s.refreshNetwork)
@@ -183,22 +184,33 @@ export function App() {
     setPendingDeleteVariantId(null)
   }
 
-  const handleRunCalcul = async () => {
+  // Un tronçon selectionne dans l'arborescence (tableScope de type 'troncon') scope le calcul a
+  // CE seul tronçon (consigne utilisateur : "s'il a déjà sélectionné un tronçon et que ses infos
+  // sont valides, le calcul se fera uniquement sur ce tronçon") — sélectionner la variante (ou ne
+  // rien selectionner de precis) revient au comportement historique : tous les tronçons, tous
+  // exiges valides (cf. setSelectedVariant, qui reinitialise tableScope a 'trace'). `forceFull`
+  // ignore le tronçon selectionne (utilise par handleAcceptReposition, qui doit toujours relancer
+  // un calcul COMPLET quel que soit l'etat de l'arborescence au moment de l'acceptation).
+  const runCalcul = async (forceFull = false) => {
     if (!sessionId || !selectedVariantId) return
+    const scope =
+      !forceFull && tableScope.kind === 'troncon' ? { traceId: tableScope.traceId, startNodeId: tableScope.startNodeId } : undefined
     try {
       setStatusMessage('Calcul en cours...')
-      const result = await api.runCalculation(sessionId, selectedVariantId)
+      const result = await api.runCalculation(sessionId, selectedVariantId, scope)
       await refreshNetwork()
       setCalcResult(result)
+      const scopeLabel = scope ? ` (${tableScope.kind === 'troncon' ? tableScope.label : ''})` : ''
       setStatusMessage(
         result.alerts.length > 0
-          ? `Calcul terminé avec ${result.alerts.length} alerte(s)`
-          : 'Calcul terminé sans alerte',
+          ? `Calcul terminé${scopeLabel} avec ${result.alerts.length} alerte(s)`
+          : `Calcul terminé${scopeLabel} sans alerte`,
       )
     } catch (error) {
       setStatusMessage(`Calcul impossible : ${(error as Error).message}`)
     }
   }
+  const handleRunCalcul = () => runCalcul(false)
 
   // Acceptation d'une proposition de deplacement de reservoir (consigne utilisateur, cf.
   // CalcResultDialog) : deplace le noeud puis relance un calcul COMPLET (tous les tronçons, pas
@@ -215,7 +227,7 @@ export function App() {
             "vérifiez-la dans \"Modifier le tronçon\".",
         )
       }
-      await handleRunCalcul()
+      await runCalcul(true)
     } catch (error) {
       setStatusMessage(`Déplacement impossible : ${(error as Error).message}`)
     }

@@ -11,7 +11,12 @@ import type { Node, Project, ProjectStateResponse, Segment, TraceGeometry, Tronc
 // Portee de la table (point 5, feedback utilisateur) : un Trace selectionne montre tous les
 // piquets avec les colonnes topo uniquement ; un Troncon selectionne filtre sur sa plage de PK et
 // ajoute les colonnes conduite (materiau/DN/classe/DI/rugosite, futures colonnes hydrauliques).
-export type TableScope = { kind: 'trace' } | { kind: 'troncon'; pkStart: number; pkEnd: number; label: string }
+// `traceId`/`startNodeId` (consigne utilisateur : "Calculer" ne cible que le tronçon sélectionné,
+// s'il est déjà validé, sans exiger les autres) identifient sans ambiguïté LE tronçon visé pour un
+// calcul scopé — cf. apps/api routers/network.py:run_calculation (scope_trace_id/scope_start_node_id).
+export type TableScope =
+  | { kind: 'trace' }
+  | { kind: 'troncon'; pkStart: number; pkEnd: number; label: string; traceId: string; startNodeId: string }
 
 interface SelectionState {
   hoveredPk: number | null
@@ -120,7 +125,12 @@ export const useAppStore = create<AppState>((set, get) => ({
       selection: { ...s.selection, selectedTraceId: traceId, hoveredPk: null, tableScope: { kind: 'trace' } },
     })),
 
-  setSelectedVariant: (variantId) => set((s) => ({ selection: { ...s.selection, selectedVariantId: variantId } })),
+  // Selectionner la variante (consigne utilisateur : "il faut la rendre sélectionnable") efface
+  // aussi un tronçon eventuellement selectionne — meme logique que selectTrace ci-dessus : viser
+  // a nouveau "toute la variante" doit etre un choix explicite, pas un residu d'une selection de
+  // tronçon precedente (notamment pour "Calculer", qui se scope sur le dernier tableScope connu).
+  setSelectedVariant: (variantId) =>
+    set((s) => ({ selection: { ...s.selection, selectedVariantId: variantId, tableScope: { kind: 'trace' } } })),
 
   setSelectedNode: (nodeId) => set((s) => ({ selection: { ...s.selection, selectedNodeId: nodeId } })),
 

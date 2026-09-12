@@ -11,7 +11,15 @@ import { nodeColor, nodeDisplayLabel, nodeInitials } from '../../shared/nodeLabe
 import { isOuvrageDataDefined } from '../../shared/ouvrageFields'
 import { useAppStore } from '../../state/store'
 import { REAL_OUVRAGE_TYPES, isStructuralEndpoint } from '../../shared/types'
-import type { CalculationPreferences, CreatableNodeType, Node, PipeCatalogRow, TronconGroup, Variant } from '../../shared/types'
+import type {
+  CalculationPreferences,
+  CreatableNodeType,
+  Node,
+  PipeCatalogRow,
+  TraceGeometry,
+  TronconGroup,
+  Variant,
+} from '../../shared/types'
 import { TRONCON_REGIME_COLOR, TRONCON_REGIME_GLYPH, tronconIsForced, tronconRegime } from '../../shared/troncons'
 import { NodeDialog, type NodeSubmitPayload } from '../profile/NodeDialog'
 import { TronconDialog, type TronconHydraulicValues } from './TronconDialog'
@@ -74,6 +82,7 @@ export function ProjectTree({ onOpenProjectSettings, onNewVariant, onDuplicateVa
   const setSelectedNode = useAppStore((s) => s.setSelectedNode)
   const setTableScope = useAppStore((s) => s.setTableScope)
   const setProjectState = useAppStore((s) => s.setProjectState)
+  const updateTrace = useAppStore((s) => s.updateTrace)
   const refreshNetwork = useAppStore((s) => s.refreshNetwork)
   const setStatusMessage = useAppStore((s) => s.setStatusMessage)
   const requestMapFocus = useAppStore((s) => s.requestMapFocus)
@@ -83,6 +92,7 @@ export function ProjectTree({ onOpenProjectSettings, onNewVariant, onDuplicateVa
   // debit, hors de notre controle) — la progression (lots DEM traites / total) vient du backend
   // via polling, pas d'une simple estimation cote client.
   const [isImporting, setIsImporting] = useState(false)
+  const [detectingCrossingsTraceId, setDetectingCrossingsTraceId] = useState<string | null>(null)
   const [importProgress, setImportProgress] = useState<ImportProgress | null>(null)
   // Afficher/masquer le contenu (Ouvrages/Tronçons) de la variante SELECTIONNEE, independamment de
   // la selection elle-meme (demande utilisateur) — reinitialise a "affiche" a chaque changement de
@@ -218,6 +228,7 @@ export function ProjectTree({ onOpenProjectSettings, onNewVariant, onDuplicateVa
           upstream_water_level_min_offset: hydraulics.upstreamWaterLevelMinOffset,
           min_pressure: hydraulics.minPressure,
           downstream_residual_pressure: hydraulics.downstreamResidualPressure,
+          min_pressure_exclusion_m: hydraulics.minPressureExclusionM,
           max_velocity: hydraulics.maxVelocity,
           min_velocity: hydraulics.minVelocity,
           forced_material: hydraulics.forcedMaterial ?? '',
@@ -286,6 +297,25 @@ export function ProjectTree({ onOpenProjectSettings, onNewVariant, onDuplicateVa
     }
   }
 
+  // Detection des traversees (consigne utilisateur : routes/rail/pistes, canaux/rivieres, chaabas,
+  // bâtiments) — declenchee EXPLICITEMENT (bouton par trace), jamais automatiquement : appel a un
+  // service externe (Overpass/OSM) potentiellement lent ou indisponible.
+  const handleDetectCrossings = async (trace: TraceGeometry) => {
+    if (!sessionId) return
+    setDetectingCrossingsTraceId(trace.id)
+    setStatusMessage('Détection des traversées en cours (Overpass/OpenStreetMap)...')
+    try {
+      const updated = await api.detectCrossings(sessionId, trace.id)
+      updateTrace(updated)
+      const count = updated.crossings?.length ?? 0
+      setStatusMessage(count > 0 ? `${count} traversée(s) détectée(s)` : 'Aucune traversée détectée')
+    } catch (error) {
+      setStatusMessage(`Détection des traversées échouée : ${(error as Error).message}`)
+    } finally {
+      setDetectingCrossingsTraceId(null)
+    }
+  }
+
   const percent =
     isImporting && importProgress && importProgress.total > 0
       ? Math.round((importProgress.completed / importProgress.total) * 100)
@@ -343,7 +373,25 @@ export function ProjectTree({ onOpenProjectSettings, onNewVariant, onDuplicateVa
               requestMapFocus({ kind: 'trace', traceId: trace.id })
             }}
           >
-            {`Trace (${Math.round(trace.length)} m)`}
+            <span style={{ flex: 1 }}>{`Trace (${Math.round(trace.length)} m)`}</span>
+            {trace.crossings != null && (
+              <span className="trace-crossings-count" title="Traversées détectées">
+                {trace.crossings.length}
+              </span>
+            )}
+            <button
+              type="button"
+              className="tree-inline-btn"
+              disabled={detectingCrossingsTraceId === trace.id}
+              onClick={(e) => {
+                e.stopPropagation()
+                handleDetectCrossings(trace)
+              }}
+              title="Détecter les traversées (routes, voies ferrées, cours d'eau, bâtiments)"
+              aria-label="Détecter les traversées"
+            >
+              {detectingCrossingsTraceId === trace.id ? '⏳' : '🛣️'}
+            </button>
           </li>
         ))}
         {!isImporting && traces.length === 0 && <li className="empty-hint">Aucune trace</li>}
@@ -597,6 +645,14 @@ export function ProjectTree({ onOpenProjectSettings, onNewVariant, onDuplicateVa
           const precedingHeadFlow = precedingTroncon
             ? segmentsById.get(precedingTroncon.segment_ids[0])?.head_flow ?? undefined
             : undefined
+          // Valeur par defaut de la zone d'exclusion (consigne utilisateur : "estimée à partir de
+          // celle dans préférences"), tant que ce tronçon n'a pas encore la sienne propre —
+          // pourcentage des Preferences converti en metres sur la longueur REELLE de ce tronçon.
+          const defaultExclusionM =
+            preferences?.min_pressure_exclusion_pct != null
+              ? (preferences.min_pressure_exclusion_pct / 100) *
+                (editingTroncon.troncon.pk_end - editingTroncon.troncon.pk_start)
+              : undefined
           return (
             <TronconDialog
               label={editingTroncon.label}
@@ -611,6 +667,7 @@ export function ProjectTree({ onOpenProjectSettings, onNewVariant, onDuplicateVa
                 minPressure: firstSegment?.min_pressure ?? preferences?.default_min_pressure ?? undefined,
                 downstreamResidualPressure:
                   firstSegment?.downstream_residual_pressure ?? preferences?.default_downstream_residual_pressure ?? undefined,
+                minPressureExclusionM: firstSegment?.min_pressure_exclusion_m ?? defaultExclusionM,
                 maxVelocity: firstSegment?.max_velocity ?? preferences?.default_max_velocity ?? undefined,
                 minVelocity: firstSegment?.min_velocity ?? preferences?.default_min_velocity ?? undefined,
                 forcedMaterial: firstSegment?.forced_material ?? undefined,

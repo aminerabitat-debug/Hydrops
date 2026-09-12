@@ -21,6 +21,18 @@ export interface LineStringGeometry {
   coordinates: [number, number][]
 }
 
+// Traversee detectee (route/piste/voie ferree, canal/riviere/cours d'eau, bâtiment) — consigne
+// utilisateur : couche affichable/masquable sur la carte et le profil. Indicative (base OSM), cf.
+// apps/api/hydrops_api/services/crossings.py.
+export interface Crossing {
+  id: string
+  kind: 'highway' | 'railway' | 'waterway' | 'building'
+  label?: string | null
+  pk: number
+  lon: number
+  lat: number
+}
+
 export interface TraceGeometry {
   id: string
   project_id: string
@@ -35,6 +47,8 @@ export interface TraceGeometry {
   parent_trace_id?: string | null
   parent_node_id?: string | null
   elevation_profile?: ElevationProfile
+  // null/absent = jamais detectees ; [] = detectees, aucune traversee trouvee.
+  crossings?: Crossing[] | null
 }
 
 export interface Variant {
@@ -216,6 +230,9 @@ export interface Segment {
   upstream_water_level_min_offset?: number | null
   min_pressure?: number | null
   downstream_residual_pressure?: number | null
+  // Zone d'exclusion de la contrainte de pression min, en METRES depuis l'ouvrage de depart,
+  // propre a ce tronçon (consigne utilisateur) — cf. TronconDialog.tsx.
+  min_pressure_exclusion_m?: number | null
   max_velocity?: number | null
   min_velocity?: number | null
   // Contrainte Materiau/DN forcee (fenetre "Modifier le tronçon", consigne utilisateur) : le

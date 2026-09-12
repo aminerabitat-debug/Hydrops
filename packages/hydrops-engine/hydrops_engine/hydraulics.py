@@ -279,18 +279,19 @@ _EXCLUSION_ZONE_PK_EPSILON_M = 1e-3
 
 
 def _exclusion_zone_end_pk(
-    node_pk: Optional[dict[str, float]], start_node: str, end_node: str, exclusion_pct: Optional[float]
+    node_pk: Optional[dict[str, float]], start_node: str, end_node: str, exclusion_m: Optional[float]
 ) -> Optional[float]:
-    """PK au-dela duquel la contrainte de pression min redevient opposable (Preferences, consigne
-    utilisateur, defaut 1%) — calcule comme un pourcentage de la longueur du tronçon depuis son
-    ouvrage de depart. `None` (zone desactivee) si le pourcentage ou les PK sont indisponibles."""
-    if not exclusion_pct or exclusion_pct <= 0 or not node_pk:
+    """PK au-dela duquel la contrainte de pression min redevient opposable — longueur, en METRES,
+    propre au tronçon (consigne utilisateur : `Segment.min_pressure_exclusion_m`, plus un
+    pourcentage global de Preferences), depuis son ouvrage de depart. `None` (zone desactivee) si
+    la longueur ou les PK sont indisponibles."""
+    if not exclusion_m or exclusion_m <= 0 or not node_pk:
         return None
     start_pk = node_pk.get(start_node)
     end_pk = node_pk.get(end_node)
     if start_pk is None or end_pk is None:
         return None
-    return start_pk + (exclusion_pct / 100.0) * (end_pk - start_pk)
+    return min(start_pk + exclusion_m, end_pk)
 
 
 def _required_pressure_by_node(
@@ -459,11 +460,16 @@ def _gravitaire_pass(
     allowed_materials_fn: Optional[AllowedMaterialsFn],
     node_pk: Optional[dict[str, float]],
     min_dn_by_segment: dict[str, int],
+    forced_dn_by_segment: Optional[dict[str, int]] = None,
 ) -> tuple[dict[str, NodeCalcResult], list[SegmentCalcResult], list[str]]:
     """Une passe complete de la reconstruction AVAL -> AMONT + translation (cf. docstring module),
     parametree par un plancher de DN additionnel par segment (`min_dn_by_segment`) — permet a
     `solve_gravitaire_troncon` de ré-essayer avec un DN plus gros sur un segment precis quand la
-    pression minimale n'est pas tenue (consigne utilisateur), sans dupliquer cette logique."""
+    pression minimale n'est pas tenue (consigne utilisateur), sans dupliquer cette logique — et par
+    un DN EXACT impose par segment (`forced_dn_by_segment`, distinct de `Segment.forced_dn` saisi
+    par l'utilisateur) utilise par l'optimisation telescopique de `solve_gravitaire_troncon` : la
+    classe de pression/le materiau restent choisis automatiquement (le moins cher respectant le PMS
+    et les materiaux autorises), seul le DN est impose tel quel pour ce segment."""
     alerts: list[str] = []
     nodes: dict[str, NodeCalcResult] = {}
     for nid in node_ids_ordered:
@@ -511,6 +517,21 @@ def _gravitaire_pass(
                     f"le PMS requis ({max_pms_needed:.1f} m, classe {cand.pressure_class} = {cand.pms_m:.1f} m) "
                     f"— calcul effectué malgré la contrainte matériau/DN forcée."
                 )
+        elif forced_dn_by_segment is not None and seg.id in forced_dn_by_segment:
+            # DN exact impose pour l'optimisation telescopique (consigne utilisateur) — materiau/
+            # classe restent choisis automatiquement (le moins cher respectant PMS/materiaux
+            # autorises) a CE DN precis, sans plancher ni plafond : c'est a l'appelant
+            # (solve_gravitaire_troncon) de ne proposer que des DN respectant deja la contrainte de
+            # non-croissance vers l'aval.
+            exact_dn = forced_dn_by_segment[seg.id]
+            candidates = _candidates(catalog, min_di, exact_dn, exact_dn, allowed_materials_fn, max_pms_needed, max_di)
+            if not candidates:
+                alerts.append(
+                    f"{seg_label} : aucune conduite active DN{exact_dn} ne respecte vitesse/PMS/"
+                    f"matériaux autorisés — optimisation de diamètre non appliquée ici."
+                )
+                candidates = _candidates(catalog, 0.0, exact_dn, exact_dn, None) or list(catalog)
+            cand = candidates[0]
         else:
             effective_dn_floor = dn_floor
             forced_min_dn = min_dn_by_segment.get(seg.id)
@@ -592,6 +613,13 @@ def _gravitaire_pass(
 # (consigne utilisateur : "processus iteratif", imperfection acceptee au-dela de ce plafond).
 _MAX_GRAVITAIRE_DN_BUMP_ITERATIONS = 20
 
+# Garde-fou anti-boucle infinie pour la tentative iterative d'augmentation de la CLASSE DE
+# PRESSION en refoulement (cf. solve_refoulement_troncon) — la pression dynamique depend des DN
+# choisis, qui peuvent eux-memes changer legerement de DI en changeant de classe, d'ou la
+# re-iteration complete jusqu'a stabilisation (converge generalement en 2-3 passes, ce plafond est
+# une marge de securite).
+_MAX_REFOULEMENT_PMS_ITERATIONS = 20
+
 
 def solve_gravitaire_troncon(
     node_ids_ordered: list[str],
@@ -607,7 +635,7 @@ def solve_gravitaire_troncon(
     allowed_materials_fn: Optional[AllowedMaterialsFn] = None,
     node_pk: Optional[dict[str, float]] = None,
     terrain_samples: Optional[list[tuple[float, float]]] = None,
-    min_pressure_exclusion_pct: Optional[float] = None,
+    min_pressure_exclusion_m: Optional[float] = None,
 ) -> TronconCalcResult:
     """Gravitaire, sens AVAL -> AMONT (cf. docstring du module) : le niveau du reservoir est une
     donnee fixe, pas un choix de conception — on reconstruit depuis l'exigence de pression aval la
@@ -639,7 +667,7 @@ def solve_gravitaire_troncon(
 
     viscosity = kinematic_viscosity_m2s(fluid_temperature_c)
     exclusion_end_pk = _exclusion_zone_end_pk(
-        node_pk, node_ids_ordered[0], node_ids_ordered[-1], min_pressure_exclusion_pct
+        node_pk, node_ids_ordered[0], node_ids_ordered[-1], min_pressure_exclusion_m
     )
     required_by_node, excluded_node_ids = _required_pressure_by_node(
         node_ids_ordered, min_pressure, downstream_residual_pressure, node_pk, exclusion_end_pk
@@ -694,6 +722,43 @@ def solve_gravitaire_troncon(
         if not bumped_any:
             break
 
+    # Optimisation telescopique du diametre (consigne utilisateur, procedure validee explicitement) :
+    # une fois une solution SANS aucune alerte obtenue (le DN "de base", le moins cher respectant
+    # vitesse/PMS partout), on tente de la reduire par paliers catalogue successifs, en partant du
+    # segment le plus AVAL et en remontant vers l'amont : DN(PK0) >= DN(fin de tronçon) doit
+    # toujours etre respecte, donc chaque segment ne peut etre reduit qu'a un palier >= celui deja
+    # retenu pour son voisin aval. Pour un segment donne, on retente le palier immediatement
+    # inferieur, on reverifie l'ENSEMBLE du tronçon (recalcul complet — reduire un segment change sa
+    # perte de charge, qui peut faire manquer la pression n'importe ou en amont), et on accepte tant
+    # qu'aucune alerte n'apparait ; sinon on s'arrete pour ce segment (il garde son dernier DN
+    # valide) et on passe au suivant, plus en amont. Les segments a materiau/DN force (consigne
+    # utilisateur) ne sont jamais touches.
+    if not violating_nodes and not pass_alerts:
+        dn_by_segment_id = {r.id: r.dn for r in results}
+        forced_dn_by_segment: dict[str, int] = dict(dn_by_segment_id)
+        all_dns = sorted({p.dn for p in catalog if p.active})
+        downstream_floor = 0
+        for i in range(len(segments_ordered) - 1, -1, -1):
+            seg = segments_ordered[i]
+            if seg.forced_dn is not None:
+                downstream_floor = forced_dn_by_segment[seg.id]
+                continue
+            current_dn = forced_dn_by_segment[seg.id]
+            smaller_steps = sorted((d for d in all_dns if downstream_floor <= d < current_dn), reverse=True)
+            for trial_dn in smaller_steps:
+                trial_forced = dict(forced_dn_by_segment)
+                trial_forced[seg.id] = trial_dn
+                trial_nodes, trial_results, trial_alerts = _gravitaire_pass(
+                    node_ids_ordered, node_ground_z, segments_ordered, upstream_level_max,
+                    effective_upstream_level_min, required_by_node, catalog, singular_loss_markup_pct,
+                    viscosity, allowed_materials_fn, node_pk, min_dn_by_segment, trial_forced,
+                )
+                if trial_alerts:
+                    break
+                forced_dn_by_segment = trial_forced
+                nodes, results, pass_alerts = trial_nodes, trial_results, trial_alerts
+            downstream_floor = forced_dn_by_segment[seg.id]
+
     alerts = list(pass_alerts)
     alerts.extend(
         _check_terrain_pressure(
@@ -719,7 +784,7 @@ def solve_refoulement_troncon(
     allowed_materials_fn: Optional[AllowedMaterialsFn] = None,
     node_pk: Optional[dict[str, float]] = None,
     terrain_samples: Optional[list[tuple[float, float]]] = None,
-    min_pressure_exclusion_pct: Optional[float] = None,
+    min_pressure_exclusion_m: Optional[float] = None,
 ) -> TronconCalcResult:
     """Refoulement, sens AMONT -> AVAL (cf. docstring du module) : les DN sont choisis sur la seule
     contrainte de vitesse (+ decroissance vers l'aval), puis la plus petite cote de depart (H0, au
@@ -732,108 +797,151 @@ def solve_refoulement_troncon(
     Seule une alerte de depassement de PMS reste possible (la pression, elle, ne peut pas etre
     "silencieusement" acceptee au-dela de ce que la conduite supporte)."""
     viscosity = kinematic_viscosity_m2s(fluid_temperature_c)
-    alerts: list[str] = []
-
-    dn_ceiling: Optional[int] = None
-    prelim: list[tuple[SegmentSpec, CatalogPipe, float, float]] = []
-    for i, seg in enumerate(segments_ordered):
-        seg_label = (
-            f"Segment entre {_node_label(node_ids_ordered[i], node_pk)} et "
-            f"{_node_label(node_ids_ordered[i + 1], node_pk)}"
-        )
-        if seg.forced_material is not None and seg.forced_dn is not None:
-            # Materiau/DN forces (consigne utilisateur) : le PMS requis n'est connu qu'une fois H0
-            # determine plus bas (meme controle que le dimensionnement automatique, cf. boucle
-            # `results` ci-dessous) — on retient ici la classe la moins chere, sans egard au PMS.
-            cand, _pms_ok = _resolve_forced_pipe(catalog, seg.forced_material, seg.forced_dn, 0.0)
-            if cand is None:
-                alerts.append(
-                    f"{seg_label} : aucune conduite active {seg.forced_material} DN{seg.forced_dn} "
-                    f"au catalogue — vérifier la fenêtre Conduites."
-                )
-                candidates = _candidates(catalog, 0.0, None, None, None) or list(catalog)
-                cand = candidates[0]
-        else:
-            min_di = min_di_mm_for_velocity(seg.flow_m3s, seg.max_velocity_ms)
-            max_di = max_di_mm_for_velocity(seg.flow_m3s, seg.min_velocity_ms)
-            candidates = _candidates(catalog, min_di, None, dn_ceiling, allowed_materials_fn, max_di_mm=max_di)
-            if not candidates:
-                alerts.append(
-                    f"{seg_label} : aucune conduite active ne respecte vitesse/matériaux autorisés "
-                    f"(DN plafonné à {dn_ceiling}) — vérifier le catalogue Conduites."
-                )
-                candidates = _candidates(catalog, 0.0, None, dn_ceiling, None) or list(catalog)
-            cand = candidates[0]
-        velocity, j = segment_hydraulics(seg.flow_m3s, cand.di_mm, cand.roughness_mm, viscosity)
-        if seg.forced_dn is not None:
-            if seg.max_velocity_ms and velocity > seg.max_velocity_ms + 1e-6:
-                alerts.append(
-                    f"{seg_label} : vitesse {velocity:.2f} m/s supérieure à la vitesse max "
-                    f"({seg.max_velocity_ms:.2f} m/s) pour le DN {seg.forced_dn} forcé — calcul "
-                    f"effectué malgré la contrainte matériau/DN forcée."
-                )
-            if seg.min_velocity_ms and velocity < seg.min_velocity_ms - 1e-6:
-                alerts.append(
-                    f"{seg_label} : vitesse {velocity:.2f} m/s inférieure à la vitesse min "
-                    f"({seg.min_velocity_ms:.2f} m/s) pour le DN {seg.forced_dn} forcé — calcul "
-                    f"effectué malgré la contrainte matériau/DN forcée."
-                )
-        prelim.append((seg, cand, velocity, j))
-        dn_ceiling = cand.dn
-
-    # Perte cumulee depuis le DEBUT du troncon (amont), noeud par noeud — la cote de depart H0
-    # n'est pas encore fixee, seule cette perte l'est (elle ne depend que des DN choisis ci-dessus).
-    cumulative_by_node: dict[str, float] = {node_ids_ordered[0]: 0.0}
-    losses: list[float] = []
-    running_loss = 0.0
-    for i, (seg, cand, velocity, j) in enumerate(prelim):
-        loss = j * seg.length_m * (1 + singular_loss_markup_pct / 100)
-        losses.append(loss)
-        running_loss += loss
-        cumulative_by_node[node_ids_ordered[i + 1]] = running_loss
 
     exclusion_end_pk = _exclusion_zone_end_pk(
-        node_pk, node_ids_ordered[0], node_ids_ordered[-1], min_pressure_exclusion_pct
+        node_pk, node_ids_ordered[0], node_ids_ordered[-1], min_pressure_exclusion_m
     )
     required_by_node, excluded_node_ids = _required_pressure_by_node(
         node_ids_ordered, min_pressure, downstream_residual_pressure, node_pk, exclusion_end_pk
     )
 
-    # H0 = plus petite cote de depart telle que, pour CHAQUE noeud exigeant une pression minimale,
-    # H0 - perte_cumulee(noeud) - z(noeud) >= exigence(noeud) — forme close de "augmenter H0
-    # jusqu'a ce que ca marche partout" (consigne utilisateur). Les noeuds de la zone d'exclusion
-    # (Preferences, consigne utilisateur) n'influencent jamais H0 — deja retires de
-    # `required_by_node` (cf. _required_pressure_by_node), verifies a part plus bas.
-    h0 = 0.0
-    for nid, required in required_by_node.items():
-        h0 = max(h0, required + cumulative_by_node[nid] + node_ground_z[nid])
-
-    # Meme principe pour CHAQUE point echantillonne du profil de terrain (pas seulement les noeuds
-    # reels, cf. docstring du module) : la perte cumulee y est interpolee lineairement au sein du
-    # segment qui le contient (J constant sur un segment a DN fixe, donc exact). Les points de la
-    # zone d'exclusion n'influencent pas non plus H0 — collectes a part pour la verification
-    # informative une fois H0 connu (cf. plus bas).
-    excluded_terrain_points: list[tuple[float, float]] = []
-    if min_pressure is not None and terrain_samples and node_pk:
-        for i, (seg, cand, velocity, j) in enumerate(prelim):
-            pk_start = node_pk.get(node_ids_ordered[i])
-            pk_end = node_pk.get(node_ids_ordered[i + 1])
-            if pk_start is None or pk_end is None:
-                continue
-            cum_start = cumulative_by_node[node_ids_ordered[i]]
-            for pk, z in terrain_samples:
-                if pk < pk_start - 1e-6 or pk > pk_end + 1e-6:
-                    continue
-                if exclusion_end_pk is not None and pk <= exclusion_end_pk + _EXCLUSION_ZONE_PK_EPSILON_M:
-                    excluded_terrain_points.append((pk, cum_start + j * (pk - pk_start) * (1 + singular_loss_markup_pct / 100)))
-                    continue
-                cum_at_pk = cum_start + j * (pk - pk_start) * (1 + singular_loss_markup_pct / 100)
-                h0 = max(h0, min_pressure + cum_at_pk + z)
-
+    # Choix des DN/classes ET calcul de H0 sont re-tentes ensemble tant qu'un segment retient une
+    # classe de pression insuffisante pour la pression DYNAMIQUE finalement obtenue (consigne
+    # utilisateur : "tu ne peux pas prevoir PN10 lorsque la pression est 12 bar") — contrairement au
+    # gravitaire (pression hydrostatique connue d'avance), la pression de service en refoulement ne
+    # se connait qu'une fois H0 determine, d'ou l'iteration : `min_pms_by_segment` releve le
+    # plancher PMS d'un segment des que sa classe actuelle ne le couvre plus, et tout est recalcule
+    # (un changement de classe peut legerement changer le DI donc les pertes donc H0).
+    min_pms_by_segment: dict[str, float] = {}
+    alerts: list[str] = []
+    prelim: list[tuple[SegmentSpec, CatalogPipe, float, float]] = []
+    cumulative_by_node: dict[str, float] = {}
     nodes: dict[str, NodeCalcResult] = {}
-    for nid in node_ids_ordered:
-        cote = h0 - cumulative_by_node[nid]
-        nodes[nid] = NodeCalcResult(node_id=nid, piezo_head=cote, pressure_dynamic=cote - node_ground_z[nid])
+    h0 = 0.0
+    excluded_terrain_points: list[tuple[float, float]] = []
+
+    for attempt in range(_MAX_REFOULEMENT_PMS_ITERATIONS + 1):
+        alerts = []
+        dn_ceiling = None
+        prelim = []
+        for i, seg in enumerate(segments_ordered):
+            seg_label = (
+                f"Segment entre {_node_label(node_ids_ordered[i], node_pk)} et "
+                f"{_node_label(node_ids_ordered[i + 1], node_pk)}"
+            )
+            min_pms_needed = min_pms_by_segment.get(seg.id, 0.0)
+            if seg.forced_material is not None and seg.forced_dn is not None:
+                # Materiau/DN forces (consigne utilisateur) : la classe de pression la moins chere
+                # COUVRANT le PMS requis est retenue si elle existe (comme en gravitaire, cf.
+                # solve_gravitaire_troncon) — sinon la moins chere tout court, avec alerte.
+                cand, pms_ok = _resolve_forced_pipe(catalog, seg.forced_material, seg.forced_dn, min_pms_needed)
+                if cand is None:
+                    alerts.append(
+                        f"{seg_label} : aucune conduite active {seg.forced_material} DN{seg.forced_dn} "
+                        f"au catalogue — vérifier la fenêtre Conduites."
+                    )
+                    candidates = _candidates(catalog, 0.0, None, None, None) or list(catalog)
+                    cand = candidates[0]
+                elif not pms_ok and attempt == _MAX_REFOULEMENT_PMS_ITERATIONS:
+                    alerts.append(
+                        f"{seg_label} : le DN {seg.forced_dn} force en {seg.forced_material} ne "
+                        f"respecte pas le PMS requis ({min_pms_needed:.1f} m, classe "
+                        f"{cand.pressure_class} = {cand.pms_m:.1f} m) — calcul effectué malgré la "
+                        f"contrainte matériau/DN forcée."
+                    )
+            else:
+                min_di = min_di_mm_for_velocity(seg.flow_m3s, seg.max_velocity_ms)
+                max_di = max_di_mm_for_velocity(seg.flow_m3s, seg.min_velocity_ms)
+                candidates = _candidates(
+                    catalog, min_di, None, dn_ceiling, allowed_materials_fn, min_pms_needed, max_di
+                )
+                if not candidates:
+                    if attempt == _MAX_REFOULEMENT_PMS_ITERATIONS:
+                        alerts.append(
+                            f"{seg_label} : aucune conduite active ne respecte vitesse/PMS/matériaux "
+                            f"autorisés (DN plafonné à {dn_ceiling}) — vérifier le catalogue Conduites."
+                        )
+                    candidates = _candidates(catalog, 0.0, None, dn_ceiling, None) or list(catalog)
+                cand = candidates[0]
+            velocity, j = segment_hydraulics(seg.flow_m3s, cand.di_mm, cand.roughness_mm, viscosity)
+            if seg.forced_dn is not None:
+                if seg.max_velocity_ms and velocity > seg.max_velocity_ms + 1e-6:
+                    alerts.append(
+                        f"{seg_label} : vitesse {velocity:.2f} m/s supérieure à la vitesse max "
+                        f"({seg.max_velocity_ms:.2f} m/s) pour le DN {seg.forced_dn} forcé — calcul "
+                        f"effectué malgré la contrainte matériau/DN forcée."
+                    )
+                if seg.min_velocity_ms and velocity < seg.min_velocity_ms - 1e-6:
+                    alerts.append(
+                        f"{seg_label} : vitesse {velocity:.2f} m/s inférieure à la vitesse min "
+                        f"({seg.min_velocity_ms:.2f} m/s) pour le DN {seg.forced_dn} forcé — calcul "
+                        f"effectué malgré la contrainte matériau/DN forcée."
+                    )
+            prelim.append((seg, cand, velocity, j))
+            dn_ceiling = cand.dn
+
+        # Perte cumulee depuis le DEBUT du troncon (amont), noeud par noeud — la cote de depart H0
+        # n'est pas encore fixee, seule cette perte l'est (elle ne depend que des DN choisis ci-dessus).
+        cumulative_by_node = {node_ids_ordered[0]: 0.0}
+        losses: list[float] = []
+        running_loss = 0.0
+        for i, (seg, cand, velocity, j) in enumerate(prelim):
+            loss = j * seg.length_m * (1 + singular_loss_markup_pct / 100)
+            losses.append(loss)
+            running_loss += loss
+            cumulative_by_node[node_ids_ordered[i + 1]] = running_loss
+
+        # H0 = plus petite cote de depart telle que, pour CHAQUE noeud exigeant une pression
+        # minimale, H0 - perte_cumulee(noeud) - z(noeud) >= exigence(noeud) — forme close de
+        # "augmenter H0 jusqu'a ce que ca marche partout" (consigne utilisateur). Les noeuds de la
+        # zone d'exclusion (Preferences, consigne utilisateur) n'influencent jamais H0 — deja
+        # retires de `required_by_node` (cf. _required_pressure_by_node), verifies a part plus bas.
+        h0 = 0.0
+        for nid, required in required_by_node.items():
+            h0 = max(h0, required + cumulative_by_node[nid] + node_ground_z[nid])
+
+        # Meme principe pour CHAQUE point echantillonne du profil de terrain (pas seulement les
+        # noeuds reels, cf. docstring du module) : la perte cumulee y est interpolee lineairement
+        # au sein du segment qui le contient (J constant sur un segment a DN fixe, donc exact). Les
+        # points de la zone d'exclusion n'influencent pas non plus H0 — collectes a part pour la
+        # verification informative une fois H0 connu (cf. plus bas).
+        excluded_terrain_points = []
+        if min_pressure is not None and terrain_samples and node_pk:
+            for i, (seg, cand, velocity, j) in enumerate(prelim):
+                pk_start = node_pk.get(node_ids_ordered[i])
+                pk_end = node_pk.get(node_ids_ordered[i + 1])
+                if pk_start is None or pk_end is None:
+                    continue
+                cum_start = cumulative_by_node[node_ids_ordered[i]]
+                for pk, z in terrain_samples:
+                    if pk < pk_start - 1e-6 or pk > pk_end + 1e-6:
+                        continue
+                    if exclusion_end_pk is not None and pk <= exclusion_end_pk + _EXCLUSION_ZONE_PK_EPSILON_M:
+                        excluded_terrain_points.append(
+                            (pk, cum_start + j * (pk - pk_start) * (1 + singular_loss_markup_pct / 100))
+                        )
+                        continue
+                    cum_at_pk = cum_start + j * (pk - pk_start) * (1 + singular_loss_markup_pct / 100)
+                    h0 = max(h0, min_pressure + cum_at_pk + z)
+
+        nodes = {}
+        for nid in node_ids_ordered:
+            cote = h0 - cumulative_by_node[nid]
+            nodes[nid] = NodeCalcResult(node_id=nid, piezo_head=cote, pressure_dynamic=cote - node_ground_z[nid])
+
+        # La classe retenue pour chaque segment doit couvrir la pression DYNAMIQUE qu'il verra
+        # reellement (a ses deux extremites) — sinon on releve son plancher PMS et on refait un
+        # tour complet (le nouveau choix peut changer le DI donc les pertes donc H0, cf. ci-dessus).
+        bumped_any = False
+        for i, (seg, cand, velocity, j) in enumerate(prelim):
+            upstream_node = node_ids_ordered[i]
+            downstream_node = node_ids_ordered[i + 1]
+            max_pressure_seen = max(nodes[upstream_node].pressure_dynamic or 0.0, nodes[downstream_node].pressure_dynamic or 0.0)
+            if cand.pms_m < max_pressure_seen - 1e-6 and max_pressure_seen > min_pms_by_segment.get(seg.id, 0.0) + 1e-6:
+                min_pms_by_segment[seg.id] = max_pressure_seen
+                bumped_any = True
+        if not bumped_any or attempt == _MAX_REFOULEMENT_PMS_ITERATIONS:
+            break
 
     alerts.extend(_check_excluded_nodes_pressure(node_ids_ordered, node_pk, nodes, min_pressure, excluded_node_ids))
     if min_pressure is not None and excluded_terrain_points:

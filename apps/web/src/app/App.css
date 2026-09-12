@@ -256,6 +256,30 @@ body,
   background: rgba(255, 255, 255, 0.14);
 }
 
+.tree-inline-btn {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+
+.tree-inline-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.trace-crossings-count {
+  font-size: 10px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  padding: 0 5px;
+  line-height: 15px;
+}
+
 .tree-node--settings {
   display: flex;
   align-items: center;
@@ -614,6 +638,15 @@ body,
   font-family: Arial, Helvetica, sans-serif;
   color: #0c1524;
   border: 1.5px solid #0c1524;
+  cursor: default;
+}
+
+.map-crossing-marker {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1.5px solid #0c1524;
+  background: #eab308;
   cursor: default;
 }
 

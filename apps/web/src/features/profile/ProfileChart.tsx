@@ -16,7 +16,17 @@ const PIEZO_LINE_COLOR = '#f472b6'
 const PMS_LINE_COLOR = '#f59e0b'
 const HYDROSTATIC_MAX_COLOR = '#22d3ee'
 const HYDROSTATIC_MIN_COLOR = '#0e7490'
+const CROSSING_COLOR = '#eab308'
 const GUITAR_BAND_HEIGHT = 28
+
+// Repere court par nature de traversee (consigne utilisateur : routes/pistes, voies ferrees,
+// canaux/rivieres/chaabas, bâtiments) — affiche au sommet du repere vertical sur le profil.
+const CROSSING_LABELS: Record<string, string> = {
+  highway: 'R',
+  railway: 'F',
+  waterway: 'E',
+  building: 'B',
+}
 
 // Couleurs des courbes, exportees pour que la legende (ProfileTableView, cases a cocher) affiche
 // une pastille de la meme couleur que le trait qu'elle controle (consigne utilisateur) — une
@@ -27,6 +37,7 @@ export const CURVE_COLORS = {
   pms: PMS_LINE_COLOR,
   hydrostaticMax: HYDROSTATIC_MAX_COLOR,
   hydrostaticMin: HYDROSTATIC_MIN_COLOR,
+  crossing: CROSSING_COLOR,
 } as const
 // Petite palette fixe pour distinguer les materiaux dans la bande de caracteristiques ("guitare",
 // consigne utilisateur) — couleurs volontairement sourdes pour ne pas rivaliser avec les courbes.
@@ -45,6 +56,7 @@ interface ProfileChartProps {
   showPms: boolean
   showHydrostaticMax: boolean
   showHydrostaticMin: boolean
+  showCrossings: boolean
   pipeCatalog: PipeCatalogRow[]
   addNodeMode: boolean
   // Bouton d'info deplace dans la barre d'outils (consigne utilisateur, a droite de "+ Nœud") —
@@ -120,6 +132,7 @@ export function ProfileChart({
   showPms,
   showHydrostaticMax,
   showHydrostaticMin,
+  showCrossings,
   pipeCatalog,
   addNodeMode,
   infoMode,
@@ -503,6 +516,28 @@ export function ProfileChart({
       for (const line of hydrostaticLines.minLines) drawLine(line, HYDROSTATIC_MIN_COLOR, 1.5)
     }
 
+    // ---- Traversées (routes/rail/pistes, canaux/rivières/chaabas, bâtiments, consigne
+    // utilisateur) : repère vertical pointillé + repère court par nature en haut du tracé. ----
+    if (showCrossings && trace?.crossings) {
+      ctx.font = 'bold 9px Arial'
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'bottom'
+      for (const crossing of trace.crossings) {
+        if (crossing.pk < pkMin - 1e-6 || crossing.pk > pkMax + 1e-6) continue
+        const x = xScale(crossing.pk)
+        ctx.strokeStyle = CROSSING_COLOR
+        ctx.lineWidth = 1
+        ctx.setLineDash([3, 3])
+        ctx.beginPath()
+        ctx.moveTo(x, PADDING.top)
+        ctx.lineTo(x, height - PADDING.bottom)
+        ctx.stroke()
+        ctx.setLineDash([])
+        ctx.fillStyle = CROSSING_COLOR
+        ctx.fillText(CROSSING_LABELS[crossing.kind] ?? '?', x, PADDING.top + 12)
+      }
+    }
+
     // ---- Noeuds : badge colore + initiales par type (cf. shared/nodeLabels.ts) ----
     // Une extremite pas encore affectee (placeholder "junction") ne doit afficher aucun badge —
     // consigne utilisateur (elle reste cliquable via la detection ci-dessous, juste invisible). Un
@@ -547,6 +582,8 @@ export function ProfileChart({
     showHydrostaticMax,
     showHydrostaticMin,
     hydrostaticLines,
+    showCrossings,
+    trace?.crossings,
     size,
     traceNodes,
     pkMin,

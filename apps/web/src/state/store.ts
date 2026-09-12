@@ -52,6 +52,9 @@ interface AppState {
   selection: SelectionState
   statusMessage: string
   mapFocusRequest: MapFocusRequest | null
+  // Affichage/masquage des traversees (consigne utilisateur) — partage entre le profil et la
+  // carte, d'ou sa place ici plutot que localement dans ProfileTableView.
+  showCrossings: boolean
 
   setSessionId: (sessionId: string) => void
   setProjectState: (state: ProjectStateResponse) => void
@@ -61,10 +64,14 @@ interface AppState {
   setSelectedVariant: (variantId: string | null) => void
   setSelectedNode: (nodeId: string | null) => void
   setTableScope: (scope: TableScope) => void
+  // Remplace une trace apres une mise a jour ponctuelle (ex. detection des traversees) — sans
+  // recharger tout l'etat projet (setProjectState reinitialiserait aussi la selection).
+  updateTrace: (trace: TraceGeometry) => void
   setNetwork: (nodes: Node[], segments: Segment[], troncons: TronconGroup[]) => void
   refreshNetwork: () => Promise<void>
   setStatusMessage: (message: string) => void
   requestMapFocus: (target: MapFocusTarget) => void
+  setShowCrossings: (show: boolean) => void
 }
 
 const DEFAULT_SELECTION: SelectionState = {
@@ -86,6 +93,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   selection: DEFAULT_SELECTION,
   statusMessage: 'Pret',
   mapFocusRequest: null,
+  showCrossings: true,
 
   setSessionId: (sessionId) => set({ sessionId }),
 
@@ -136,6 +144,9 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   setTableScope: (scope) => set((s) => ({ selection: { ...s.selection, tableScope: scope } })),
 
+  updateTrace: (trace) =>
+    set((s) => ({ traces: s.traces.map((t) => (t.id === trace.id ? trace : t)) })),
+
   setNetwork: (nodes, segments, troncons) => set({ nodes, segments, troncons }),
 
   // Recharge noeuds/segments/troncons depuis le backend pour la variante selectionnee — a appeler
@@ -158,4 +169,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   setStatusMessage: (message) => set({ statusMessage: message }),
 
   requestMapFocus: (target) => set((s) => ({ mapFocusRequest: { target, nonce: (s.mapFocusRequest?.nonce ?? 0) + 1 } })),
+
+  setShowCrossings: (show) => set({ showCrossings: show }),
 }))

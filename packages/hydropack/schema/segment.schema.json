@@ -30,6 +30,7 @@
     "upstream_water_level_min_offset": { "type": ["number", "null"], "description": "Non-null si la cote min a ete saisie en relatif (+N m au-dessus du terrain)" },
     "min_pressure": { "type": ["number", "null"], "description": "Pression min (m) — troncon gravitaire" },
     "downstream_residual_pressure": { "type": ["number", "null"], "description": "Pression residuelle aval (m) — gravitaire et refoulement" },
+    "min_pressure_exclusion_m": { "type": ["number", "null"], "description": "Zone d'exclusion de la contrainte de pression min, en metres depuis l'ouvrage de depart, propre a ce troncon" },
     "max_velocity": { "type": ["number", "null"], "description": "Vitesse max (m/s) — gravitaire et refoulement" },
     "min_velocity": { "type": ["number", "null"], "description": "Vitesse min (m/s) — gravitaire et refoulement" },
     "forced_material": { "type": ["string", "null"], "description": "Materiau force (fenetre Modifier le tronçon) — desactive l'auto-dimensionnement, toujours associe a forced_dn" },

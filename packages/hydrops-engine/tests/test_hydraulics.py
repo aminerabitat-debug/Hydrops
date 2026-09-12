@@ -611,10 +611,11 @@ def test_solve_gravitaire_troncon_forced_dn_unknown_combination_alerts_and_falls
     assert len(result.segments) == 1
 
 
-def test_solve_refoulement_troncon_forced_dn_alerts_on_pms_exceeded():
-    # DN force dont le PMS est insuffisant face a la pression statique+dynamique resultante — le
-    # controle PMS existant (partage avec le dimensionnement automatique) doit s'appliquer aussi a
-    # un segment force, sans jamais changer le DN retenu.
+def test_solve_refoulement_troncon_forced_dn_upgrades_class_to_cover_pressure():
+    # DN force dont la classe la moins chere (PN6) est insuffisante face a la pression resultante —
+    # une classe superieure existe (PN16, meme DN/materiau) et doit etre retenue automatiquement
+    # (consigne utilisateur : "tu ne peux pas prevoir PN10 lorsque la pression est 12 bar"), sans
+    # jamais changer le DN force lui-meme. Plus d'alerte, la classe retenue couvre la pression.
     catalog = [
         CatalogPipe(id=1, dn=110, di_mm=99.4, material="PVC", pressure_class="PN6", pms_m=61.2, price=50.0, roughness_mm=0.01),
         CatalogPipe(id=2, dn=110, di_mm=99.4, material="PVC", pressure_class="PN16", pms_m=163.1, price=90.0, roughness_mm=0.01),
@@ -635,8 +636,61 @@ def test_solve_refoulement_troncon_forced_dn_alerts_on_pms_exceeded():
     )
     seg_s1 = result.segments[0]
     assert seg_s1.dn == 110
-    assert seg_s1.pressure_class == "PN6"  # la moins chere retenue par defaut (PMS inconnu au 1er passage)
+    assert seg_s1.pressure_class == "PN16"
+    assert not any("dépasse le pms" in a.lower() or "à revoir" in a.lower() for a in result.alerts)
+
+
+def test_solve_refoulement_troncon_forced_dn_alerts_when_no_class_covers_pressure():
+    # Meme scenario, mais aucune classe disponible (seule PN6) ne couvre la pression requise —
+    # l'alerte doit persister (dernier recours), le DN force reste inchange.
+    catalog = [
+        CatalogPipe(id=1, dn=110, di_mm=99.4, material="PVC", pressure_class="PN6", pms_m=61.2, price=50.0, roughness_mm=0.01),
+    ]
+    nodes_z = {"A": 0.0, "B": 0.0}
+    segments = [
+        SegmentSpec(id="s1", length_m=100.0, flow_m3s=0.01, forced_material="PVC", forced_dn=110),
+    ]
+    result = solve_refoulement_troncon(
+        node_ids_ordered=["A", "B"],
+        node_ground_z=nodes_z,
+        segments_ordered=segments,
+        min_pressure=None,
+        downstream_residual_pressure=100.0,
+        catalog=catalog,
+        singular_loss_markup_pct=10.0,
+        fluid_temperature_c=20.0,
+    )
+    seg_s1 = result.segments[0]
+    assert seg_s1.dn == 110
+    assert seg_s1.pressure_class == "PN6"
     assert any("dépasse le pms" in a.lower() for a in result.alerts)
+
+
+def test_solve_refoulement_troncon_auto_dimensioning_upgrades_class_to_cover_pressure():
+    # Meme principe SANS DN force (dimensionnement automatique) : le premier passage ignore la
+    # pression (choisit la classe la moins chere respectant la vitesse), puis doit relever son
+    # plancher PMS et re-choisir une classe adequate une fois la pression dynamique connue.
+    catalog = [
+        CatalogPipe(id=1, dn=110, di_mm=99.4, material="PVC", pressure_class="PN6", pms_m=61.2, price=50.0, roughness_mm=0.01),
+        CatalogPipe(id=2, dn=110, di_mm=97.4, material="PVC", pressure_class="PN16", pms_m=163.1, price=90.0, roughness_mm=0.01),
+    ]
+    nodes_z = {"A": 0.0, "B": 0.0}
+    segments = [
+        SegmentSpec(id="s1", length_m=100.0, flow_m3s=0.005, max_velocity_ms=2.0),
+    ]
+    result = solve_refoulement_troncon(
+        node_ids_ordered=["A", "B"],
+        node_ground_z=nodes_z,
+        segments_ordered=segments,
+        min_pressure=None,
+        downstream_residual_pressure=100.0,  # pression statique en A > PN6 (61.2 m)
+        catalog=catalog,
+        singular_loss_markup_pct=10.0,
+        fluid_temperature_c=20.0,
+    )
+    seg_s1 = result.segments[0]
+    assert seg_s1.pressure_class == "PN16"
+    assert not any("dépasse le pms" in a.lower() for a in result.alerts)
 
 
 def test_solve_gravitaire_troncon_min_pressure_exclusion_zone_is_informative_not_blocking():
@@ -671,7 +725,7 @@ def test_solve_gravitaire_troncon_min_pressure_exclusion_zone_is_informative_not
     assert any("pression insuffisante" in a.lower() for a in without_exclusion.alerts)
     assert not any(EXCLUSION_ZONE_ALERT_MARKER in a for a in without_exclusion.alerts)
 
-    with_exclusion = solve_gravitaire_troncon(**kwargs, min_pressure_exclusion_pct=10.0)
+    with_exclusion = solve_gravitaire_troncon(**kwargs, min_pressure_exclusion_m=630.0)  # 10% de 6300 m
     assert not any("pression insuffisante au" in a.lower() for a in with_exclusion.alerts)
     assert any(EXCLUSION_ZONE_ALERT_MARKER in a for a in with_exclusion.alerts)
     node_m = next(n for n in with_exclusion.nodes if n.node_id == "M")
@@ -698,7 +752,7 @@ def test_solve_gravitaire_troncon_downstream_residual_still_applies_within_exclu
         singular_loss_markup_pct=10.0,
         fluid_temperature_c=20.0,
         node_pk={"A": 0.0, "B": 50.0},
-        min_pressure_exclusion_pct=100.0,  # exclut tout le tronçon
+        min_pressure_exclusion_m=50.0,  # exclut tout le tronçon
     )
     assert result.alerts == []
     node_b = next(n for n in result.nodes if n.node_id == "B")
@@ -727,8 +781,84 @@ def test_solve_refoulement_troncon_min_pressure_exclusion_zone_is_informative_no
         node_pk={"A": 0.0, "M": 100.0, "B": 5100.0},
     )
     without_exclusion = solve_refoulement_troncon(**kwargs)
-    with_exclusion = solve_refoulement_troncon(**kwargs, min_pressure_exclusion_pct=5.0)
+    with_exclusion = solve_refoulement_troncon(**kwargs, min_pressure_exclusion_m=255.0)  # 5% de 5100 m
     assert any(EXCLUSION_ZONE_ALERT_MARKER in a for a in with_exclusion.alerts)
     node_a_without = next(n for n in without_exclusion.nodes if n.node_id == "A")
     node_a_with = next(n for n in with_exclusion.nodes if n.node_id == "A")
     assert node_a_with.piezo_head < node_a_without.piezo_head - 1e-6
+
+
+def test_solve_gravitaire_troncon_telescopes_smaller_dn_toward_aval_when_budget_allows():
+    # Procedure validee avec l'utilisateur : une fois une solution SANS alerte obtenue (le DN le
+    # moins cher respectant vitesse/PMS), on tente de la reduire par paliers catalogue successifs
+    # en partant du segment le plus AVAL et en remontant — ici, le plancher de pression (bump-loop)
+    # remonte d'abord les DEUX segments a DN110 (le DN90 initial, moins cher, ne tient pas la
+    # pression residuelle sur les 430 m cumules) ; l'optimisation telescopique doit ensuite
+    # reussir a redescendre le segment aval (tail, 30 m) a DN90 tout en gardant le segment amont
+    # (main, 400 m) a DN110 — la reduction inverse (main a 90, tail a 110) violerait la pression.
+    catalog = [
+        CatalogPipe(id=1, dn=90, di_mm=80.0, material="PVC", pressure_class="PN10", pms_m=101.9, price=50.0, roughness_mm=0.01),
+        CatalogPipe(id=2, dn=110, di_mm=99.4, material="PVC", pressure_class="PN10", pms_m=101.9, price=72.8, roughness_mm=0.01),
+        CatalogPipe(id=3, dn=160, di_mm=147.6, material="PVC", pressure_class="PN10", pms_m=101.9, price=126.8, roughness_mm=0.01),
+    ]
+    nodes_z = {"A": 0.0, "M": 0.0, "B": 0.0}
+    segments = [
+        SegmentSpec(id="main", length_m=400.0, flow_m3s=0.03, max_velocity_ms=6.0),
+        SegmentSpec(id="tail", length_m=30.0, flow_m3s=0.03, max_velocity_ms=6.0),
+    ]
+    result = solve_gravitaire_troncon(
+        node_ids_ordered=["A", "M", "B"],
+        node_ground_z=nodes_z,
+        segments_ordered=segments,
+        upstream_level_max=100.0,
+        upstream_level_min=100.0,
+        min_pressure=None,
+        downstream_residual_pressure=40.0,
+        catalog=catalog,
+        singular_loss_markup_pct=0.0,
+        fluid_temperature_c=20.0,
+    )
+    assert result.alerts == []
+    main_result = next(r for r in result.segments if r.id == "main")
+    tail_result = next(r for r in result.segments if r.id == "tail")
+    assert main_result.dn == 110
+    assert tail_result.dn == 90
+    assert main_result.dn >= tail_result.dn
+    node_b = next(n for n in result.nodes if n.node_id == "B")
+    assert node_b.pressure_dynamic >= 40.0 - 1e-6
+
+
+def test_solve_gravitaire_troncon_does_not_telescope_when_no_pressure_margin():
+    # Meme catalogue/geometrie, mais avec une residuelle qui ne laisse aucune marge : le DN110
+    # uniforme tient tout juste (aucune alerte), et la reduction du segment aval a DN90 doit etre
+    # refusee (elle ferait chuter la pression sous l'exigence) — pas de regression du comportement
+    # existant quand il n'y a rien a optimiser.
+    catalog = [
+        CatalogPipe(id=1, dn=90, di_mm=80.0, material="PVC", pressure_class="PN10", pms_m=101.9, price=50.0, roughness_mm=0.01),
+        CatalogPipe(id=2, dn=110, di_mm=99.4, material="PVC", pressure_class="PN10", pms_m=101.9, price=72.8, roughness_mm=0.01),
+    ]
+    nodes_z = {"A": 0.0, "M": 0.0, "B": 0.0}
+    segments = [
+        SegmentSpec(id="main", length_m=400.0, flow_m3s=0.03, max_velocity_ms=6.0),
+        SegmentSpec(id="tail", length_m=30.0, flow_m3s=0.03, max_velocity_ms=6.0),
+    ]
+    # Perte a DN110 uniforme ~= 49.28 m (0.114597 * 430) -> residuelle tout juste tenue avec ~50.7 m
+    # de marge disponible (upstream_level_min - residuelle = 100 - 49.3), sans marge pour DN90 sur
+    # le segment aval (perte tail seule seul passerait de ~3.4 m a ~10.1 m, soit +6.7 m -> deficit).
+    result = solve_gravitaire_troncon(
+        node_ids_ordered=["A", "M", "B"],
+        node_ground_z=nodes_z,
+        segments_ordered=segments,
+        upstream_level_max=100.0,
+        upstream_level_min=100.0,
+        min_pressure=None,
+        downstream_residual_pressure=50.7,
+        catalog=catalog,
+        singular_loss_markup_pct=0.0,
+        fluid_temperature_c=20.0,
+    )
+    assert result.alerts == []
+    main_result = next(r for r in result.segments if r.id == "main")
+    tail_result = next(r for r in result.segments if r.id == "tail")
+    assert main_result.dn == 110
+    assert tail_result.dn == 110

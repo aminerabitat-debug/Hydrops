@@ -259,9 +259,10 @@ def test_calcul_forced_material_dn_applies_despite_violated_constraints(
 def test_calcul_min_pressure_exclusion_zone_is_informative_not_blocking(
     client, session_id, project_state, sample_kml_bytes, import_trace
 ):
-    # Consigne utilisateur : "Zone d'exclusion de la contrainte de pression min" (Preferences) —
-    # un pourcentage de la longueur du tronçon (depuis l'ouvrage de depart) ou min_pressure n'est
-    # plus opposable, une alerte informative le signale mais le calcul s'applique quand meme.
+    # Consigne utilisateur : "Zone d'exclusion de la contrainte de pression min" — propre au
+    # tronçon, en METRES depuis l'ouvrage de depart (Segment.min_pressure_exclusion_m) — ou
+    # min_pressure n'est plus opposable, une alerte informative le signale mais le calcul
+    # s'applique quand meme.
     variant_id, trace = _import_sample(client, session_id, project_state, sample_kml_bytes, import_trace)
     nodes = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes").json()
     upstream_id, downstream_id = nodes[0]["id"], nodes[1]["id"]
@@ -289,12 +290,9 @@ def test_calcul_min_pressure_exclusion_zone_is_informative_not_blocking(
             "upstream_water_level_min": level,
             "min_pressure": 1000.0,  # bien plus que la marge disponible partout -> viole toujours
             "max_velocity": 2.0,
+            "min_pressure_exclusion_m": 999999.0,  # tout le tronçon exclu de min_pressure
         },
     )
-
-    prefs = client.get(f"/api/v1/projects/{session_id}/preferences").json()
-    prefs["min_pressure_exclusion_pct"] = 100.0  # tout le tronçon exclu de min_pressure
-    client.put(f"/api/v1/projects/{session_id}/preferences", json=prefs)
 
     response = client.post(f"/api/v1/projects/{session_id}/variants/{variant_id}/calcul")
     assert response.status_code == 200, response.text

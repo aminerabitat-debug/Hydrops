@@ -625,6 +625,8 @@ def patch_segment(session_id: str, variant_id: str, segment_id: str, payload: Pa
         updates["min_pressure"] = payload.min_pressure
     if payload.downstream_residual_pressure is not None:
         updates["downstream_residual_pressure"] = payload.downstream_residual_pressure
+    if payload.min_pressure_exclusion_m is not None:
+        updates["min_pressure_exclusion_m"] = payload.min_pressure_exclusion_m
     if payload.max_velocity is not None:
         updates["max_velocity"] = payload.max_velocity
     if payload.min_velocity is not None:
@@ -808,7 +810,7 @@ def run_calculation(
                     allowed_materials_fn=allowed_fn,
                     node_pk=node_pk,
                     terrain_samples=terrain_samples,
-                    min_pressure_exclusion_pct=prefs.min_pressure_exclusion_pct,
+                    min_pressure_exclusion_m=first_seg.min_pressure_exclusion_m,
                 )
             else:
                 result = solve_refoulement_troncon(
@@ -823,7 +825,7 @@ def run_calculation(
                     allowed_materials_fn=allowed_fn,
                     node_pk=node_pk,
                     terrain_samples=terrain_samples,
-                    min_pressure_exclusion_pct=prefs.min_pressure_exclusion_pct,
+                    min_pressure_exclusion_m=first_seg.min_pressure_exclusion_m,
                 )
 
             all_alerts.extend(result.alerts)
@@ -963,6 +965,7 @@ def _reset_segment_to_default(package: ProjectPackage, segment_id: str) -> Optio
             "upstream_water_level_min_offset": None,
             "min_pressure": None,
             "downstream_residual_pressure": None,
+            "min_pressure_exclusion_m": None,
             "max_velocity": None,
             "min_velocity": None,
             "forced_material": None,

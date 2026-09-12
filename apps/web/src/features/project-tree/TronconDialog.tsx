@@ -27,6 +27,10 @@ export interface TronconHydraulicValues {
   upstreamWaterLevelMinOffset?: number
   minPressure?: number
   downstreamResidualPressure?: number
+  // Zone d'exclusion de la contrainte de pression min, en METRES depuis l'ouvrage de depart,
+  // propre a ce tronçon (consigne utilisateur) — pre-remplie par l'appelant (ProjectTree.tsx)
+  // depuis le pourcentage des Preferences, mais modifiable independamment ici.
+  minPressureExclusionM?: number
   maxVelocity?: number
   minVelocity?: number
   // Contrainte Materiau/DN forcee (consigne utilisateur) : desactive l'auto-dimensionnement pour
@@ -212,6 +216,18 @@ export function TronconDialog({
           value={hydraulics.minPressure ?? ''}
           onChange={(e) => setHydraulicField('minPressure', e.target.value)}
         />
+      </div>
+      <div className="modal-field">
+        <label htmlFor="troncon-min-pressure-exclusion">Zone d'exclusion (m)</label>
+        <input
+          id="troncon-min-pressure-exclusion"
+          type="number"
+          value={hydraulics.minPressureExclusionM ?? ''}
+          onChange={(e) => setHydraulicField('minPressureExclusionM', e.target.value)}
+        />
+        <span className="modal-field-hint">
+          Distance depuis l'ouvrage de départ où la pression min n'est pas opposable (alerte informative seulement).
+        </span>
       </div>
       <div className="modal-field">
         <label htmlFor="troncon-residual-pressure">Pression résiduelle aval (m)</label>

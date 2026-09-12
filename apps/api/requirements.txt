@@ -1,6 +1,7 @@
 fastapi>=0.115
 uvicorn[standard]>=0.30
 httpx>=0.27
+shapely>=2
 pydantic>=2
 pydantic-settings>=2
 jsonschema>=4

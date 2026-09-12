@@ -123,6 +123,16 @@ export const api = {
     return handleJson(response)
   },
 
+  // Detection des traversees (routes/rail/pistes, canaux/rivieres, bâtiments) — consigne
+  // utilisateur : appel EXPLICITE (bouton), jamais automatique (Overpass/OSM est un service
+  // externe potentiellement lent ou indisponible, cf. hydrops_api.services.crossings).
+  async detectCrossings(sessionId: string, traceId: string): Promise<TraceGeometry> {
+    const response = await fetch(`${API_BASE}/projects/${sessionId}/traces/${traceId}/crossings/detect`, {
+      method: 'POST',
+    })
+    return handleJson(response)
+  },
+
   async newVariant(sessionId: string, payload: { name: string; description?: string }): Promise<Variant> {
     const response = await fetch(`${API_BASE}/projects/${sessionId}/variants`, {
       method: 'POST',
@@ -275,6 +285,7 @@ export const api = {
       upstream_water_level_min_offset?: number
       min_pressure?: number
       downstream_residual_pressure?: number
+      min_pressure_exclusion_m?: number
       max_velocity?: number
       min_velocity?: number
       forced_material?: string

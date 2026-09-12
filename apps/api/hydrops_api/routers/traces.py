@@ -6,7 +6,9 @@ import uuid
 
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 
-from hydropack.models import ElevationProfile, LineStringGeometry, Node, Segment, TraceGeometry
+import httpx
+
+from hydropack.models import Crossing, ElevationProfile, LineStringGeometry, Node, Segment, TraceGeometry
 from hydropack.serializer import ProjectPackage, TraceEntry
 
 from hydrops_engine.topology import sample_at_step, total_length_m
@@ -15,6 +17,7 @@ from ..core.deps import get_session_store, require_package
 from ..core.import_job_store import ImportJobNotFoundError, ImportJobStore
 from ..schemas import PatchTraceRequest
 from ..services import catalog
+from ..services import crossings as crossings_service
 from ..services.dem import DEFAULT_CHUNK_SIZE, DemProvider, DemProviderError
 from ..services.kml_import import KmlImportError, extract_kml_bytes, parse_single_linestring
 from ..services.profile_builder import DEFAULT_SAMPLE_STEP_M, build_elevation_profile
@@ -193,6 +196,34 @@ def patch_trace(session_id: str, trace_id: str, payload: PatchTraceRequest, requ
     updates = payload.model_dump(exclude_none=True)
     if updates:
         entry.geometry = entry.geometry.model_copy(update=updates)
+    return entry.geometry.model_dump(mode="json", exclude_none=True)
+
+
+@router.post("/traces/{trace_id}/crossings/detect")
+async def detect_crossings(session_id: str, trace_id: str, request: Request):
+    """Detection des traversees (routes/rail/pistes, canaux/rivieres, bâtiments) — consigne
+    utilisateur : "afficher et masquer". Declenchee a la demande (jamais automatiquement, cf.
+    hydrops_api.services.crossings) : interroge Overpass (OpenStreetMap), calcule les points de
+    croisement, et les met en cache sur la trace (evite de re-interroger Overpass a chaque
+    ouverture du projet)."""
+    package = require_package(get_session_store(request), session_id)
+    entry = package.traces.get(trace_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="trace inconnue")
+    coordinates = [(c[0], c[1]) for c in entry.geometry.geometry.coordinates]
+    bbox = crossings_service.trace_bbox(coordinates)
+    try:
+        features = await crossings_service.fetch_osm_features(bbox)
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"Service de traversées (Overpass/OSM) indisponible : {e}") from e
+    found = crossings_service.compute_crossings(coordinates, features)
+    entry.geometry = entry.geometry.model_copy(
+        update={
+            "crossings": [
+                Crossing(id=c.id, kind=c.kind, label=c.label, pk=c.pk, lon=c.lon, lat=c.lat) for c in found
+            ]
+        }
+    )
     return entry.geometry.model_dump(mode="json", exclude_none=True)
 
 

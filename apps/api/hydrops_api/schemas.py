@@ -113,6 +113,10 @@ class PatchSegmentRequest(BaseModel):
     upstream_water_level_min_offset: Optional[float] = None
     min_pressure: Optional[float] = None
     downstream_residual_pressure: Optional[float] = None
+    # Zone d'exclusion de la contrainte de pression min, en METRES, propre a ce tronçon (consigne
+    # utilisateur) — remplace le pourcentage global de Preferences pour le CALCUL (cf.
+    # run_calculation), qui ne sert plus que de base au prereplissage par defaut cote frontend.
+    min_pressure_exclusion_m: Optional[float] = None
     max_velocity: Optional[float] = None
     min_velocity: Optional[float] = None
     # Contrainte Materiau/DN forcee (consigne utilisateur) — "" (chaine vide) sur forced_material

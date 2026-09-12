@@ -131,6 +131,21 @@ class ElevationProfile(BaseModel):
     candidate_low_points: list[ProfilePoint] = Field(default_factory=list)
 
 
+class Crossing(BaseModel):
+    """Traversee detectee (route/piste/voie ferree, canal/riviere/cours d'eau, bâtiment) — consigne
+    utilisateur : "afficher et masquer" sur la carte et le profil. Base OpenStreetMap (Overpass),
+    indicative — cf. hydrops_api.services.crossings. Mise en cache ici pour eviter de re-interroger
+    Overpass a chaque ouverture du projet ; `None` sur `TraceGeometry.crossings` = jamais detectee
+    (distinct d'une liste vide = detectee, aucune traversee trouvee)."""
+
+    id: str
+    kind: Literal["highway", "railway", "waterway", "building"]
+    label: Optional[str] = None
+    pk: float
+    lon: float
+    lat: float
+
+
 class TraceGeometry(BaseModel):
     id: UUID
     project_id: UUID
@@ -145,6 +160,7 @@ class TraceGeometry(BaseModel):
     parent_trace_id: Optional[UUID] = None
     parent_node_id: Optional[UUID] = None
     elevation_profile: Optional[ElevationProfile] = None
+    crossings: Optional[list[Crossing]] = None
 
 
 class Variant(BaseModel):
@@ -247,6 +263,12 @@ class Segment(BaseModel):
     upstream_water_level_min_offset: Optional[float] = None
     min_pressure: Optional[float] = None
     downstream_residual_pressure: Optional[float] = None
+    # Zone d'exclusion de la contrainte de pression min (consigne utilisateur : propre au tronçon,
+    # en METRES depuis l'ouvrage de depart — plus un pourcentage global de Preferences, meme si ce
+    # dernier sert encore de base au prereplissage par defaut cote frontend, cf. ProjectTree.tsx).
+    # None = pas de zone d'exclusion configuree pour ce tronçon (contrainte pression min opposable
+    # partout, comme avant l'ajout de ce champ).
+    min_pressure_exclusion_m: Optional[float] = None
     max_velocity: Optional[float] = None
     # Preferences, consigne utilisateur (defaut 0.2 m/s) : plancher de vitesse — l'augmentation
     # iterative du DN gravitaire pour resoudre un defaut de pression (cf.

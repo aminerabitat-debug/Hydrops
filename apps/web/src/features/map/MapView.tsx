@@ -6,9 +6,9 @@
 
 import maplibregl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
-import { buildVertices, coordinatesForPkRange, nearestPkForPoint } from '../../shared/geo'
+import { buildVertices, coordinatesForPkRange, interpolateLonLatAtPk, nearestPkForPoint } from '../../shared/geo'
 import { isPlaceholderNode, nodeColor, nodeDisplayLabel, nodeInitials } from '../../shared/nodeLabels'
 import { useAppStore } from '../../state/store'
 import type { TraceGeometry } from '../../shared/types'
@@ -54,19 +54,12 @@ const STREET_FALLBACK_STYLE = {
 
 const TILE_FAILURE_THRESHOLD = 4
 
-function interpolatePointAtPk(trace: TraceGeometry, targetPk: number): [number, number] | null {
-  const coords = trace.geometry.coordinates
-  if (coords.length === 0 || trace.length <= 0) return null
-  const ratio = Math.min(Math.max(targetPk / trace.length, 0), 1)
-  const idx = Math.round(ratio * (coords.length - 1))
-  return coords[idx]
-}
-
 export function MapView() {
   const containerRef = useRef<HTMLDivElement>(null)
   const mapRef = useRef<maplibregl.Map | null>(null)
   const hoverMarkerRef = useRef<maplibregl.Marker | null>(null)
   const nodeMarkersRef = useRef<Map<string, maplibregl.Marker>>(new Map())
+  const crossingMarkersRef = useRef<Map<string, maplibregl.Marker>>(new Map())
   const tileFailureCountRef = useRef(0)
   const [usingFallbackBasemap, setUsingFallbackBasemap] = useState(false)
   // Petit bouton d'information (consigne utilisateur) : affiche l'ID et le PK du piquet survole
@@ -80,6 +73,7 @@ export function MapView() {
   const setSelectedTrace = useAppStore((s) => s.setSelectedTrace)
   const hoveredPk = useAppStore((s) => s.selection.hoveredPk)
   const mapFocusRequest = useAppStore((s) => s.mapFocusRequest)
+  const showCrossings = useAppStore((s) => s.showCrossings)
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return
@@ -306,23 +300,62 @@ export function MapView() {
     }
   }, [nodes, infoMode])
 
+  // Traversées détectées (consigne utilisateur : afficher/masquer sur la carte ET le profil) —
+  // même principe que les marqueurs de nœuds ci-dessus, sur toutes les traces (pas seulement la
+  // sélectionnée), affiché/masqué via le même bouton que ProfileChart (état partagé, store.ts).
   useEffect(() => {
     const map = mapRef.current
     if (!map) return
-    const trace = traces.find((t) => t.id === selectedTraceId) ?? traces[0]
-    if (!trace || hoveredPk == null) {
+    const markers = crossingMarkersRef.current
+    const seenIds = new Set<string>()
+    if (showCrossings) {
+      for (const trace of traces) {
+        for (const crossing of trace.crossings ?? []) {
+          seenIds.add(crossing.id)
+          let marker = markers.get(crossing.id)
+          if (!marker) {
+            const el = document.createElement('div')
+            el.className = 'map-crossing-marker'
+            marker = new maplibregl.Marker({ element: el }).setLngLat([crossing.lon, crossing.lat]).addTo(map)
+            markers.set(crossing.id, marker)
+          }
+          marker.getElement().title = crossing.label ? `${crossing.kind} · ${crossing.label}` : crossing.kind
+        }
+      }
+    }
+    for (const [id, marker] of markers) {
+      if (!seenIds.has(id)) {
+        marker.remove()
+        markers.delete(id)
+      }
+    }
+  }, [traces, showCrossings])
+
+  const hoveredTrace = traces.find((t) => t.id === selectedTraceId) ?? traces[0]
+  // Sommets + distance cumulee (haversine) le long de la trace survolee — memorises pour ne pas
+  // les reconstruire a chaque frame de survol (cf. shared/geo.ts, meme fonction que
+  // nearestPkForPoint ci-dessous, pour une interpolation CONTINUE entre deux sommets plutot que
+  // l'ancien arrondi au sommet le plus proche qui faisait "sauter" le curseur carte).
+  const hoveredTraceVertices = useMemo(
+    () => (hoveredTrace ? buildVertices(hoveredTrace.geometry.coordinates as [number, number][]) : null),
+    [hoveredTrace],
+  )
+
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map) return
+    if (!hoveredTraceVertices || hoveredPk == null) {
       hoverMarkerRef.current?.remove()
       hoverMarkerRef.current = null
       return
     }
-    const point = interpolatePointAtPk(trace, hoveredPk)
-    if (!point) return
+    const point = interpolateLonLatAtPk(hoveredTraceVertices, hoveredPk)
     if (!hoverMarkerRef.current) {
       hoverMarkerRef.current = new maplibregl.Marker({ color: '#ffd166' }).setLngLat(point).addTo(map)
     } else {
       hoverMarkerRef.current.setLngLat(point)
     }
-  }, [hoveredPk, traces, selectedTraceId])
+  }, [hoveredPk, hoveredTraceVertices])
 
   return (
     <div className="map-view-wrap">

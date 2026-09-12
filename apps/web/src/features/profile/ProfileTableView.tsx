@@ -73,6 +73,8 @@ export function ProfileTableView() {
   const refreshNetwork = useAppStore((s) => s.refreshNetwork)
   const setStatusMessage = useAppStore((s) => s.setStatusMessage)
   const traces = useAppStore((s) => s.traces)
+  const showCrossings = useAppStore((s) => s.showCrossings)
+  const setShowCrossings = useAppStore((s) => s.setShowCrossings)
   const selectedTraceId = useAppStore((s) => s.selection.selectedTraceId)
   const tableScope = useAppStore((s) => s.selection.tableScope)
   const trace = traces.find((t) => t.id === selectedTraceId) ?? traces[0]
@@ -217,6 +219,13 @@ export function ProfileTableView() {
               </label>
             </>
           )}
+          {trace?.crossings != null && (
+            <label className="metric" title="Traversées détectées (routes, voies ferrées, cours d'eau, bâtiments) — base OpenStreetMap, indicative">
+              <input type="checkbox" checked={showCrossings} onChange={(e) => setShowCrossings(e.target.checked)} />
+              <span className="curve-color-swatch" style={{ background: CURVE_COLORS.crossing }} />
+              <span>Traversées ({trace.crossings.length})</span>
+            </label>
+          )}
           <button
             type="button"
             className={`metric btn-toggle-node ${addNodeMode ? 'active' : ''}`}
@@ -266,6 +275,7 @@ export function ProfileTableView() {
             showPms={showPms}
             showHydrostaticMax={showHydrostaticMax}
             showHydrostaticMin={showHydrostaticMin}
+            showCrossings={showCrossings}
             pipeCatalog={pipeCatalog}
             addNodeMode={addNodeMode}
             infoMode={infoMode}

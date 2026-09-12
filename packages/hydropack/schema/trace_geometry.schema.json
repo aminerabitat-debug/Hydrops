@@ -65,6 +65,23 @@
           "items": { "type": "object", "properties": { "pk": { "type": "number" }, "z": { "type": "number" } } }
         }
       }
+    },
+    "crossings": {
+      "type": ["array", "null"],
+      "description": "Traversees detectees (routes/rail/pistes, canaux/rivieres, batiments) — cf. hydrops_api.services.crossings. null = jamais detectees, [] = detectees, aucune trouvee.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "kind", "pk", "lon", "lat"],
+        "properties": {
+          "id": { "type": "string" },
+          "kind": { "type": "string", "enum": ["highway", "railway", "waterway", "building"] },
+          "label": { "type": ["string", "null"] },
+          "pk": { "type": "number" },
+          "lon": { "type": "number" },
+          "lat": { "type": "number" }
+        }
+      }
     }
   }
 }

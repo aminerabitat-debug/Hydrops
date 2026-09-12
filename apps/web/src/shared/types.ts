@@ -26,7 +26,7 @@ export interface LineStringGeometry {
 // apps/api/hydrops_api/services/crossings.py.
 export interface Crossing {
   id: string
-  kind: 'highway' | 'railway' | 'waterway' | 'building'
+  kind: 'highway' | 'railway' | 'waterway' | 'building' | 'urban' | 'forest'
   label?: string | null
   pk: number
   lon: number

@@ -22,9 +22,16 @@ import { api } from '../../shared/apiClient'
 import { buildVertices, interpolateLonLatAtPk } from '../../shared/geo'
 import { isPlaceholderNode, nodeDisplayLabel } from '../../shared/nodeLabels'
 import { useAppStore } from '../../state/store'
-import type { CatalogMaterial, Node, Segment } from '../../shared/types'
+import type { CatalogMaterial, Crossing, Node, Segment } from '../../shared/types'
 
 const SNAP_TOLERANCE_M = 0.5
+
+// Meme repere court que le profil graphique (ProfileChart.tsx:CROSSING_LABELS) — duplique ici
+// plutot que partage, ce ne sont que 6 lettres fixes et ca evite un couplage entre les deux vues
+// pour un detail purement cosmetique.
+const CROSSING_KIND_LABELS: Record<string, string> = {
+  highway: 'R', railway: 'F', waterway: 'E', building: 'B', urban: 'U', forest: 'V',
+}
 
 interface Row {
   piquetNumber: number
@@ -43,7 +50,7 @@ interface Row {
   isBis: boolean
 }
 
-const TOPO_COLUMNS = ['N° Piquet', 'Type', 'Distance partielle (m)', 'PK cumulé (m)', 'X', 'Y', 'Z (m)']
+const TOPO_COLUMNS = ['N° Piquet', 'Type', 'Distance partielle (m)', 'PK cumulé (m)', 'X', 'Y', 'Z (m)', 'Traversée']
 const PIPE_COLUMNS = ['Matériau', 'DN', 'Classe', 'DI (mm)', 'Rugosité (mm)']
 // Sorties du bouton Calcul > Calculer (consigne utilisateur) : rappel du debit, vitesse, PDC
 // unitaire/lineaire/totale, puis les lignes piezometrique et hydrostatique (si applicable) pour
@@ -59,7 +66,7 @@ const ACTION_COLUMN = ''
 
 const DEFAULT_COLUMN_WIDTHS: Record<string, number> = {
   'N° Piquet': 80, Type: 120, 'Distance partielle (m)': 150, 'PK cumulé (m)': 120,
-  X: 110, Y: 110, 'Z (m)': 90,
+  X: 110, Y: 110, 'Z (m)': 90, 'Traversée': 90,
   Matériau: 140, DN: 70, Classe: 80, 'DI (mm)': 80, 'Rugosité (mm)': 100,
   'Débit (m³/h)': 110, 'Vitesse (m/s)': 100, 'PDC unitaire (m/km)': 130, 'PDC linéaire (m)': 120,
   'PDC totale (m)': 110, 'Cote piézo (m)': 110, 'Pression dyn. (m)': 120,
@@ -217,6 +224,29 @@ export function DataTable({ onAddNode, onEditNode, onAssignNode, onDeleteNode, a
     })
   }, [trace, profile, nodes, segments, tableScope])
 
+  // Traversées détectées (consigne utilisateur : colonne dédiée dans le profil Data) — rattachées
+  // au piquet le plus proche (leur PK exact vient d'une projection géométrique, pas forcément
+  // aligné sur la grille d'échantillonnage des piquets), jamais à deux piquets à la fois.
+  const crossingsByRowPk = useMemo(() => {
+    const map = new Map<number, Crossing[]>()
+    if (!trace?.crossings || trace.crossings.length === 0 || rows.length === 0) return map
+    for (const crossing of trace.crossings) {
+      let closestPk = rows[0].pk
+      let bestDist = Math.abs(closestPk - crossing.pk)
+      for (const r of rows) {
+        const d = Math.abs(r.pk - crossing.pk)
+        if (d < bestDist) {
+          bestDist = d
+          closestPk = r.pk
+        }
+      }
+      const list = map.get(closestPk) ?? []
+      list.push(crossing)
+      map.set(closestPk, list)
+    }
+    return map
+  }, [trace?.crossings, rows])
+
   const segmentAtPk = (pk: number): Segment | null => segments.find((s) => s.pk_start - 1e-6 <= pk && pk <= s.pk_end + 1e-6) ?? null
 
   // Pour un piquet AVANT/APRES (cf. Row.isBis) : segment explicite plutot que segmentAtPk (qui
@@ -350,6 +380,11 @@ export function DataTable({ onAddNode, onEditNode, onAssignNode, onDeleteNode, a
                 <td>{row.x.toFixed(6)}</td>
                 <td>{row.y.toFixed(6)}</td>
                 <td>{row.z.toFixed(2)}</td>
+                <td
+                  title={(crossingsByRowPk.get(row.pk) ?? []).map((c) => c.label ?? c.kind).join(', ') || undefined}
+                >
+                  {(crossingsByRowPk.get(row.pk) ?? []).map((c) => CROSSING_KIND_LABELS[c.kind] ?? '?').join(' ')}
+                </td>
                 {tableScope.kind === 'troncon' && (
                   <>
                     <td>{materialLabel}</td>

@@ -132,14 +132,17 @@ class ElevationProfile(BaseModel):
 
 
 class Crossing(BaseModel):
-    """Traversee detectee (route/piste/voie ferree, canal/riviere/cours d'eau, bâtiment) — consigne
-    utilisateur : "afficher et masquer" sur la carte et le profil. Base OpenStreetMap (Overpass),
-    indicative — cf. hydrops_api.services.crossings. Mise en cache ici pour eviter de re-interroger
-    Overpass a chaque ouverture du projet ; `None` sur `TraceGeometry.crossings` = jamais detectee
-    (distinct d'une liste vide = detectee, aucune traversee trouvee)."""
+    """Traversee detectee (route/piste/voie ferree, canal/riviere/cours d'eau, bâtiment, zone
+    urbaine/forestiere) — consigne utilisateur : "afficher et masquer" sur la carte et le profil.
+    Base OpenStreetMap (Overpass), indicative — cf. hydrops_api.services.crossings. `urban`/`forest`
+    sont des ZONES (surfaces) traversees plutot que des traits croises : chaque entree/sortie de
+    zone est un `Crossing` distinct (label "Entrée zone .../Sortie zone ..."), pas une paire dediee.
+    Mise en cache ici pour eviter de re-interroger Overpass a chaque ouverture du projet ; `None`
+    sur `TraceGeometry.crossings` = jamais detectee (distinct d'une liste vide = detectee, aucune
+    traversee trouvee)."""
 
     id: str
-    kind: Literal["highway", "railway", "waterway", "building"]
+    kind: Literal["highway", "railway", "waterway", "building", "urban", "forest"]
     label: Optional[str] = None
     pk: float
     lon: float

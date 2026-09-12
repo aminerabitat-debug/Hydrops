@@ -75,7 +75,7 @@
         "required": ["id", "kind", "pk", "lon", "lat"],
         "properties": {
           "id": { "type": "string" },
-          "kind": { "type": "string", "enum": ["highway", "railway", "waterway", "building"] },
+          "kind": { "type": "string", "enum": ["highway", "railway", "waterway", "building", "urban", "forest"] },
           "label": { "type": ["string", "null"] },
           "pk": { "type": "number" },
           "lon": { "type": "number" },

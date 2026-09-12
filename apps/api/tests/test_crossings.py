@@ -1,3 +1,5 @@
+import pytest
+
 from hydrops_api.services.crossings import OsmFeature, compute_crossings, trace_bbox
 
 
@@ -54,3 +56,43 @@ def test_trace_bbox_covers_all_points():
     assert north == 48.3
     assert west == 2.0
     assert east == 2.5
+
+
+def test_compute_crossings_detects_urban_zone_entry_and_exit():
+    # Trace nord-sud de ~222 m (1 degre de latitude ~= 111320 m) ; zone urbaine rectangulaire
+    # couvrant approximativement le tiers median (pk ~89-156 m) — avec un echantillonnage tous les
+    # 20 m, l'entree/la sortie tombent sur les echantillons a pk=100 et pk=140.
+    trace = [(2.0, 48.0), (2.0, 48.0020)]
+    urban_zone = OsmFeature(
+        kind="urban",
+        label="residential",
+        coordinates=[(1.999, 48.0008), (2.001, 48.0008), (2.001, 48.0014), (1.999, 48.0014), (1.999, 48.0008)],
+    )
+    result = compute_crossings(trace, [urban_zone])
+    urban_crossings = [c for c in result if c.kind == "urban"]
+    assert len(urban_crossings) == 2
+    assert urban_crossings[0].label == "Entrée zone urbaine"
+    assert urban_crossings[0].pk == pytest.approx(100.0, abs=1.0)
+    assert urban_crossings[1].label == "Sortie zone urbaine"
+    assert urban_crossings[1].pk == pytest.approx(140.0, abs=1.0)
+    assert urban_crossings[0].pk < urban_crossings[1].pk
+
+
+def test_compute_crossings_zone_still_inside_at_trace_end():
+    # La zone (foret) couvre toute la fin de la trace : une "Entrée" doit etre rapportee (au premier
+    # echantillon a l'interieur) mais aucune "Sortie" (jamais quittee avant la fin de la trace).
+    trace = [(2.0, 48.0), (2.0, 48.0020)]
+    forest_zone = OsmFeature(
+        kind="forest",
+        label="forest",
+        coordinates=[(1.999, 48.0010), (2.001, 48.0010), (2.001, 48.01), (1.999, 48.01), (1.999, 48.0010)],
+    )
+    result = compute_crossings(trace, [forest_zone])
+    forest_crossings = [c for c in result if c.kind == "forest"]
+    assert len(forest_crossings) == 1
+    assert forest_crossings[0].label == "Entrée zone forestière"
+
+
+def test_compute_crossings_no_zone_features_gives_no_zone_crossings():
+    trace = [(2.0, 48.0), (2.0, 48.0020)]
+    assert compute_crossings(trace, []) == []

@@ -7,7 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { isPlaceholderNode, nodeColor, nodeInitials } from '../../shared/nodeLabels'
 import { useAppStore } from '../../state/store'
-import type { Node, PipeCatalogRow } from '../../shared/types'
+import type { Node, PipeCatalogRow, Segment } from '../../shared/types'
 
 const PADDING = { top: 20, right: 24, bottom: 46, left: 70 }
 const NODE_MARKER_RADIUS = 9
@@ -17,6 +17,10 @@ const PMS_LINE_COLOR = '#f59e0b'
 const HYDROSTATIC_MAX_COLOR = '#22d3ee'
 const HYDROSTATIC_MIN_COLOR = '#0e7490'
 const CROSSING_COLOR = '#eab308'
+// Vitesse (panneau d'info, bouton i) — pas de courbe associee sur le graphique, une couleur propre
+// suffit (evite de la confondre avec la pression hydrodynamique, meme si les deux viennent du
+// meme calcul).
+const VELOCITY_COLOR = '#4ade80'
 const GUITAR_BAND_HEIGHT = 28
 
 // Repere court par nature de traversee (consigne utilisateur : routes/pistes, voies ferrees,
@@ -26,6 +30,8 @@ const CROSSING_LABELS: Record<string, string> = {
   railway: 'F',
   waterway: 'E',
   building: 'B',
+  urban: 'U',
+  forest: 'V',
 }
 
 // Couleurs des courbes, exportees pour que la legende (ProfileTableView, cases a cocher) affiche
@@ -89,6 +95,14 @@ function interpolateZAtPk(points: { pk: number; z: number }[], pk: number): numb
     }
   }
   return points[points.length - 1].z
+}
+
+// Vitesse (m/s) du segment couvrant le pk donne — `null` si hors de tout segment ou si ce segment
+// n'a pas encore ete calcule (consigne utilisateur : afficher la vitesse dans le panneau d'info,
+// bouton i). Une seule valeur par segment (pas une courbe continue), contrairement aux pressions.
+function segmentVelocityAtPk(segments: Segment[], pk: number): number | null {
+  const seg = segments.find((s) => pk >= s.pk_start - 1e-6 && pk <= s.pk_end + 1e-6)
+  return seg?.velocity ?? null
 }
 
 // Meme interpolation, mais sur un ENSEMBLE de segments disjoints (piezoSegments, ou une des deux
@@ -634,10 +648,12 @@ export function ProfileChart({
         const piezoZ = valueAtPkFromLines(piezoSegments, displayPk)
         const hydroMaxZ = valueAtPkFromLines(hydrostaticLines.maxLines, displayPk)
         const hydroMinZ = valueAtPkFromLines(hydrostaticLines.minLines, displayPk)
+        const velocity = segmentVelocityAtPk(segments, displayPk)
         const lines: { text: string; color: string }[] = [
           { text: `PK ${Math.round(displayPk)} m${nearNode ? ` · id ${nearNode.id}` : ''}`, color: '#ffffff' },
           { text: `Z ${z.toFixed(1)} m`, color: TERRAIN_LINE_COLOR },
         ]
+        if (velocity != null) lines.push({ text: `Vitesse ${velocity.toFixed(2)} m/s`, color: VELOCITY_COLOR })
         if (piezoZ != null) lines.push({ text: `Pression hydrodynamique ${(piezoZ - z).toFixed(1)} m`, color: PIEZO_LINE_COLOR })
         if (hydroMaxZ != null) {
           lines.push({ text: `Pression hydrostatique max ${(hydroMaxZ - z).toFixed(1)} m`, color: HYDROSTATIC_MAX_COLOR })

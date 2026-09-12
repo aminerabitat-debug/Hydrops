@@ -1,9 +1,11 @@
-"""Detection des traversees (routes/pistes/voies ferrees, canaux/rivieres/cours d'eau, batiments) —
-consigne utilisateur : "afficher et masquer" sur la carte et le profil. Perimetre MVP, indicatif —
-base OpenStreetMap (Overpass API), pas un releve topographique certifie (cf. reserve posee a
-l'utilisateur) : la couverture/qualite des donnees varie selon la region, et aucun tag OSM dedie
-n'existe pour une "chaaba" (cours d'eau intermittent nord-africain) — seuls les `waterway=*`
-effectivement cartographies (y compris `intermittent=yes`) sont detectes.
+"""Detection des traversees (routes/pistes/voies ferrees, canaux/rivieres/cours d'eau, batiments,
+zones urbaines/forestieres) — consigne utilisateur : "afficher et masquer" sur la carte et le
+profil. Perimetre MVP, indicatif — base OpenStreetMap (Overpass API), pas un releve topographique
+certifie (cf. reserve posee a l'utilisateur) : la couverture/qualite des donnees varie selon la
+region, et aucun tag OSM dedie n'existe pour une "chaaba" (cours d'eau intermittent nord-africain)
+— seuls les `waterway=*` effectivement cartographies (y compris `intermittent=yes`) sont detectes.
+De meme, seules les zones urbaines/forestieres cartographiees comme des WAYS simples (pas les
+relations multipolygones, hors perimetre MVP) sont detectees.
 
 Decoupe en deux etapes independantes (consigne testabilite) :
 - `fetch_osm_features` : appel reseau a Overpass, retourne les elements bruts (dict).
@@ -19,12 +21,26 @@ from dataclasses import dataclass
 from typing import Literal, Optional
 
 import httpx
-from shapely.geometry import LineString, Point
+from shapely.geometry import LineString, Point, Polygon
+from shapely.ops import unary_union
+from shapely.prepared import prep
 
-from hydrops_engine.topology.geometry import cumulative_pk
+from hydrops_engine.topology import sample_at_step
+from hydrops_engine.topology.geometry import Vertex, cumulative_pk
 
-OVERPASS_URL = "https://overpass-api.de/api/interpreter"
-OVERPASS_TIMEOUT_S = 25.0
+# Miroirs publics Overpass, essayes dans l'ordre (consigne utilisateur : le premier a deja renvoye
+# un 504 Gateway Timeout sur une trace dense/longue) — meme principe de cascade que le DEM
+# (services/dem.py), une seule source publique n'etant pas fiable a elle seule.
+OVERPASS_URLS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.openstreetmap.ru/api/interpreter",
+]
+OVERPASS_TIMEOUT_S = 40.0
+# Marge de securite : bien plus long que timeout HTTP client cote appelant (delai vecu par
+# l'utilisateur, cf. hydrops_api.routers.traces), pour laisser Overpass repondre plutot que de
+# couper la connexion trop tot depuis notre cote.
+_QUERY_TIMEOUT_S = 30
 # Overpass renvoie 406 Not Acceptable sans User-Agent explicite (regle anti-bot du serveur) —
 # constate empiriquement, cf. httpx par defaut n'en envoie pas d'utilisable ici.
 _REQUEST_HEADERS = {"User-Agent": "HydroPS/1.0 (hydraulic network design tool)", "Accept": "*/*"}
@@ -34,10 +50,22 @@ _REQUEST_HEADERS = {"User-Agent": "HydroPS/1.0 (hydraulic network design tool)",
 # risquerait de la manquer si le tron de voie/cours d'eau depasse legerement.
 BBOX_MARGIN_DEG = 0.01
 
-CrossingKind = Literal["highway", "railway", "waterway", "building"]
+# Pas d'echantillonnage (m) le long de la trace pour la detection de zones (urbain/foret, consigne
+# utilisateur) — memes points que le profil altimetrique (DEFAULT_SAMPLE_STEP_M), pour rester
+# coherent avec le reste de l'application plutot que d'introduire une autre granularite.
+ZONE_SAMPLE_STEP_M = 20.0
 
-# Ordre de priorite si un element (rarement) porte plusieurs de ces tags a la fois.
-_KIND_TAGS: list[CrossingKind] = ["railway", "waterway", "building", "highway"]
+CrossingKind = Literal["highway", "railway", "waterway", "building", "urban", "forest"]
+
+# Repere court (routes/voies/batiments) : croisement PONCTUEL, detecte par intersection de lignes.
+_POINT_KINDS: tuple[CrossingKind, ...] = ("highway", "railway", "waterway", "building")
+# Zones (urbain/foret, consigne utilisateur) : la trace y ENTRE et en SORT — detecte par
+# confinement (point-in-polygon) le long d'un echantillonnage regulier, pas par intersection de
+# lignes (une zone est une SURFACE, pas un trait).
+_ZONE_LABELS: dict[CrossingKind, str] = {"urban": "urbaine", "forest": "forestière"}
+
+# Ordre de priorite si un element (rarement) porte plusieurs tags a la fois.
+_LANDUSE_URBAN = {"residential", "commercial", "industrial", "retail", "construction"}
 
 
 @dataclass(frozen=True)
@@ -60,11 +88,30 @@ class Crossing:
 def _overpass_query(south: float, west: float, north: float, east: float) -> str:
     bbox = f"{south},{west},{north},{east}"
     return (
-        f"[out:json][timeout:{int(OVERPASS_TIMEOUT_S)}];"
+        f"[out:json][timeout:{_QUERY_TIMEOUT_S}];"
         f'(way["highway"]({bbox});way["railway"]({bbox});'
-        f'way["waterway"]({bbox});way["building"]({bbox}););'
+        f'way["waterway"]({bbox});way["building"]({bbox});'
+        f'way["landuse"~"^(residential|commercial|industrial|retail|construction)$"]({bbox});'
+        f'way["landuse"="forest"]({bbox});way["natural"="wood"]({bbox}););'
         "out geom;"
     )
+
+
+def _kind_for_tags(tags: dict) -> Optional[CrossingKind]:
+    if "railway" in tags:
+        return "railway"
+    if "waterway" in tags:
+        return "waterway"
+    if "building" in tags:
+        return "building"
+    landuse = tags.get("landuse")
+    if landuse in _LANDUSE_URBAN:
+        return "urban"
+    if landuse == "forest" or tags.get("natural") == "wood":
+        return "forest"
+    if "highway" in tags:
+        return "highway"
+    return None
 
 
 def _feature_from_element(element: dict) -> Optional[OsmFeature]:
@@ -72,10 +119,10 @@ def _feature_from_element(element: dict) -> Optional[OsmFeature]:
     geometry = element.get("geometry")
     if not geometry:
         return None
-    kind = next((k for k in _KIND_TAGS if k in tags), None)
+    kind = _kind_for_tags(tags)
     if kind is None:
         return None
-    label = tags.get("name") or tags.get(kind)
+    label = tags.get("name") or tags.get(kind) or tags.get("landuse") or tags.get("natural")
     coordinates = [(pt["lon"], pt["lat"]) for pt in geometry if "lon" in pt and "lat" in pt]
     if len(coordinates) < 2:
         return None
@@ -85,23 +132,35 @@ def _feature_from_element(element: dict) -> Optional[OsmFeature]:
 async def fetch_osm_features(
     bbox: tuple[float, float, float, float], client: Optional[httpx.AsyncClient] = None
 ) -> list[OsmFeature]:
-    """bbox = (south, west, north, east), en degres WGS84. Une seule requete Overpass — pas de
-    cascade de fournisseurs (contrairement au DEM) : Overpass est la seule source publique
-    pratique pour ces tags, une indisponibilite est donc remontee telle quelle a l'appelant."""
+    """bbox = (south, west, north, east), en degres WGS84. Cascade de miroirs Overpass publics
+    (OVERPASS_URLS) — un timeout/une erreur serveur sur l'un fait tenter le suivant, plutot que de
+    remonter un echec des le premier miroir indisponible (constate en usage reel : 504 Gateway
+    Timeout sur une trace dense/longue)."""
     south, west, north, east = bbox
     query = _overpass_query(
         south - BBOX_MARGIN_DEG, west - BBOX_MARGIN_DEG, north + BBOX_MARGIN_DEG, east + BBOX_MARGIN_DEG
     )
     owns_client = client is None
     client = client or httpx.AsyncClient(timeout=OVERPASS_TIMEOUT_S)
+    payload = None
+    last_error: Optional[Exception] = None
     try:
-        response = await client.post(OVERPASS_URL, data={"data": query}, headers=_REQUEST_HEADERS)
-        response.raise_for_status()
-        payload = response.json()
+        for url in OVERPASS_URLS:
+            try:
+                response = await client.post(url, data={"data": query}, headers=_REQUEST_HEADERS)
+                response.raise_for_status()
+                payload = response.json()
+                last_error = None
+                break
+            except (httpx.HTTPStatusError, httpx.TransportError) as e:
+                last_error = e
+                continue
+        if payload is None and last_error is not None:
+            raise last_error
     finally:
         if owns_client:
             await client.aclose()
-    features = [_feature_from_element(el) for el in payload.get("elements", [])]
+    features = [_feature_from_element(el) for el in (payload or {}).get("elements", [])]
     return [f for f in features if f is not None]
 
 
@@ -134,18 +193,84 @@ def _pk_at_point(vertices: list, lon: float, lat: float) -> float:
     return best_pk
 
 
+def _zone_polygon(features_of_kind: list[OsmFeature]):
+    """Union (shapely) de toutes les surfaces d'une meme nature (urbain/foret) — plusieurs
+    polygones OSM voisins/qui se recouvrent doivent compter comme UNE seule zone continue, pas
+    generer une entree/sortie a chaque limite de way individuelle. `None` si aucune surface valide
+    (way non fermee/degeneree — silencieusement ignoree, coherent avec l'aspect indicatif de cette
+    detection)."""
+    polygons = []
+    for f in features_of_kind:
+        if len(f.coordinates) < 3:
+            continue
+        try:
+            poly = Polygon(f.coordinates)
+        except Exception:
+            continue
+        if poly.is_valid and not poly.is_empty:
+            polygons.append(poly)
+    if not polygons:
+        return None
+    return unary_union(polygons)
+
+
+def _zone_crossing(kind: CrossingKind, verb: str, vertex: Vertex) -> Crossing:
+    return Crossing(
+        id=str(uuid.uuid4()), kind=kind, label=f"{verb} zone {_ZONE_LABELS[kind]}",
+        pk=vertex.pk, lon=vertex.lon, lat=vertex.lat,
+    )
+
+
+def _compute_zone_crossings(trace_coordinates: list[tuple[float, float]], features: list[OsmFeature]) -> list[Crossing]:
+    """Une zone (urbain/foret, consigne utilisateur) est une SURFACE, pas un trait — on echantillonne
+    la trace regulierement (memes points que le profil altimetrique) et on teste, a chaque point, si
+    elle est CONTENUE dans l'union des polygones de cette nature : chaque passage dehors -> dedans
+    genere une "Entrée", chaque dedans -> dehors une "Sortie" (plusieurs zones separees le long de la
+    meme trace donnent donc plusieurs paires). Sensible au pas d'echantillonnage (ZONE_SAMPLE_STEP_M)
+    pour la position exacte de l'entree/sortie — indicatif, coherent avec le reste de la detection."""
+    crossings: list[Crossing] = []
+    samples = sample_at_step(trace_coordinates, ZONE_SAMPLE_STEP_M)
+    for kind in _ZONE_LABELS:
+        region = _zone_polygon([f for f in features if f.kind == kind])
+        if region is None:
+            continue
+        prepared = prep(region)
+        was_inside = False
+        entry_vertex: Optional[Vertex] = None
+        last_inside_vertex: Optional[Vertex] = None
+        for v in samples:
+            inside = prepared.contains(Point(v.lon, v.lat))
+            if inside:
+                if not was_inside:
+                    entry_vertex = v
+                last_inside_vertex = v
+            elif was_inside and entry_vertex is not None and last_inside_vertex is not None:
+                crossings.append(_zone_crossing(kind, "Entrée", entry_vertex))
+                crossings.append(_zone_crossing(kind, "Sortie", last_inside_vertex))
+                entry_vertex = None
+            was_inside = inside
+        if was_inside and entry_vertex is not None:
+            # Encore dans la zone au tout dernier echantillon : la trace s'arrete la, on ne sait
+            # pas si la zone continue au-dela — seule l'entree est rapportee, jamais de "Sortie"
+            # fabriquee au dernier point (qui ne correspond a aucune vraie sortie observee).
+            crossings.append(_zone_crossing(kind, "Entrée", entry_vertex))
+    return crossings
+
+
 def compute_crossings(trace_coordinates: list[tuple[float, float]], features: list[OsmFeature]) -> list[Crossing]:
-    """Intersection geometrique (shapely) entre la trace et chaque element OSM — une ligne pour
-    les voies/cours d'eau, et TOUJOURS une ligne (pas un polygone) pour un bâtiment : le contour
-    suffit a detecter une entree/sortie de son emprise, et evite les soucis de validite de polygone
-    (way non refermee, auto-intersection) hors perimetre de cette detection indicative."""
+    """Intersection geometrique (shapely) entre la trace et chaque element OSM PONCTUEL (route/voie
+    ferree/cours d'eau/bâtiment — une ligne dans les trois premiers cas, et TOUJOURS une ligne,
+    jamais un polygone, pour un bâtiment : le contour suffit a detecter une entree/sortie de son
+    emprise sans les soucis de validite de polygone hors perimetre de cette detection indicative) —
+    et confinement (point-in-polygon) pour les ZONES (urbain/foret, consigne utilisateur), qui sont
+    des surfaces traversees plutot que des traits croises, cf. `_compute_zone_crossings`."""
     if len(trace_coordinates) < 2:
         return []
     trace_line = LineString(trace_coordinates)
     vertices = cumulative_pk(trace_coordinates)
     crossings: list[Crossing] = []
     for feature in features:
-        if len(feature.coordinates) < 2:
+        if feature.kind not in _POINT_KINDS or len(feature.coordinates) < 2:
             continue
         feature_line = LineString(feature.coordinates)
         intersection = trace_line.intersection(feature_line)
@@ -172,5 +297,6 @@ def compute_crossings(trace_coordinates: list[tuple[float, float]], features: li
                     lat=point.y,
                 )
             )
+    crossings.extend(_compute_zone_crossings(trace_coordinates, features))
     crossings.sort(key=lambda c: c.pk)
     return crossings

@@ -263,29 +263,98 @@ def _node_label(node_id: str, node_pk: Optional[dict[str, float]]) -> str:
     return f"nœud {node_id}"
 
 
+# Prefixe repere des alertes "zone d'exclusion" (Preferences, consigne utilisateur : pourcentage
+# de la longueur du tronçon depuis son ouvrage de depart ou la contrainte de pression min n'est
+# pas opposable) — jamais bloquantes, cf. routers/network.py:run_calculation qui les distingue des
+# alertes normales par ce prefixe pour ne jamais reinitialiser un tronçon a cause d'elles seules.
+EXCLUSION_ZONE_ALERT_MARKER = "Zone d'exclusion (pression min)"
+
+# Tolerance (m) sur les comparaisons de PK contre la borne de la zone d'exclusion — bien plus
+# large que la precision flottante habituelle (1e-9) car le PK du dernier point de terrain
+# echantillonne et celui du noeud de fin peuvent differer de quelques millimetres selon leur mode
+# de calcul respectif (import KML vs interpolation) ; sans cette marge, un pourcentage couvrant
+# tout le tronçon (100%) pourrait laisser echapper le tout dernier point par un pur artefact
+# d'arrondi, contredisant l'intention de l'utilisateur.
+_EXCLUSION_ZONE_PK_EPSILON_M = 1e-3
+
+
+def _exclusion_zone_end_pk(
+    node_pk: Optional[dict[str, float]], start_node: str, end_node: str, exclusion_pct: Optional[float]
+) -> Optional[float]:
+    """PK au-dela duquel la contrainte de pression min redevient opposable (Preferences, consigne
+    utilisateur, defaut 1%) — calcule comme un pourcentage de la longueur du tronçon depuis son
+    ouvrage de depart. `None` (zone desactivee) si le pourcentage ou les PK sont indisponibles."""
+    if not exclusion_pct or exclusion_pct <= 0 or not node_pk:
+        return None
+    start_pk = node_pk.get(start_node)
+    end_pk = node_pk.get(end_node)
+    if start_pk is None or end_pk is None:
+        return None
+    return start_pk + (exclusion_pct / 100.0) * (end_pk - start_pk)
+
+
 def _required_pressure_by_node(
     node_ids_ordered: list[str],
     min_pressure: Optional[float],
     downstream_residual_pressure: Optional[float],
-) -> dict[str, float]:
+    node_pk: Optional[dict[str, float]] = None,
+    exclusion_end_pk: Optional[float] = None,
+) -> tuple[dict[str, float], list[str]]:
     """`min_pressure` (si fourni) s'applique a tous les noeuds du troncon SAUF le tout premier —
     ce noeud est l'ouvrage source (reservoir ou station de pompage) lui-meme, pas un point de la
     conduite : sa "pression" ne depend que du niveau de l'ouvrage et de l'altitude du terrain a cet
     endroit, jamais du dimensionnement du troncon (revoir le decoupage du trace n'y changerait
     rien) — l'y appliquer produirait de fausses alertes. Le dernier noeud (le plus aval) doit EN
     PLUS respecter `downstream_residual_pressure` — on retient le plus exigeant des deux la ou ils
-    se superposent."""
+    se superposent (la residuelle aval s'applique TOUJOURS a ce noeud, meme dans la zone
+    d'exclusion — seule `min_pressure` en est desactivable, consigne utilisateur). Renvoie aussi
+    la liste des noeuds EXCLUS (dans la zone, Preferences) qui auraient ete soumis a `min_pressure`
+    sans elle — a l'appelant de les verifier separement une fois les pressions connues, pour une
+    alerte informative non bloquante (cf. _check_excluded_nodes_pressure)."""
     required: dict[str, float] = {}
+    excluded: list[str] = []
     if min_pressure is not None:
         for nid in node_ids_ordered[1:]:
+            pk = node_pk.get(nid) if node_pk else None
+            if exclusion_end_pk is not None and pk is not None and pk <= exclusion_end_pk + _EXCLUSION_ZONE_PK_EPSILON_M:
+                excluded.append(nid)
+                continue
             required[nid] = min_pressure
     end_node = node_ids_ordered[-1]
-    end_required = min_pressure
+    end_required = None if end_node in excluded else min_pressure
     if downstream_residual_pressure is not None:
         end_required = max(end_required, downstream_residual_pressure) if end_required is not None else downstream_residual_pressure
     if end_required is not None:
         required[end_node] = end_required
-    return required
+    return required, excluded
+
+
+def _check_excluded_nodes_pressure(
+    node_ids_ordered: list[str],
+    node_pk: Optional[dict[str, float]],
+    nodes: dict[str, "NodeCalcResult"],
+    min_pressure: Optional[float],
+    excluded_node_ids: list[str],
+) -> list[str]:
+    """Verifie a titre INFORMATIF (jamais bloquant) la pression min aux noeuds de la zone
+    d'exclusion (Preferences, consigne utilisateur) — le calcul s'applique quoi qu'il arrive, une
+    alerte au prefixe reconnu (EXCLUSION_ZONE_ALERT_MARKER) signale simplement le depassement."""
+    if min_pressure is None or not excluded_node_ids:
+        return []
+    violations = [
+        (nid, nodes[nid].pressure_dynamic or 0.0)
+        for nid in excluded_node_ids
+        if (nodes[nid].pressure_dynamic or 0.0) < min_pressure - 1e-6
+    ]
+    if not violations:
+        return []
+    labels = ", ".join(_node_label(nid, node_pk) for nid, _ in violations)
+    worst = min(v[1] for v in violations)
+    return [
+        f"{EXCLUSION_ZONE_ALERT_MARKER} : pression sous le minimum requis ({min_pressure:.1f} m, pire "
+        f"cas {worst:.1f} m) à {labels} — dans la zone d'exclusion (Préférences), alerte informative, "
+        f"calcul non bloqué."
+    ]
 
 
 def _check_terrain_pressure(
@@ -294,14 +363,18 @@ def _check_terrain_pressure(
     node_cotes: dict[str, float],
     min_pressure: Optional[float],
     terrain_samples: Optional[list[tuple[float, float]]],
+    exclusion_end_pk: Optional[float] = None,
 ) -> list[str]:
     """Verifie la pression sur CHAQUE point echantillonne du profil de terrain (pas seulement aux
     noeuds reels, cf. docstring du module) une fois la ligne piezometrique finale connue. Une seule
     alerte agregee (jamais une par point — un terrain accidente en produirait des centaines) : PK de
-    debut/fin de la zone en defaut et pire cas rencontre."""
+    debut/fin de la zone en defaut et pire cas rencontre. Les points dans la zone d'exclusion
+    (Preferences, consigne utilisateur) sont rapportes a part, dans une alerte informative jamais
+    bloquante (cf. EXCLUSION_ZONE_ALERT_MARKER)."""
     if min_pressure is None or not terrain_samples or not node_pk:
         return []
     violations: list[tuple[float, float, float]] = []
+    excluded_violations: list[tuple[float, float, float]] = []
     for i in range(len(node_ids_ordered) - 1):
         a, b = node_ids_ordered[i], node_ids_ordered[i + 1]
         pk_a, pk_b = node_pk.get(a), node_pk.get(b)
@@ -316,18 +389,30 @@ def _check_terrain_pressure(
             cote = cote_a + t * (cote_b - cote_a)
             pressure = cote - z
             if pressure < min_pressure - 1e-6:
-                violations.append((pk, z, pressure))
-    if not violations:
-        return []
-    worst = min(violations, key=lambda v: v[2])
-    pk_min = min(v[0] for v in violations)
-    pk_max = max(v[0] for v in violations)
-    return [
-        f"Pression minimale non respectée sur le terrain entre PK {pk_min:.0f} m et PK {pk_max:.0f} m "
-        f"({len(violations)} point(s) échantillonné(s), pire cas {worst[2]:.1f} m obtenus au PK "
-        f"{worst[0]:.0f} m pour {min_pressure:.1f} m requis) — revoir le découpage du tracé "
-        f"(brise-charge, tronçon plus court...)."
-    ]
+                target = excluded_violations if exclusion_end_pk is not None and pk <= exclusion_end_pk + _EXCLUSION_ZONE_PK_EPSILON_M else violations
+                target.append((pk, z, pressure))
+    alerts: list[str] = []
+    if violations:
+        worst = min(violations, key=lambda v: v[2])
+        pk_min = min(v[0] for v in violations)
+        pk_max = max(v[0] for v in violations)
+        alerts.append(
+            f"Pression minimale non respectée sur le terrain entre PK {pk_min:.0f} m et PK {pk_max:.0f} m "
+            f"({len(violations)} point(s) échantillonné(s), pire cas {worst[2]:.1f} m obtenus au PK "
+            f"{worst[0]:.0f} m pour {min_pressure:.1f} m requis) — revoir le découpage du tracé "
+            f"(brise-charge, tronçon plus court...)."
+        )
+    if excluded_violations:
+        worst = min(excluded_violations, key=lambda v: v[2])
+        pk_min = min(v[0] for v in excluded_violations)
+        pk_max = max(v[0] for v in excluded_violations)
+        alerts.append(
+            f"{EXCLUSION_ZONE_ALERT_MARKER} : terrain sous la pression minimale entre PK {pk_min:.0f} m et "
+            f"PK {pk_max:.0f} m ({len(excluded_violations)} point(s), pire cas {worst[2]:.1f} m pour "
+            f"{min_pressure:.1f} m requis) — dans la zone d'exclusion (Préférences), alerte informative, "
+            f"calcul non bloqué."
+        )
+    return alerts
 
 
 def _check_hydrostatic_feasibility(
@@ -522,6 +607,7 @@ def solve_gravitaire_troncon(
     allowed_materials_fn: Optional[AllowedMaterialsFn] = None,
     node_pk: Optional[dict[str, float]] = None,
     terrain_samples: Optional[list[tuple[float, float]]] = None,
+    min_pressure_exclusion_pct: Optional[float] = None,
 ) -> TronconCalcResult:
     """Gravitaire, sens AVAL -> AMONT (cf. docstring du module) : le niveau du reservoir est une
     donnee fixe, pas un choix de conception — on reconstruit depuis l'exigence de pression aval la
@@ -552,7 +638,12 @@ def solve_gravitaire_troncon(
         return TronconCalcResult(segments=[], nodes=reset_nodes, alerts=hydrostatic_alerts)
 
     viscosity = kinematic_viscosity_m2s(fluid_temperature_c)
-    required_by_node = _required_pressure_by_node(node_ids_ordered, min_pressure, downstream_residual_pressure)
+    exclusion_end_pk = _exclusion_zone_end_pk(
+        node_pk, node_ids_ordered[0], node_ids_ordered[-1], min_pressure_exclusion_pct
+    )
+    required_by_node, excluded_node_ids = _required_pressure_by_node(
+        node_ids_ordered, min_pressure, downstream_residual_pressure, node_pk, exclusion_end_pk
+    )
 
     min_dn_by_segment: dict[str, int] = {}
     nodes: dict[str, NodeCalcResult] = {}
@@ -608,9 +699,10 @@ def solve_gravitaire_troncon(
         _check_terrain_pressure(
             node_ids_ordered, node_pk,
             {nid: nodes[nid].piezo_head for nid in node_ids_ordered},
-            min_pressure, terrain_samples,
+            min_pressure, terrain_samples, exclusion_end_pk,
         )
     )
+    alerts.extend(_check_excluded_nodes_pressure(node_ids_ordered, node_pk, nodes, min_pressure, excluded_node_ids))
 
     return TronconCalcResult(segments=results, nodes=[nodes[nid] for nid in node_ids_ordered], alerts=alerts)
 
@@ -627,6 +719,7 @@ def solve_refoulement_troncon(
     allowed_materials_fn: Optional[AllowedMaterialsFn] = None,
     node_pk: Optional[dict[str, float]] = None,
     terrain_samples: Optional[list[tuple[float, float]]] = None,
+    min_pressure_exclusion_pct: Optional[float] = None,
 ) -> TronconCalcResult:
     """Refoulement, sens AMONT -> AVAL (cf. docstring du module) : les DN sont choisis sur la seule
     contrainte de vitesse (+ decroissance vers l'aval), puis la plus petite cote de depart (H0, au
@@ -699,18 +792,28 @@ def solve_refoulement_troncon(
         running_loss += loss
         cumulative_by_node[node_ids_ordered[i + 1]] = running_loss
 
-    required_by_node = _required_pressure_by_node(node_ids_ordered, min_pressure, downstream_residual_pressure)
+    exclusion_end_pk = _exclusion_zone_end_pk(
+        node_pk, node_ids_ordered[0], node_ids_ordered[-1], min_pressure_exclusion_pct
+    )
+    required_by_node, excluded_node_ids = _required_pressure_by_node(
+        node_ids_ordered, min_pressure, downstream_residual_pressure, node_pk, exclusion_end_pk
+    )
 
     # H0 = plus petite cote de depart telle que, pour CHAQUE noeud exigeant une pression minimale,
     # H0 - perte_cumulee(noeud) - z(noeud) >= exigence(noeud) — forme close de "augmenter H0
-    # jusqu'a ce que ca marche partout" (consigne utilisateur).
+    # jusqu'a ce que ca marche partout" (consigne utilisateur). Les noeuds de la zone d'exclusion
+    # (Preferences, consigne utilisateur) n'influencent jamais H0 — deja retires de
+    # `required_by_node` (cf. _required_pressure_by_node), verifies a part plus bas.
     h0 = 0.0
     for nid, required in required_by_node.items():
         h0 = max(h0, required + cumulative_by_node[nid] + node_ground_z[nid])
 
     # Meme principe pour CHAQUE point echantillonne du profil de terrain (pas seulement les noeuds
     # reels, cf. docstring du module) : la perte cumulee y est interpolee lineairement au sein du
-    # segment qui le contient (J constant sur un segment a DN fixe, donc exact).
+    # segment qui le contient (J constant sur un segment a DN fixe, donc exact). Les points de la
+    # zone d'exclusion n'influencent pas non plus H0 — collectes a part pour la verification
+    # informative une fois H0 connu (cf. plus bas).
+    excluded_terrain_points: list[tuple[float, float]] = []
     if min_pressure is not None and terrain_samples and node_pk:
         for i, (seg, cand, velocity, j) in enumerate(prelim):
             pk_start = node_pk.get(node_ids_ordered[i])
@@ -721,6 +824,9 @@ def solve_refoulement_troncon(
             for pk, z in terrain_samples:
                 if pk < pk_start - 1e-6 or pk > pk_end + 1e-6:
                     continue
+                if exclusion_end_pk is not None and pk <= exclusion_end_pk + _EXCLUSION_ZONE_PK_EPSILON_M:
+                    excluded_terrain_points.append((pk, cum_start + j * (pk - pk_start) * (1 + singular_loss_markup_pct / 100)))
+                    continue
                 cum_at_pk = cum_start + j * (pk - pk_start) * (1 + singular_loss_markup_pct / 100)
                 h0 = max(h0, min_pressure + cum_at_pk + z)
 
@@ -728,6 +834,25 @@ def solve_refoulement_troncon(
     for nid in node_ids_ordered:
         cote = h0 - cumulative_by_node[nid]
         nodes[nid] = NodeCalcResult(node_id=nid, piezo_head=cote, pressure_dynamic=cote - node_ground_z[nid])
+
+    alerts.extend(_check_excluded_nodes_pressure(node_ids_ordered, node_pk, nodes, min_pressure, excluded_node_ids))
+    if min_pressure is not None and excluded_terrain_points:
+        terrain_by_pk = dict(terrain_samples or [])
+        excluded_terrain_violations = [
+            (pk, h0 - cum_at_pk - terrain_by_pk[pk])
+            for pk, cum_at_pk in excluded_terrain_points
+            if pk in terrain_by_pk and (h0 - cum_at_pk - terrain_by_pk[pk]) < min_pressure - 1e-6
+        ]
+        if excluded_terrain_violations:
+            worst_pressure = min(p for _, p in excluded_terrain_violations)
+            pk_min = min(pk for pk, _ in excluded_terrain_violations)
+            pk_max = max(pk for pk, _ in excluded_terrain_violations)
+            alerts.append(
+                f"{EXCLUSION_ZONE_ALERT_MARKER} : terrain sous la pression minimale entre PK {pk_min:.0f} m "
+                f"et PK {pk_max:.0f} m ({len(excluded_terrain_violations)} point(s), pire cas "
+                f"{worst_pressure:.1f} m pour {min_pressure:.1f} m requis) — dans la zone d'exclusion "
+                f"(Préférences), alerte informative, calcul non bloqué."
+            )
 
     results: list[SegmentCalcResult] = []
     running = 0.0

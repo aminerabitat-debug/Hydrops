@@ -12,6 +12,7 @@ def test_get_preferences_returns_defaults(client, session_id, project_state):
     assert body["default_downstream_residual_pressure"] == 10.0
     assert body["default_max_velocity"] == 2.0
     assert body["default_min_velocity"] == 0.2
+    assert body["min_pressure_exclusion_pct"] == 1.0
 
 
 def test_put_preferences_overrides_roughness_and_persists(client, session_id, project_state):

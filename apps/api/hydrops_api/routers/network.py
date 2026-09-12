@@ -18,6 +18,7 @@ from hydropack.models import MaterialCriterionRule, Node, Segment
 from hydropack.serializer import ProjectPackage
 
 from hydrops_engine.hydraulics import (
+    EXCLUSION_ZONE_ALERT_MARKER,
     CatalogPipe as HCatalogPipe,
     SegmentSpec as HSegmentSpec,
     solve_gravitaire_troncon,
@@ -787,6 +788,7 @@ def run_calculation(session_id: str, variant_id: str, request: Request):
                     allowed_materials_fn=allowed_fn,
                     node_pk=node_pk,
                     terrain_samples=terrain_samples,
+                    min_pressure_exclusion_pct=prefs.min_pressure_exclusion_pct,
                 )
             else:
                 result = solve_refoulement_troncon(
@@ -801,11 +803,16 @@ def run_calculation(session_id: str, variant_id: str, request: Request):
                     allowed_materials_fn=allowed_fn,
                     node_pk=node_pk,
                     terrain_samples=terrain_samples,
+                    min_pressure_exclusion_pct=prefs.min_pressure_exclusion_pct,
                 )
 
             all_alerts.extend(result.alerts)
 
-            if result.alerts:
+            # Alerte "zone d'exclusion" (Preferences, consigne utilisateur) : toujours informative,
+            # jamais bloquante, quel que soit le tronçon (force ou non) — seules les AUTRES alertes
+            # ("dures") ci-dessous declenchent encore la reinitialisation.
+            hard_alerts = [a for a in result.alerts if EXCLUSION_ZONE_ALERT_MARKER not in a]
+            if hard_alerts:
                 # Alerte hydrostatique gravitaire (terrain incompatible avec la cote du reservoir
                 # amont, cf. hydraulics.py:_check_hydrostatic_feasibility) : proposer de deplacer
                 # le reservoir au pk compatible le plus proche plutot que de se contenter d'alerter

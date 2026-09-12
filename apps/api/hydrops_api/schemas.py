@@ -159,3 +159,4 @@ class CalculationPreferencesRequest(BaseModel):
     default_downstream_residual_pressure: Optional[float] = 10.0
     default_max_velocity: Optional[float] = 2.0
     default_min_velocity: Optional[float] = 0.2
+    min_pressure_exclusion_pct: Optional[float] = 1.0

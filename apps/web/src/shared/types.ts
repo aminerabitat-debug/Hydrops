@@ -296,6 +296,7 @@ export interface CalculationPreferences {
   default_downstream_residual_pressure?: number | null
   default_max_velocity?: number | null
   default_min_velocity?: number | null
+  min_pressure_exclusion_pct?: number | null
 }
 
 export interface RepositionSuggestion {

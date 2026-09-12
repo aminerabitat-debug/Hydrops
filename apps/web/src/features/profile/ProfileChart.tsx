@@ -153,22 +153,30 @@ export function ProfileChart({
   // Ligne(s) piezometrique(s) (consigne utilisateur) : un point par noeud calcule (cote piezo
   // deja resolue par le moteur hydraulique, cf. Node.piezo_head), coupee en plusieurs segments —
   // un par troncon effectivement calcule — des qu'un noeud intermediaire n'a pas encore de valeur
-  // (troncon suivant pas/plus calcule, cf. reinitialisation sur modification des donnees).
+  // (troncon suivant pas/plus calcule, cf. reinitialisation sur modification des donnees). Les
+  // noeuds REELS sont rares le long d'un tronçon (souvent seulement les deux extremites) : un zoom
+  // manuel etroit peut n'en laisser aucun dans [pkMin, pkMax], ce qui viderait la ligne entiere si
+  // on filtrait avant de construire les segments (bug corrige ici, consigne utilisateur). On
+  // construit donc chaque segment sur sa plage COMPLETE d'abord, puis on le coupe a la fenetre
+  // affichee (meme principe que clipToPkRange pour le terrain) — la ligne piezometrique varie
+  // lineairement entre deux noeuds reels (DN constant par segment), l'interpolation aux bornes est
+  // donc physiquement exacte, pas une approximation visuelle.
   const piezoSegments = useMemo(() => {
     const sorted = [...traceNodes].sort((a, b) => a.pk - b.pk)
-    const result: { pk: number; z: number }[][] = []
+    const full: { pk: number; z: number }[][] = []
     let current: { pk: number; z: number }[] = []
     for (const node of sorted) {
-      if (node.pk < pkMin - 1e-6 || node.pk > pkMax + 1e-6) continue
       if (node.piezo_head != null) {
         current.push({ pk: node.pk, z: node.piezo_head })
       } else {
-        if (current.length > 1) result.push(current)
+        if (current.length > 1) full.push(current)
         current = []
       }
     }
-    if (current.length > 1) result.push(current)
-    return result
+    if (current.length > 1) full.push(current)
+    return full
+      .filter((seg) => seg[seg.length - 1].pk > pkMin - 1e-6 && seg[0].pk < pkMax + 1e-6)
+      .map((seg) => clipToPkRange(seg, Math.max(pkMin, seg[0].pk), Math.min(pkMax, seg[seg.length - 1].pk)))
   }, [traceNodes, pkMin, pkMax])
 
   // Caracteristiques de conduite par tronçon de la trace courante (consigne utilisateur : les

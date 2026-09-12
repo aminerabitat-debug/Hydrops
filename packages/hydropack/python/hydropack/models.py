@@ -301,3 +301,10 @@ class CalculationPreferences(BaseModel):
     default_downstream_residual_pressure: Optional[float] = 10.0
     default_max_velocity: Optional[float] = 2.0
     default_min_velocity: Optional[float] = 0.2
+    # Consigne utilisateur : pourcentage de la longueur du tronçon, calcule depuis son ouvrage de
+    # depart, dans lequel la pression min (`min_pressure`, jamais la residuelle aval) n'est pas
+    # opposable — le terrain y est proche de l'altitude de l'ouvrage source, une contrainte de
+    # pression y est structurellement peu pertinente (cf. hydrops_engine.hydraulics
+    # EXCLUSION_ZONE_ALERT_MARKER). Une alerte informative signale quand meme un depassement,
+    # sans jamais bloquer le calcul.
+    min_pressure_exclusion_pct: Optional[float] = 1.0

@@ -16,6 +16,7 @@
     "default_downstream_residual_pressure": { "type": ["number", "null"], "description": "Valeur par defaut proposee pour \"Pression résiduelle aval\"" },
     "default_max_velocity": { "type": ["number", "null"], "description": "Valeur par defaut proposee pour \"Vitesse Max\"" },
     "default_min_velocity": { "type": ["number", "null"], "description": "Valeur par defaut proposee pour \"Vitesse Min\"" },
+    "min_pressure_exclusion_pct": { "type": ["number", "null"], "description": "Pourcentage de la longueur du tronçon (depuis son ouvrage de depart) ou la pression min n'est pas opposable (alerte informative uniquement)" },
     "material_criteria": {
       "type": "array",
       "description": "Critères de choix des matériaux des conduites (plage DN x fluide -> matériaux autorisés)",

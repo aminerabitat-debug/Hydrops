@@ -5,6 +5,7 @@ import math
 import pytest
 
 from hydrops_engine.hydraulics import (
+    EXCLUSION_ZONE_ALERT_MARKER,
     CatalogPipe,
     SegmentSpec,
     colebrook_white,
@@ -636,3 +637,98 @@ def test_solve_refoulement_troncon_forced_dn_alerts_on_pms_exceeded():
     assert seg_s1.dn == 110
     assert seg_s1.pressure_class == "PN6"  # la moins chere retenue par defaut (PMS inconnu au 1er passage)
     assert any("dépasse le pms" in a.lower() for a in result.alerts)
+
+
+def test_solve_gravitaire_troncon_min_pressure_exclusion_zone_is_informative_not_blocking():
+    # M est a la meme altitude que le reservoir (100 m) et tout pres de lui (pk 300 sur 6300 m,
+    # soit ~4.8% du tronçon) — sa pression "naturelle" y est structurellement faible (quasi aucune
+    # perte de charge consommee, mais deja a l'altitude du reservoir), independamment du DN choisi
+    # (meme phenomene que pres d'un reservoir en pratique). Sans zone d'exclusion, ce deficit
+    # bloquerait le calcul (alerte "pression insuffisante", cf. tests ci-dessus). Avec une zone
+    # d'exclusion de 10% (Preferences, consigne utilisateur), M en est exempte : seule une alerte
+    # informative au prefixe reconnu doit apparaitre, jamais la version bloquante.
+    catalog = _catalog()
+    nodes_z = {"A": 100.0, "M": 100.0, "B": 0.0}
+    segments = [
+        SegmentSpec(id="s1", length_m=300.0, flow_m3s=0.008, max_velocity_ms=2.0),
+        SegmentSpec(id="s2", length_m=6000.0, flow_m3s=0.008, max_velocity_ms=2.0),
+    ]
+    kwargs = dict(
+        node_ids_ordered=["A", "M", "B"],
+        node_ground_z=nodes_z,
+        segments_ordered=segments,
+        upstream_level_max=101.0,
+        upstream_level_min=100.0,
+        min_pressure=20.0,
+        downstream_residual_pressure=0.0,
+        catalog=catalog,
+        singular_loss_markup_pct=10.0,
+        fluid_temperature_c=20.0,
+        node_pk={"A": 0.0, "M": 300.0, "B": 6300.0},
+    )
+
+    without_exclusion = solve_gravitaire_troncon(**kwargs)
+    assert any("pression insuffisante" in a.lower() for a in without_exclusion.alerts)
+    assert not any(EXCLUSION_ZONE_ALERT_MARKER in a for a in without_exclusion.alerts)
+
+    with_exclusion = solve_gravitaire_troncon(**kwargs, min_pressure_exclusion_pct=10.0)
+    assert not any("pression insuffisante au" in a.lower() for a in with_exclusion.alerts)
+    assert any(EXCLUSION_ZONE_ALERT_MARKER in a for a in with_exclusion.alerts)
+    node_m = next(n for n in with_exclusion.nodes if n.node_id == "M")
+    assert node_m.pressure_dynamic is not None and node_m.pressure_dynamic < 20.0  # calcule quand meme
+
+
+def test_solve_gravitaire_troncon_downstream_residual_still_applies_within_exclusion_zone():
+    # La residuelle aval (au dernier noeud) doit toujours s'appliquer, meme si ce noeud tombe dans
+    # la zone d'exclusion — seule `min_pressure` en est desactivable (consigne utilisateur). La
+    # translation peut ajouter un surplus (offset >= 0) : on verifie donc "au moins" la residuelle,
+    # jamais une egalite stricte (une marge positive ne doit jamais compter comme une violation).
+    catalog = _catalog()
+    nodes_z = {"A": 100.0, "B": 95.0}
+    segments = [SegmentSpec(id="s1", length_m=50.0, flow_m3s=0.001, max_velocity_ms=2.0)]
+    result = solve_gravitaire_troncon(
+        node_ids_ordered=["A", "B"],
+        node_ground_z=nodes_z,
+        segments_ordered=segments,
+        upstream_level_max=110.0,
+        upstream_level_min=108.0,
+        min_pressure=None,
+        downstream_residual_pressure=5.0,
+        catalog=catalog,
+        singular_loss_markup_pct=10.0,
+        fluid_temperature_c=20.0,
+        node_pk={"A": 0.0, "B": 50.0},
+        min_pressure_exclusion_pct=100.0,  # exclut tout le tronçon
+    )
+    assert result.alerts == []
+    node_b = next(n for n in result.nodes if n.node_id == "B")
+    assert node_b.pressure_dynamic >= 5.0 - 1e-6
+
+
+def test_solve_refoulement_troncon_min_pressure_exclusion_zone_is_informative_not_blocking():
+    # Meme principe qu'en gravitaire, mais H0 ne doit pas non plus etre gonfle pour satisfaire le
+    # noeud exclu — la comparaison avec/sans exclusion doit montrer un H0 (donc une piezo) plus
+    # bas une fois M exempte.
+    catalog = _catalog()
+    nodes_z = {"A": 0.0, "M": 90.0, "B": 0.0}
+    segments = [
+        SegmentSpec(id="s1", length_m=100.0, flow_m3s=0.008, max_velocity_ms=2.0),
+        SegmentSpec(id="s2", length_m=5000.0, flow_m3s=0.008, max_velocity_ms=2.0),
+    ]
+    kwargs = dict(
+        node_ids_ordered=["A", "M", "B"],
+        node_ground_z=nodes_z,
+        segments_ordered=segments,
+        min_pressure=20.0,
+        downstream_residual_pressure=0.0,
+        catalog=catalog,
+        singular_loss_markup_pct=10.0,
+        fluid_temperature_c=20.0,
+        node_pk={"A": 0.0, "M": 100.0, "B": 5100.0},
+    )
+    without_exclusion = solve_refoulement_troncon(**kwargs)
+    with_exclusion = solve_refoulement_troncon(**kwargs, min_pressure_exclusion_pct=5.0)
+    assert any(EXCLUSION_ZONE_ALERT_MARKER in a for a in with_exclusion.alerts)
+    node_a_without = next(n for n in without_exclusion.nodes if n.node_id == "A")
+    node_a_with = next(n for n in with_exclusion.nodes if n.node_id == "A")
+    assert node_a_with.piezo_head < node_a_without.piezo_head - 1e-6

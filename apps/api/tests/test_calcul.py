@@ -256,6 +256,58 @@ def test_calcul_forced_material_dn_applies_despite_violated_constraints(
     assert updated_segment["velocity"] is not None  # calcul reellement applique, pas reinitialise
 
 
+def test_calcul_min_pressure_exclusion_zone_is_informative_not_blocking(
+    client, session_id, project_state, sample_kml_bytes, import_trace
+):
+    # Consigne utilisateur : "Zone d'exclusion de la contrainte de pression min" (Preferences) —
+    # un pourcentage de la longueur du tronçon (depuis l'ouvrage de depart) ou min_pressure n'est
+    # plus opposable, une alerte informative le signale mais le calcul s'applique quand meme.
+    variant_id, trace = _import_sample(client, session_id, project_state, sample_kml_bytes, import_trace)
+    nodes = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes").json()
+    upstream_id, downstream_id = nodes[0]["id"], nodes[1]["id"]
+
+    client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes/{upstream_id}",
+        json={"type": "storage_reservoir", "name": "Res1", "data": {"fluid": "Eau potable"}},
+    )
+    client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes/{downstream_id}",
+        json={"type": "pressure_break", "name": "BC1"},
+    )
+
+    trace_detail = client.get(f"/api/v1/projects/{session_id}/traces/{trace['id']}").json()
+    max_z = max(p["z"] for p in trace_detail["elevation_profile"]["raw"])
+    level = max_z + 50.0  # large marge -> pas d'alerte hydrostatique
+
+    segments = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments").json()
+    segment_id = segments[0]["id"]
+    client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/segments/{segment_id}",
+        json={
+            "head_flow": 100.0,
+            "upstream_water_level_max": level + 1.0,
+            "upstream_water_level_min": level,
+            "min_pressure": 1000.0,  # bien plus que la marge disponible partout -> viole toujours
+            "max_velocity": 2.0,
+        },
+    )
+
+    prefs = client.get(f"/api/v1/projects/{session_id}/preferences").json()
+    prefs["min_pressure_exclusion_pct"] = 100.0  # tout le tronçon exclu de min_pressure
+    client.put(f"/api/v1/projects/{session_id}/preferences", json=prefs)
+
+    response = client.post(f"/api/v1/projects/{session_id}/variants/{variant_id}/calcul")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["segments_updated"] == 1
+    assert body["nodes_updated"] == 2
+    assert not any("pression insuffisante" in a.lower() for a in body["alerts"])
+    assert any("zone d'exclusion" in a.lower() for a in body["alerts"])
+
+    updated_segment = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments").json()[0]
+    assert updated_segment["velocity"] is not None  # calcul reellement applique, pas reinitialise
+
+
 def test_calcul_gravitaire_hydrostatic_alert_suggests_reposition_for_non_structural_reservoir(
     client, session_id, project_state, sample_kml_bytes, import_trace
 ):
@@ -329,3 +381,4 @@ def test_calcul_gravitaire_hydrostatic_alert_suggests_reposition_for_non_structu
     assert move_response.status_code == 200, move_response.text
     recalc = client.post(f"/api/v1/projects/{session_id}/variants/{variant_id}/calcul").json()
     assert not any("hydrostatique" in a.lower() for a in recalc["alerts"])
+

@@ -198,6 +198,21 @@ export function PreferencesWindow({ sessionId, onClose, onSaved }: PreferencesWi
             onChange={(e) => setPrefs((p) => (p ? { ...p, singular_loss_markup_pct: Number(e.target.value) || 0 } : p))}
           />
         </div>
+        <div className="modal-field">
+          <label htmlFor="pref-exclusion-zone">Zone d'exclusion de la contrainte de pression min (%)</label>
+          <input
+            id="pref-exclusion-zone"
+            type="number"
+            value={prefs.min_pressure_exclusion_pct ?? ''}
+            onChange={(e) =>
+              setPrefs((p) => (p ? { ...p, min_pressure_exclusion_pct: e.target.value === '' ? null : Number(e.target.value) } : p))
+            }
+          />
+          <span className="modal-field-hint">
+            Pourcentage de la longueur du tronçon, depuis son ouvrage de départ, où la pression min n'est pas exigée
+            (alerte informative seulement, le calcul n'est jamais bloqué).
+          </span>
+        </div>
       </div>
 
       <div className="preferences-section">

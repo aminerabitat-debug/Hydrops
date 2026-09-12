@@ -78,16 +78,33 @@ function formatOrDash(value: number | null | undefined, digits = 2): string {
   return value == null ? '—' : value.toFixed(digits)
 }
 
-// Cote (piezometrique ou hydrostatique) au piquet `pk`, interpolee lineairement entre les deux
-// noeuds reels qui bornent son segment — la perte de charge est constante le long d'un segment (DN/
-// materiau fixes), donc la cote y varie bien lineairement avec la distance (consigne utilisateur :
-// ces colonnes doivent etre calculees pour CHAQUE piquet, pas seulement aux noeuds).
+// Cote (piezometrique ou hydrostatique) au piquet `pk`. Le DN n'est plus forcement constant le
+// long d'un segment (tableau par piquet, glossaire Piquet/Segment/Troncon — telescopage), donc une
+// simple interpolation lineaire entre les deux noeuds reels sous/sur-estime la cote piezometrique
+// en cours de route (constate concretement sur un cas reel). Quand `segment.segment_details` est
+// disponible, la cote piezo/pression dynamique est reconstruite piquet par piquet a partir de la
+// cote DEJA CONNUE du noeud reel aval et de la perte de charge cumulee relative de chaque piquet —
+// aucune nouvelle donnee moteur necessaire. Les cotes hydrostatiques (constantes le long du
+// tronçon, non affectees par le DN) gardent l'interpolation lineaire d'origine.
 function interpolateNodeField(
   pk: number,
   segment: Segment,
   nodesById: Map<string, Node>,
   field: 'piezo_head' | 'pressure_dynamic' | 'pressure_static_max' | 'pressure_static_min',
+  rowZ?: number,
 ): number | null {
+  if ((field === 'piezo_head' || field === 'pressure_dynamic') && segment.segment_details && segment.segment_details.length > 1 && rowZ != null) {
+    const downstreamPiezo = nodesById.get(segment.downstream_node_id)?.piezo_head
+    const details = segment.segment_details
+    const lastCumulative = details[details.length - 1].head_loss_cumulative
+    if (downstreamPiezo != null && lastCumulative != null) {
+      const detail = details.find((d) => d.pk >= pk - 1e-6) ?? details[details.length - 1]
+      if (detail.head_loss_cumulative != null) {
+        const piezo = downstreamPiezo + (lastCumulative - detail.head_loss_cumulative)
+        return field === 'piezo_head' ? piezo : piezo - rowZ
+      }
+    }
+  }
   const a = nodesById.get(segment.upstream_node_id)?.[field]
   const b = nodesById.get(segment.downstream_node_id)?.[field]
   if (a == null || b == null) return null
@@ -315,8 +332,8 @@ export function DataTable({ onAddNode, onEditNode, onAssignNode, onDeleteNode, a
         pdcUnitKm,
         pdcLineaire,
         pdcTotale: pdcLineaire != null ? cumulative : null,
-        piezo: interpolateNodeField(row.pk, segment, nodesById, 'piezo_head'),
-        pressureDyn: interpolateNodeField(row.pk, segment, nodesById, 'pressure_dynamic'),
+        piezo: interpolateNodeField(row.pk, segment, nodesById, 'piezo_head', row.z),
+        pressureDyn: interpolateNodeField(row.pk, segment, nodesById, 'pressure_dynamic', row.z),
         pressureStaticMax: interpolateNodeField(row.pk, segment, nodesById, 'pressure_static_max'),
         pressureStaticMin: interpolateNodeField(row.pk, segment, nodesById, 'pressure_static_min'),
       }

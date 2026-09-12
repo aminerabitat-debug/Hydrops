@@ -222,26 +222,47 @@ export function ProfileChart({
   // manuel etroit peut n'en laisser aucun dans [pkMin, pkMax], ce qui viderait la ligne entiere si
   // on filtrait avant de construire les segments (bug corrige ici, consigne utilisateur). On
   // construit donc chaque segment sur sa plage COMPLETE d'abord, puis on le coupe a la fenetre
-  // affichee (meme principe que clipToPkRange pour le terrain) — la ligne piezometrique varie
-  // lineairement entre deux noeuds reels (DN constant par segment), l'interpolation aux bornes est
-  // donc physiquement exacte, pas une approximation visuelle.
+  // affichee (meme principe que clipToPkRange pour le terrain).
+  // Le DN n'est plus forcement constant entre deux noeuds reels (tableau par piquet, glossaire
+  // Piquet/Segment/Troncon — telescopage) : une simple droite entre les deux noeuds reels sous/
+  // sur-estime alors la cote piezometrique en cours de route (constate concretement : ligne
+  // affichee ~155 m la ou la vraie cote, reconstruite piquet par piquet, est ~177 m). On injecte
+  // donc un point par entree de `segment_details`, reconstruit a partir de la cote DEJA CONNUE du
+  // noeud reel aval et de la perte de charge cumulee relative de chaque piquet — aucune nouvelle
+  // donnee moteur necessaire, tout est deja expose par l'API.
   const piezoSegments = useMemo(() => {
     const sorted = [...traceNodes].sort((a, b) => a.pk - b.pk)
     const full: { pk: number; z: number }[][] = []
     let current: { pk: number; z: number }[] = []
-    for (const node of sorted) {
-      if (node.piezo_head != null) {
-        current.push({ pk: node.pk, z: node.piezo_head })
-      } else {
+    for (let i = 0; i < sorted.length; i++) {
+      const node = sorted[i]
+      if (node.piezo_head == null) {
         if (current.length > 1) full.push(current)
         current = []
+        continue
+      }
+      current.push({ pk: node.pk, z: node.piezo_head })
+      const next = sorted[i + 1]
+      if (next && next.piezo_head != null) {
+        const seg = segments.find((s) => s.upstream_node_id === node.id && s.downstream_node_id === next.id)
+        const details = seg?.segment_details
+        if (details && details.length > 1) {
+          const lastCumulative = details[details.length - 1].head_loss_cumulative
+          if (lastCumulative != null) {
+            for (let j = 0; j < details.length - 1; j++) {
+              const d = details[j]
+              if (d.head_loss_cumulative == null) continue
+              current.push({ pk: d.pk, z: next.piezo_head + (lastCumulative - d.head_loss_cumulative) })
+            }
+          }
+        }
       }
     }
     if (current.length > 1) full.push(current)
     return full
       .filter((seg) => seg[seg.length - 1].pk > pkMin - 1e-6 && seg[0].pk < pkMax + 1e-6)
       .map((seg) => clipToPkRange(seg, Math.max(pkMin, seg[0].pk), Math.min(pkMax, seg[seg.length - 1].pk)))
-  }, [traceNodes, pkMin, pkMax])
+  }, [traceNodes, segments, pkMin, pkMax])
 
   // Caracteristiques de conduite par tronçon de la trace courante (consigne utilisateur : les
   // representer dans le profil, avec leurs changements eventuels) — un "span" par segment reel

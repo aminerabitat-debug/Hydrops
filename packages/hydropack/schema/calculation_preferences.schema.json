@@ -17,6 +17,7 @@
     "default_max_velocity": { "type": ["number", "null"], "description": "Valeur par defaut proposee pour \"Vitesse Max\"" },
     "default_min_velocity": { "type": ["number", "null"], "description": "Valeur par defaut proposee pour \"Vitesse Min\"" },
     "min_pressure_exclusion_pct": { "type": ["number", "null"], "description": "Pourcentage de la longueur du tronçon (depuis son ouvrage de depart) ou la pression min n'est pas opposable (alerte informative uniquement)" },
+    "hydraulic_segment_step_m": { "type": "number", "exclusiveMinimum": 0, "description": "Pas d'echantillonnage (m) pour subdiviser un troncon en piquets fins lors du calcul (chaque piquet peut recevoir son propre DN)" },
     "material_criteria": {
       "type": "array",
       "description": "Critères de choix des matériaux des conduites (plage DN x fluide -> matériaux autorisés)",

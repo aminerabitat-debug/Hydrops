@@ -246,6 +246,27 @@ export interface Segment {
   head_loss_unit?: number | null
   head_loss_segment?: number | null
   head_loss_cumulative?: number | null
+  // Dimensionnement PAR PIQUET (glossaire Piquet/Segment/Troncon, docs/architecture/10-..., consigne
+  // utilisateur) — ce `Segment` correspond en realite a un Troncon : son DN n'est pas unique, ce
+  // tableau porte la valeur retenue a CHAQUE piquet (`pk` = PK du piquet aval de ce segment fin,
+  // meme convention que segmentForRow ci-dessous). Le dernier element reflete aussi les champs
+  // scalaires ci-dessus. `null`/absent = pas encore calcule, ou pipe a materiau/DN force (toujours
+  // homogene, une seule entree).
+  segment_details?: SegmentDetail[] | null
+}
+
+export interface SegmentDetail {
+  pk: number
+  material: string
+  pressure_class: string
+  dn: number
+  di: number
+  de?: number | null
+  roughness: number
+  velocity?: number | null
+  head_loss_unit?: number | null
+  head_loss_segment?: number | null
+  head_loss_cumulative?: number | null
 }
 
 // Regroupement de segments consecutifs entre deux limites "dures" (ouvrage reel ou extremite de
@@ -314,6 +335,7 @@ export interface CalculationPreferences {
   default_max_velocity?: number | null
   default_min_velocity?: number | null
   min_pressure_exclusion_pct?: number | null
+  hydraulic_segment_step_m: number
 }
 
 export interface RepositionSuggestion {

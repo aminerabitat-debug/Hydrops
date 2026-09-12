@@ -102,7 +102,15 @@ function interpolateZAtPk(points: { pk: number; z: number }[], pk: number): numb
 // bouton i). Une seule valeur par segment (pas une courbe continue), contrairement aux pressions.
 function segmentVelocityAtPk(segments: Segment[], pk: number): number | null {
   const seg = segments.find((s) => pk >= s.pk_start - 1e-6 && pk <= s.pk_end + 1e-6)
-  return seg?.velocity ?? null
+  if (!seg) return null
+  // Le detail PAR PIQUET (glossaire Piquet/Segment/Troncon) prime quand il est disponible — un
+  // troncon peut telescoper le DN (donc la vitesse) vers l'aval.
+  const details = seg.segment_details
+  if (details && details.length > 0) {
+    const detail = details.find((d) => d.pk >= pk - 1e-6) ?? details[details.length - 1]
+    return detail.velocity ?? null
+  }
+  return seg.velocity ?? null
 }
 
 // Meme interpolation, mais sur un ENSEMBLE de segments disjoints (piezoSegments, ou une des deux
@@ -246,18 +254,40 @@ export function ProfileChart({
   // avant le calcul, les enlever apres modification").
   const pipeSpans = useMemo(() => {
     const traceNodeIds = new Set(traceNodes.map((n) => n.id))
-    return segments
+    const pms = (material: string, dn: number, pressureClass: string) =>
+      pipeCatalog.find((r) => r.material === material && r.dn === dn && r.pressure_class === pressureClass)?.pms
+    const spans: { pkStart: number; pkEnd: number; material: string; dn: number; pressureClass: string; pms?: number }[] = []
+    for (const s of segments
       .filter((s) => traceNodeIds.has(s.upstream_node_id) && s.velocity != null)
       .slice()
-      .sort((a, b) => a.pk_start - b.pk_start)
-      .map((s) => ({
-        pkStart: s.pk_start,
-        pkEnd: s.pk_end,
-        material: s.material,
-        dn: s.dn,
-        pressureClass: s.pressure_class,
-        pms: pipeCatalog.find((r) => r.material === s.material && r.dn === s.dn && r.pressure_class === s.pressure_class)?.pms,
-      }))
+      .sort((a, b) => a.pk_start - b.pk_start)) {
+      const details = s.segment_details
+      if (!details || details.length === 0) {
+        spans.push({
+          pkStart: s.pk_start, pkEnd: s.pk_end, material: s.material, dn: s.dn, pressureClass: s.pressure_class,
+          pms: pms(s.material, s.dn, s.pressure_class),
+        })
+        continue
+      }
+      // Une bande par RUN consecutif de meme (materiau, DN, classe) — le tableau par piquet
+      // (glossaire Piquet/Segment/Troncon) peut telescoper le DN vers l'aval ; une bande par
+      // piquet serait illisible, on n'en veut qu'une par palier reellement distinct.
+      let runStart = s.pk_start
+      for (let i = 0; i < details.length; i++) {
+        const detail = details[i]
+        const next = details[i + 1]
+        const sameAsNext =
+          next && next.material === detail.material && next.dn === detail.dn && next.pressure_class === detail.pressure_class
+        if (!sameAsNext) {
+          spans.push({
+            pkStart: runStart, pkEnd: detail.pk, material: detail.material, dn: detail.dn, pressureClass: detail.pressure_class,
+            pms: pms(detail.material, detail.dn, detail.pressure_class),
+          })
+          runStart = detail.pk
+        }
+      }
+    }
+    return spans
   }, [segments, traceNodes, pipeCatalog])
 
   const pmsEnvelope = useMemo(() => {

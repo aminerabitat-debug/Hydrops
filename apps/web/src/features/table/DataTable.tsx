@@ -22,7 +22,7 @@ import { api } from '../../shared/apiClient'
 import { buildVertices, interpolateLonLatAtPk } from '../../shared/geo'
 import { isPlaceholderNode, nodeDisplayLabel } from '../../shared/nodeLabels'
 import { useAppStore } from '../../state/store'
-import type { CatalogMaterial, Crossing, Node, Segment } from '../../shared/types'
+import type { CatalogMaterial, Crossing, Node, Segment, SegmentDetail } from '../../shared/types'
 
 const SNAP_TOLERANCE_M = 0.5
 
@@ -95,6 +95,26 @@ function interpolateNodeField(
   if (span <= 1e-9) return a
   const t = (pk - segment.pk_start) / span
   return a + t * (b - a)
+}
+
+// Segment FIN (glossaire Piquet/Segment/Troncon) qui couvre le piquet `pk` — le premier dont le pk
+// (piquet aval de ce segment fin) est >= `pk`, meme convention que segmentEndingAt/segmentForRow
+// (attribution au piquet aval), generalisee au tableau par piquet. Repli sur le dernier element si
+// `pk` depasse le dernier piquet enregistre (bord flottant). `null` si pas encore calcule.
+function segmentDetailForRow(segment: Segment | null, pk: number): SegmentDetail | null {
+  const details = segment?.segment_details
+  if (!details || details.length === 0) return null
+  return details.find((d) => d.pk >= pk - 1e-6) ?? details[details.length - 1]
+}
+
+// Longueur du segment fin qui se termine a `detail.pk` — pour repartir sa PROPRE perte de charge
+// (et non celle moyennee sur tout le Segment/troncon) au prorata de la distance partielle d'un
+// piquet DataTable (consigne utilisateur : DN/pertes de charge varient desormais par piquet).
+function segmentDetailLength(segment: Segment, detail: SegmentDetail): number {
+  const details = segment.segment_details ?? []
+  const idx = details.indexOf(detail)
+  const startPk = idx <= 0 ? segment.pk_start : details[idx - 1].pk
+  return detail.pk - startPk
 }
 
 interface HydraulicValues {
@@ -275,15 +295,23 @@ export function DataTable({ onAddNode, onEditNode, onAssignNode, onDeleteNode, a
           piezo: null, pressureDyn: null, pressureStaticMax: null, pressureStaticMin: null,
         }
       }
-      const calculated = segment.velocity != null
-      const pdcUnitKm = segment.head_loss_unit != null ? segment.head_loss_unit * 1000 : null
-      const rate = segment.length > 1e-9 && segment.head_loss_segment != null ? segment.head_loss_segment / segment.length : null
+      // Segment FIN (piquet par piquet, cf. glossaire) qui couvre ce piquet, s'il a ete calcule —
+      // repli sur les champs scalaires du Segment/troncon (calcul non encore lance, ou pipe force,
+      // toujours homogene) sinon.
+      const detail = segmentDetailForRow(segment, row.pk)
+      const effectiveVelocity = detail ? detail.velocity : segment.velocity
+      const effectiveHeadLossUnit = detail ? detail.head_loss_unit : segment.head_loss_unit
+      const effectiveHeadLossSegment = detail ? detail.head_loss_segment : segment.head_loss_segment
+      const effectiveLength = detail ? segmentDetailLength(segment, detail) : segment.length
+      const calculated = effectiveVelocity != null
+      const pdcUnitKm = effectiveHeadLossUnit != null ? effectiveHeadLossUnit * 1000 : null
+      const rate = effectiveLength > 1e-9 && effectiveHeadLossSegment != null ? effectiveHeadLossSegment / effectiveLength : null
       const pdcLineaire = rate != null ? rate * row.partialDistance : null
       if (pdcLineaire != null) cumulative += pdcLineaire
       return {
         calculated,
         flow: calculated ? segment.flow : null,
-        velocity: segment.velocity ?? null,
+        velocity: effectiveVelocity ?? null,
         pdcUnitKm,
         pdcLineaire,
         pdcTotale: pdcLineaire != null ? cumulative : null,
@@ -348,10 +376,20 @@ export function DataTable({ onAddNode, onEditNode, onAssignNode, onDeleteNode, a
             const hydraulics = hydraulicRows[rowIndex]
             // Materiau/DN/Classe/DI/Rugosite ne doivent etre affiches QUE si le calcul a abouti
             // pour ce segment (consigne utilisateur) — sinon le catalogue par defaut (jamais
-            // "vide") donnerait l'impression trompeuse d'un dimensionnement valide.
+            // "vide") donnerait l'impression trompeuse d'un dimensionnement valide. Le detail PAR
+            // PIQUET (glossaire Piquet/Segment/Troncon) prime sur les champs scalaires du Segment
+            // quand il est disponible — un troncon peut telescoper le DN vers l'aval.
             const pipeCalculated = hydraulics?.calculated ?? false
+            const pipeDetail = segment ? segmentDetailForRow(segment, row.pk) : null
+            const pipeMaterial = pipeDetail?.material ?? segment?.material
+            const pipeDn = pipeDetail?.dn ?? segment?.dn
+            const pipePressureClass = pipeDetail?.pressure_class ?? segment?.pressure_class
+            const pipeDi = pipeDetail?.di ?? segment?.di
+            const pipeRoughness = pipeDetail?.roughness ?? segment?.roughness
             const materialLabel =
-              segment && pipeCalculated ? materials.find((m) => m.material === segment.material)?.label ?? segment.material : '—'
+              segment && pipeCalculated && pipeMaterial != null
+                ? materials.find((m) => m.material === pipeMaterial)?.label ?? pipeMaterial
+                : '—'
             // Un placeholder d'extremite pas encore affectee (noeud "junction") se comporte comme un
             // piquet vide : pas de Type affiche, icone "+" plutot que crayon/corbeille, et
             // participe au clic-de-ligne du mode "+ Nœud" — consigne utilisateur.
@@ -388,10 +426,10 @@ export function DataTable({ onAddNode, onEditNode, onAssignNode, onDeleteNode, a
                 {tableScope.kind === 'troncon' && (
                   <>
                     <td>{materialLabel}</td>
-                    <td>{segment && pipeCalculated ? segment.dn : '—'}</td>
-                    <td>{segment && pipeCalculated ? segment.pressure_class.toUpperCase() : '—'}</td>
-                    <td>{segment && pipeCalculated ? segment.di.toFixed(1) : '—'}</td>
-                    <td>{segment && pipeCalculated ? segment.roughness.toFixed(3) : '—'}</td>
+                    <td>{segment && pipeCalculated ? pipeDn : '—'}</td>
+                    <td>{segment && pipeCalculated ? pipePressureClass?.toUpperCase() : '—'}</td>
+                    <td>{segment && pipeCalculated ? pipeDi?.toFixed(1) : '—'}</td>
+                    <td>{segment && pipeCalculated ? pipeRoughness?.toFixed(3) : '—'}</td>
                     <td>{formatOrDash(hydraulics?.flow, 1)}</td>
                     <td>{formatOrDash(hydraulics?.velocity, 2)}</td>
                     <td>{formatOrDash(hydraulics?.pdcUnitKm, 2)}</td>

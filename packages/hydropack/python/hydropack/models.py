@@ -235,6 +235,27 @@ class Node(BaseModel):
         return "storage_reservoir" if value == "reservoir" else value
 
 
+class SegmentDetail(BaseModel):
+    """Un Segment fin au sens du glossaire (docs/architecture/10-glossaire-piquet-segment-troncon.md) :
+    liaison entre 2 piquets consécutifs, DN unique. `pk` = PK du piquet AVAL de ce segment fin
+    (meme convention que le reste de l'app : "on affecte l'info du segment au piquet aval",
+    cf. DataTable.tsx:segmentForRow). Un `Segment` persiste (ci-dessous) porte un tableau de ces
+    details — un par piquet — car il correspond en realite a un **Troncon** au sens du glossaire
+    (delimite par deux ouvrages reels, mais pouvant contenir de nombreux piquets intermediaires)."""
+
+    pk: float
+    material: str
+    pressure_class: str
+    dn: int
+    di: float
+    de: Optional[float] = None
+    roughness: float
+    velocity: Optional[float] = None
+    head_loss_unit: Optional[float] = None
+    head_loss_segment: Optional[float] = None
+    head_loss_cumulative: Optional[float] = None
+
+
 class Segment(BaseModel):
     id: UUID
     upstream_node_id: UUID
@@ -296,6 +317,13 @@ class Segment(BaseModel):
     head_loss_unit: Optional[float] = None  # J, pertes de charge lineaires unitaires (m/m)
     head_loss_segment: Optional[float] = None  # J * longueur * (1 + majoration singulieres) (m)
     head_loss_cumulative: Optional[float] = None  # cumul depuis le debut du troncon calcule (m)
+    # Detail du dimensionnement PAR PIQUET (consigne utilisateur, glossaire cf. SegmentDetail
+    # ci-dessus) — ce `Segment` correspond a un Troncon au sens du glossaire : son DN n'est pas
+    # unique, ce tableau porte la valeur retenue a chaque piquet (le dernier, le plus aval, est
+    # aussi reflete dans les champs scalaires ci-dessus pour compatibilite). `None` tant qu'aucun
+    # calcul n'a ete lance, ou pour un segment a materiau/DN force (toujours homogene, une seule
+    # entree). Reinitialise (comme les autres sorties de calcul) par toute edition/reset manuel.
+    segment_details: Optional[list[SegmentDetail]] = None
 
 
 class MaterialCriterionRule(BaseModel):
@@ -333,3 +361,11 @@ class CalculationPreferences(BaseModel):
     # EXCLUSION_ZONE_ALERT_MARKER). Une alerte informative signale quand meme un depassement,
     # sans jamais bloquer le calcul.
     min_pressure_exclusion_pct: Optional[float] = 1.0
+    # Pas d'echantillonnage (m) utilise pour subdiviser un troncon en piquets fins lors du calcul
+    # hydraulique (consigne utilisateur, glossaire Piquet/Segment/Troncon) — chaque piquet peut
+    # recevoir son propre DN (optimisation telescopique), au lieu d'un DN unique pour tout le
+    # troncon. Un point de depart editable, pas une verite figee : plus petit = dimensionnement
+    # plus fin mais calcul plus lent (le moteur reessaie chaque palier de DN par piquet), plus
+    # grand = plus rapide mais moins de granularite pour le télescopage. Un garde-fou interne
+    # (nombre max de piquets par troncon) s'applique quelle que soit la valeur saisie.
+    hydraulic_segment_step_m: float = Field(default=200.0, gt=0)

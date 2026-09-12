@@ -81,7 +81,20 @@ def test_calcul_gravitaire_happy_path_sizes_segment_and_writes_results(
     assert seg["velocity"] is not None and 0 < seg["velocity"] <= 2.0 + 1e-6
     assert seg["head_loss_unit"] is not None and seg["head_loss_unit"] > 0
     assert seg["head_loss_segment"] is not None and seg["head_loss_segment"] > 0
-    assert seg["head_loss_cumulative"] == seg["head_loss_segment"]
+    # Le troncon est desormais subdivise en piquets fins (glossaire Piquet/Segment/Troncon) : le
+    # DN est un tableau (`segment_details`, un par piquet), et les champs scalaires ci-dessus
+    # refletent seulement le DERNIER piquet (le plus aval) — sa perte de charge cumulee (depuis le
+    # DEBUT du troncon) peut donc legitimement depasser sa propre perte de charge (juste ce dernier
+    # piquet), contrairement a l'ancien comportement (un seul segment = cumulee toujours egale a
+    # elle-meme).
+    assert seg["segment_details"] and len(seg["segment_details"]) >= 1
+    last_detail = seg["segment_details"][-1]
+    assert last_detail["dn"] == seg["dn"]
+    assert last_detail["head_loss_cumulative"] == pytest.approx(seg["head_loss_cumulative"])
+    assert seg["head_loss_cumulative"] == pytest.approx(
+        sum(d["head_loss_segment"] for d in seg["segment_details"])
+    )
+    assert seg["head_loss_cumulative"] >= seg["head_loss_segment"] - 1e-9
 
     updated_nodes = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes").json()
     downstream_node = next(n for n in updated_nodes if n["id"] == downstream_id)
@@ -106,6 +119,7 @@ def test_calcul_gravitaire_happy_path_sizes_segment_and_writes_results(
     assert reset_seg.get("head_loss_unit") is None
     assert reset_seg.get("head_loss_segment") is None
     assert reset_seg.get("head_loss_cumulative") is None
+    assert reset_seg.get("segment_details") is None
     assert reset_seg["flow"] == 0.0
 
     nodes_after_repatch = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes").json()
@@ -254,6 +268,74 @@ def test_calcul_forced_material_dn_applies_despite_violated_constraints(
     assert updated_segment["material"] == "PEHD"
     assert updated_segment["dn"] == 110
     assert updated_segment["velocity"] is not None  # calcul reellement applique, pas reinitialise
+    # Un pipe force reste volontairement homogene sur toute sa longueur (pas de subdivision en
+    # piquets fins) — une seule entree dans le tableau, cf. glossaire Piquet/Segment/Troncon.
+    assert updated_segment["segment_details"] is not None
+    assert len(updated_segment["segment_details"]) == 1
+    assert updated_segment["segment_details"][0]["dn"] == 110
+
+
+def test_calcul_gravitaire_single_segment_troncon_gets_per_piquet_segment_details(
+    client, session_id, project_state, sample_kml_bytes, import_trace
+):
+    # Reproduit le constat du cas KMZ fourni par l'utilisateur : un troncon gravitaire SANS noeud
+    # reel intermediaire (un seul Segment persiste) doit tout de meme etre dimensionne piquet par
+    # piquet (glossaire Piquet/Segment/Troncon) — pas une seule "case" de DN pour tout le troncon.
+    variant_id, trace = _import_sample(client, session_id, project_state, sample_kml_bytes, import_trace)
+    nodes = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes").json()
+    upstream_id, downstream_id = nodes[0]["id"], nodes[1]["id"]
+
+    # Pas hydraulique reduit (defaut 200 m) pour garantir plusieurs piquets fins sur la trace de
+    # test (~2 km) — Preferences, consigne utilisateur : point de depart editable.
+    prefs = client.get(f"/api/v1/projects/{session_id}/preferences").json()
+    prefs["hydraulic_segment_step_m"] = 50.0
+    put_response = client.put(f"/api/v1/projects/{session_id}/preferences", json=prefs)
+    assert put_response.status_code == 200, put_response.text
+
+    client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes/{upstream_id}",
+        json={"type": "storage_reservoir", "name": "Res1", "data": {"fluid": "Eau potable"}},
+    )
+    client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes/{downstream_id}",
+        json={"type": "pressure_break", "name": "BC1"},
+    )
+
+    max_z = max(n["z"] for n in nodes)
+    segments = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments").json()
+    segment_id = segments[0]["id"]
+    client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/segments/{segment_id}",
+        json={
+            "head_flow": 100.0,
+            "upstream_water_level_max": max_z + 60.0,
+            "upstream_water_level_min": max_z + 55.0,
+            "min_pressure": 5.0,
+            "downstream_residual_pressure": 5.0,
+            "max_velocity": 2.0,
+        },
+    )
+
+    response = client.post(f"/api/v1/projects/{session_id}/variants/{variant_id}/calcul")
+    assert response.status_code == 200, response.text
+    assert response.json()["segments_updated"] == 1
+
+    seg = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments").json()[0]
+    details = seg["segment_details"]
+    assert details is not None and len(details) > 1, (
+        "un seul Segment persiste sans noeud reel intermediaire doit quand meme etre subdivise en "
+        "plusieurs piquets fins pour le calcul (sinon aucune optimisation de DN par piquet n'est "
+        "possible, cf. cas KMZ fourni par l'utilisateur)"
+    )
+    # Ordre amont -> aval, PK strictement croissant, et DN jamais croissant vers l'aval (le meme
+    # plancher que la contrainte de non-croissance deja verifiee au niveau de l'optimisation
+    # telescopique du moteur, ici observee de bout en bout via l'API).
+    pks = [d["pk"] for d in details]
+    assert pks == sorted(pks)
+    dns = [d["dn"] for d in details]
+    assert all(dns[i] >= dns[i + 1] for i in range(len(dns) - 1))
+    assert details[-1]["pk"] == pytest.approx(seg["pk_end"])
+    assert details[-1]["dn"] == seg["dn"]
 
 
 def test_calcul_min_pressure_exclusion_zone_is_informative_not_blocking(

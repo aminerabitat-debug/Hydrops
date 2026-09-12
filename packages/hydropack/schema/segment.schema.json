@@ -38,6 +38,28 @@
     "velocity": { "type": ["number", "null"], "description": "Vitesse calculee (m/s) — sortie du calcul hydraulique" },
     "head_loss_unit": { "type": ["number", "null"], "description": "Perte de charge lineaire unitaire J (m/m) — Darcy-Weisbach/Colebrook-White" },
     "head_loss_segment": { "type": ["number", "null"], "description": "Perte de charge totale du segment, majoration singulieres incluse (m)" },
-    "head_loss_cumulative": { "type": ["number", "null"], "description": "Perte de charge cumulee depuis le debut du troncon calcule (m)" }
+    "head_loss_cumulative": { "type": ["number", "null"], "description": "Perte de charge cumulee depuis le debut du troncon calcule (m)" },
+    "segment_details": {
+      "type": ["array", "null"],
+      "description": "Dimensionnement PAR PIQUET (glossaire Piquet/Segment/Troncon) — ce Segment persiste correspond a un Troncon, dont le DN n'est pas unique : un tableau, une entree par piquet (pk = PK du piquet aval de ce segment fin). Le dernier element reflete aussi les champs scalaires ci-dessus.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["pk", "material", "pressure_class", "dn", "di", "roughness"],
+        "properties": {
+          "pk": { "type": "number" },
+          "material": { "type": "string" },
+          "pressure_class": { "type": "string" },
+          "dn": { "type": "integer" },
+          "di": { "type": "number", "minimum": 0 },
+          "de": { "type": ["number", "null"], "minimum": 0 },
+          "roughness": { "type": "number", "minimum": 0 },
+          "velocity": { "type": ["number", "null"] },
+          "head_loss_unit": { "type": ["number", "null"] },
+          "head_loss_segment": { "type": ["number", "null"] },
+          "head_loss_cumulative": { "type": ["number", "null"] }
+        }
+      }
+    }
   }
 }

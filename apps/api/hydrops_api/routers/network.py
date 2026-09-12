@@ -14,7 +14,7 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
 
-from hydropack.models import MaterialCriterionRule, Node, Segment
+from hydropack.models import MaterialCriterionRule, Node, Segment, SegmentDetail
 from hydropack.serializer import ProjectPackage
 
 from hydrops_engine.hydraulics import (
@@ -73,6 +73,35 @@ def _flow_by_node_within_troncon(troncon_node_ids: list[str], nodes_by_id: dict[
                 current += node.injected_flow
         result[nid] = current
     return result
+
+
+# Garde-fou (consigne utilisateur, glossaire Piquet/Segment/Troncon) : nombre max de piquets fins
+# par Segment reel, quel que soit `hydraulic_segment_step_m` configure — l'optimisation
+# telescopique (hydrops_engine) reessaie plusieurs paliers de DN par piquet ajoute, un pas trop fin
+# sur un tres long troncon degraderait sinon la performance du calcul synchrone.
+_MAX_FINE_SEGMENTS_PER_SEGMENT = 300
+
+
+def _hydraulic_subdivision_points(
+    pk_start: float, pk_end: float, profile_points: list, step_m: float
+) -> list[tuple[float, float]]:
+    """Points DEM (pk, z) strictement entre pk_start et pk_end, sous-echantillonnes au pas
+    hydraulique configure (Preferences.hydraulic_segment_step_m) — reutilise les altitudes DEM
+    telles quelles (deja echantillonnees tous les ~20 m par profile_builder.py), sans interpolation.
+    Chaque point retenu devient un piquet virtuel supplementaire pour le moteur de calcul (cf.
+    run_calculation), lui permettant de choisir un DN different par piquet (glossaire Piquet/
+    Segment/Troncon, consigne utilisateur) — au lieu d'un DN unique pour tout le Segment reel."""
+    interior = [(p.pk, p.z) for p in profile_points if pk_start + 1e-6 < p.pk < pk_end - 1e-6]
+    if len(interior) < 2:
+        return interior
+    dem_step = interior[1][0] - interior[0][0]
+    stride = max(1, round(step_m / dem_step)) if dem_step > 0 else 1
+    sampled = interior[::stride]
+    if len(sampled) > _MAX_FINE_SEGMENTS_PER_SEGMENT:
+        coarser_stride = -(-len(interior) // _MAX_FINE_SEGMENTS_PER_SEGMENT)  # arrondi au superieur
+        sampled = interior[::coarser_stride]
+    return sampled
+
 
 _ENDPOINT_PK_TOLERANCE_M = 1e-6
 
@@ -610,6 +639,7 @@ def patch_segment(session_id: str, variant_id: str, segment_id: str, payload: Pa
         "head_loss_unit": None,
         "head_loss_segment": None,
         "head_loss_cumulative": None,
+        "segment_details": None,
     }
     if payload.upstream_water_level_max is not None:
         updates["upstream_water_level_max"] = payload.upstream_water_level_max
@@ -776,18 +806,63 @@ def run_calculation(
             fluid = start_node.data.get("fluid") if start_node.data else None
             allowed_fn = make_allowed_materials_fn(fluid if isinstance(fluid, str) else None)
 
-            segment_specs = [
-                HSegmentSpec(
-                    id=str(seg.id),
-                    length_m=seg.length,
-                    flow_m3s=flow_by_node_id.get(str(seg.upstream_node_id), 0.0) / 3600.0,
-                    max_velocity_ms=first_seg.max_velocity,
-                    min_velocity_ms=first_seg.min_velocity,
-                    forced_material=seg.forced_material,
-                    forced_dn=seg.forced_dn,
+            # Subdivision de chaque Segment reel en piquets fins (consigne utilisateur, glossaire
+            # Piquet/Segment/Troncon : "le DN d'un tronçon [...] sera un tableau de DN, un par
+            # piquet") — le moteur recoit ainsi une liste plus fine que les seuls ouvrages reels,
+            # ce qui lui permet de choisir un DN different par piquet (optimisation telescopique
+            # deja implementee dans hydrops_engine, jusqu'ici inoperante sur un Segment sans noeud
+            # reel intermediaire). Un pipe a materiau/DN force reste homogene (pas de subdivision,
+            # comportement inchange). `fine_parent_ids`/`fine_downstream_pk` permettent de regrouper
+            # les resultats fins par Segment reel une fois le calcul termine (cf. plus bas).
+            first_real_id = str(troncon_segments[0].upstream_node_id)
+            fine_node_ids: list[str] = [first_real_id]
+            fine_node_ground_z: dict[str, float] = {first_real_id: nodes_by_id[first_real_id].z}
+            fine_node_pk: dict[str, float] = {first_real_id: nodes_by_id[first_real_id].pk}
+            fine_specs: list[HSegmentSpec] = []
+            fine_parent_ids: list[str] = []
+            fine_downstream_pk: list[float] = []
+
+            for seg in troncon_segments:
+                upstream_id = str(seg.upstream_node_id)
+                downstream_id = str(seg.downstream_node_id)
+                seg_flow_m3s = flow_by_node_id.get(upstream_id, 0.0) / 3600.0
+                subdivision = (
+                    []
+                    if seg.forced_material is not None and seg.forced_dn is not None
+                    else _hydraulic_subdivision_points(
+                        seg.pk_start, seg.pk_end, profile_points, prefs.hydraulic_segment_step_m
+                    )
                 )
-                for seg in troncon_segments
-            ]
+
+                prev_pk = seg.pk_start
+                for i, (pk, z) in enumerate(subdivision):
+                    virtual_id = f"{seg.id}::piquet::{i}"
+                    fine_node_ids.append(virtual_id)
+                    fine_node_ground_z[virtual_id] = z
+                    fine_node_pk[virtual_id] = pk
+                    fine_specs.append(
+                        HSegmentSpec(
+                            id=f"{seg.id}::{len(fine_specs)}", length_m=pk - prev_pk, flow_m3s=seg_flow_m3s,
+                            max_velocity_ms=first_seg.max_velocity, min_velocity_ms=first_seg.min_velocity,
+                        )
+                    )
+                    fine_parent_ids.append(str(seg.id))
+                    fine_downstream_pk.append(pk)
+                    prev_pk = pk
+
+                fine_node_ids.append(downstream_id)
+                fine_node_ground_z[downstream_id] = nodes_by_id[downstream_id].z
+                fine_node_pk[downstream_id] = seg.pk_end
+                fine_specs.append(
+                    HSegmentSpec(
+                        id=f"{seg.id}::{len(fine_specs)}", length_m=seg.pk_end - prev_pk, flow_m3s=seg_flow_m3s,
+                        max_velocity_ms=first_seg.max_velocity, min_velocity_ms=first_seg.min_velocity,
+                        forced_material=seg.forced_material, forced_dn=seg.forced_dn,
+                    )
+                )
+                fine_parent_ids.append(str(seg.id))
+                fine_downstream_pk.append(seg.pk_end)
+
             # Materiau/DN force (fenetre "Modifier le tronçon", consigne utilisateur) : le calcul
             # doit s'appliquer meme si une contrainte de pression/vitesse est violee — cf. plus bas,
             # la reinitialisation-sur-alerte est alors sautee pour ce tronçon (sauf absence totale
@@ -798,9 +873,9 @@ def run_calculation(
 
             if regime == "gravitaire":
                 result = solve_gravitaire_troncon(
-                    node_ids_ordered=troncon_node_ids,
-                    node_ground_z=node_ground_z,
-                    segments_ordered=segment_specs,
+                    node_ids_ordered=fine_node_ids,
+                    node_ground_z=fine_node_ground_z,
+                    segments_ordered=fine_specs,
                     upstream_level_max=first_seg.upstream_water_level_max or 0.0,
                     upstream_level_min=first_seg.upstream_water_level_min,
                     min_pressure=first_seg.min_pressure,
@@ -809,22 +884,22 @@ def run_calculation(
                     singular_loss_markup_pct=prefs.singular_loss_markup_pct,
                     fluid_temperature_c=prefs.fluid_temperature_c,
                     allowed_materials_fn=allowed_fn,
-                    node_pk=node_pk,
+                    node_pk=fine_node_pk,
                     terrain_samples=terrain_samples,
                     min_pressure_exclusion_m=first_seg.min_pressure_exclusion_m,
                 )
             else:
                 result = solve_refoulement_troncon(
-                    node_ids_ordered=troncon_node_ids,
-                    node_ground_z=node_ground_z,
-                    segments_ordered=segment_specs,
+                    node_ids_ordered=fine_node_ids,
+                    node_ground_z=fine_node_ground_z,
+                    segments_ordered=fine_specs,
                     min_pressure=first_seg.min_pressure,
                     downstream_residual_pressure=first_seg.downstream_residual_pressure,
                     catalog=catalog_rows,
                     singular_loss_markup_pct=prefs.singular_loss_markup_pct,
                     fluid_temperature_c=prefs.fluid_temperature_c,
                     allowed_materials_fn=allowed_fn,
-                    node_pk=node_pk,
+                    node_pk=fine_node_pk,
                     terrain_samples=terrain_samples,
                     min_pressure_exclusion_m=first_seg.min_pressure_exclusion_m,
                 )
@@ -899,28 +974,56 @@ def run_calculation(
                         nodes_by_id[nid] = package.nodes[nid]
                     continue
 
-            for seg_result in result.segments:
-                seg = segments_by_id[seg_result.id]
+            # Regroupement des resultats fins (un par piquet) par Segment reel parent — chaque
+            # Segment reel recoit desormais un TABLEAU (`segment_details`, glossaire Piquet/
+            # Segment/Troncon), le dernier piquet (le plus aval) etant aussi reflete dans les
+            # champs scalaires existants pour compatibilite avec le reste de l'app.
+            segment_details_by_real_id: dict[str, list[SegmentDetail]] = {}
+            for parent_id, pk_value, seg_result in zip(fine_parent_ids, fine_downstream_pk, result.segments):
+                segment_details_by_real_id.setdefault(parent_id, []).append(
+                    SegmentDetail(
+                        pk=pk_value,
+                        material=seg_result.material,
+                        pressure_class=seg_result.pressure_class,
+                        dn=seg_result.dn,
+                        di=seg_result.di_mm,
+                        de=float(seg_result.dn),
+                        roughness=seg_result.roughness_mm,
+                        velocity=seg_result.velocity_ms,
+                        head_loss_unit=seg_result.head_loss_unit,
+                        head_loss_segment=seg_result.head_loss_segment,
+                        head_loss_cumulative=seg_result.head_loss_cumulative,
+                    )
+                )
+
+            for real_seg_id, details in segment_details_by_real_id.items():
+                seg = segments_by_id[real_seg_id]
+                last = details[-1]
                 updated_seg = seg.model_copy(
                     update={
-                        "material": seg_result.material,
-                        "pressure_class": seg_result.pressure_class,
-                        "dn": seg_result.dn,
-                        "di": seg_result.di_mm,
-                        "de": float(seg_result.dn),
-                        "roughness": seg_result.roughness_mm,
-                        "flow": seg_result.flow_m3s * 3600.0,
-                        "velocity": seg_result.velocity_ms,
-                        "head_loss_unit": seg_result.head_loss_unit,
-                        "head_loss_segment": seg_result.head_loss_segment,
-                        "head_loss_cumulative": seg_result.head_loss_cumulative,
+                        "material": last.material,
+                        "pressure_class": last.pressure_class,
+                        "dn": last.dn,
+                        "di": last.di,
+                        "de": last.de,
+                        "roughness": last.roughness,
+                        "flow": flow_by_node_id.get(str(seg.upstream_node_id), 0.0),
+                        "velocity": last.velocity,
+                        "head_loss_unit": last.head_loss_unit,
+                        "head_loss_segment": last.head_loss_segment,
+                        "head_loss_cumulative": last.head_loss_cumulative,
+                        "segment_details": details,
                     }
                 )
-                package.segments[seg_result.id] = updated_seg
-                segments_by_id[seg_result.id] = updated_seg
+                package.segments[real_seg_id] = updated_seg
+                segments_by_id[real_seg_id] = updated_seg
                 updated_segments += 1
 
             for node_result in result.nodes:
+                # Les piquets virtuels (subdivision fine, cf. plus haut) ne sont pas des `Node`
+                # persistes — seuls les ouvrages reels recoivent une mise a jour ici.
+                if node_result.node_id not in nodes_by_id:
+                    continue
                 node = nodes_by_id[node_result.node_id]
                 updated_node = node.model_copy(
                     update={
@@ -982,6 +1085,7 @@ def _reset_segment_to_default(package: ProjectPackage, segment_id: str) -> Optio
             "head_loss_unit": None,
             "head_loss_segment": None,
             "head_loss_cumulative": None,
+            "segment_details": None,
         }
     )
     package.segments[segment_id] = updated
@@ -1030,6 +1134,7 @@ def _reset_segment_calc_outputs(package: ProjectPackage, segment_id: str) -> Opt
             "head_loss_unit": None,
             "head_loss_segment": None,
             "head_loss_cumulative": None,
+            "segment_details": None,
         }
     )
     package.segments[segment_id] = updated

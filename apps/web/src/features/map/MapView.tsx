@@ -8,6 +8,7 @@ import maplibregl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { useEffect, useMemo, useRef, useState } from 'react'
 
+import { api } from '../../shared/apiClient'
 import { buildVertices, coordinatesForPkRange, interpolateLonLatAtPk, nearestPkForPoint } from '../../shared/geo'
 import { isPlaceholderNode, nodeColor, nodeDisplayLabel, nodeInitials } from '../../shared/nodeLabels'
 import { useAppStore } from '../../state/store'
@@ -66,7 +67,12 @@ export function MapView() {
   // sur la carte — desactive par defaut pour ne pas alourdir la carte en usage courant.
   const [infoMode, setInfoMode] = useState(false)
   const [hoverInfo, setHoverInfo] = useState<{ x: number; y: number; text: string } | null>(null)
+  // Detection des traversees (consigne utilisateur : bouton sous le bouton PK de la carte, sur la
+  // trace SELECTIONNEE — appel EXPLICITE, jamais automatique, a un service externe (Overpass/OSM)
+  // potentiellement lent ou indisponible).
+  const [detectingCrossings, setDetectingCrossings] = useState(false)
 
+  const sessionId = useAppStore((s) => s.sessionId)
   const traces = useAppStore((s) => s.traces)
   const nodes = useAppStore((s) => s.nodes)
   const selectedTraceId = useAppStore((s) => s.selection.selectedTraceId)
@@ -74,6 +80,8 @@ export function MapView() {
   const hoveredPk = useAppStore((s) => s.selection.hoveredPk)
   const mapFocusRequest = useAppStore((s) => s.mapFocusRequest)
   const showCrossings = useAppStore((s) => s.showCrossings)
+  const updateTrace = useAppStore((s) => s.updateTrace)
+  const setStatusMessage = useAppStore((s) => s.setStatusMessage)
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return
@@ -341,6 +349,22 @@ export function MapView() {
     [hoveredTrace],
   )
 
+  const handleDetectCrossings = async () => {
+    if (!sessionId || !hoveredTrace) return
+    setDetectingCrossings(true)
+    setStatusMessage('Détection des traversées en cours (Overpass/OpenStreetMap)...')
+    try {
+      const updated = await api.detectCrossings(sessionId, hoveredTrace.id)
+      updateTrace(updated)
+      const count = updated.crossings?.length ?? 0
+      setStatusMessage(count > 0 ? `${count} traversée(s) détectée(s)` : 'Aucune traversée détectée')
+    } catch (error) {
+      setStatusMessage(`Détection des traversées échouée : ${(error as Error).message}`)
+    } finally {
+      setDetectingCrossings(false)
+    }
+  }
+
   useEffect(() => {
     const map = mapRef.current
     if (!map) return
@@ -368,6 +392,16 @@ export function MapView() {
         aria-label="Afficher l'ID et le PK du piquet survolé"
       >
         PK ?
+      </button>
+      <button
+        type="button"
+        className="map-info-toggle map-crossings-toggle"
+        disabled={!hoveredTrace || detectingCrossings}
+        onClick={handleDetectCrossings}
+        title="Détecter les traversées (routes, voies ferrées, cours d'eau, zones urbaines/forestières, bâtiments) sur la trace sélectionnée"
+        aria-label="Détecter les traversées"
+      >
+        {detectingCrossings ? '⏳' : '🛣️'}
       </button>
       {hoverInfo && (
         <div className="map-hover-tooltip" style={{ left: hoverInfo.x + 12, top: hoverInfo.y + 12 }}>

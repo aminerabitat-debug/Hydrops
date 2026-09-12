@@ -306,6 +306,55 @@ def test_calcul_min_pressure_exclusion_zone_is_informative_not_blocking(
     assert updated_segment["velocity"] is not None  # calcul reellement applique, pas reinitialise
 
 
+def test_calcul_min_pressure_shortfall_is_informative_not_blocking(
+    client, session_id, project_state, sample_kml_bytes, import_trace
+):
+    # Consigne utilisateur : "ne bloque plus le calcul pour une question de pression minimale,
+    # affiche juste une alerte" — un manque de pression residuelle/min (hors alerte hydrostatique,
+    # qui n'a aucun resultat exploitable) ne doit plus reinitialiser le tronçon : le dimensionnement
+    # calcule reste applique, l'alerte reste seulement informative.
+    variant_id, trace = _import_sample(client, session_id, project_state, sample_kml_bytes, import_trace)
+    nodes = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes").json()
+    upstream_id, downstream_id = nodes[0]["id"], nodes[1]["id"]
+
+    client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes/{upstream_id}",
+        json={"type": "storage_reservoir", "name": "Res1", "data": {"fluid": "Eau potable"}},
+    )
+    client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes/{downstream_id}",
+        json={"type": "pressure_break", "name": "BC1"},
+    )
+
+    trace_detail = client.get(f"/api/v1/projects/{session_id}/traces/{trace['id']}").json()
+    max_z = max(p["z"] for p in trace_detail["elevation_profile"]["raw"])
+    level = max_z + 5.0  # marge de niveau modeste -> pas d'alerte hydrostatique, mais pression serree
+
+    segments = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments").json()
+    segment_id = segments[0]["id"]
+    client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/segments/{segment_id}",
+        json={
+            "head_flow": 100.0,
+            "upstream_water_level_max": level + 1.0,
+            "upstream_water_level_min": level,
+            "min_pressure": 1000.0,  # bien plus que la marge disponible -> viole partout, sans exclusion
+            "max_velocity": 2.0,
+        },
+    )
+
+    response = client.post(f"/api/v1/projects/{session_id}/variants/{variant_id}/calcul")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert not any("hydrostatique" in a.lower() for a in body["alerts"])
+    assert any("pression insuffisante" in a.lower() for a in body["alerts"])
+    assert body["segments_updated"] == 1
+    assert body["nodes_updated"] == 2
+
+    updated_segment = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments").json()[0]
+    assert updated_segment["velocity"] is not None  # calcul applique malgre l'alerte, pas reinitialise
+
+
 def test_calcul_scoped_to_one_troncon_ignores_other_unvalidated_troncons(
     client, session_id, project_state, sample_kml_bytes, import_trace
 ):

@@ -16,7 +16,6 @@ import type {
   CreatableNodeType,
   Node,
   PipeCatalogRow,
-  TraceGeometry,
   TronconGroup,
   Variant,
 } from '../../shared/types'
@@ -82,7 +81,6 @@ export function ProjectTree({ onOpenProjectSettings, onNewVariant, onDuplicateVa
   const setSelectedNode = useAppStore((s) => s.setSelectedNode)
   const setTableScope = useAppStore((s) => s.setTableScope)
   const setProjectState = useAppStore((s) => s.setProjectState)
-  const updateTrace = useAppStore((s) => s.updateTrace)
   const refreshNetwork = useAppStore((s) => s.refreshNetwork)
   const setStatusMessage = useAppStore((s) => s.setStatusMessage)
   const requestMapFocus = useAppStore((s) => s.requestMapFocus)
@@ -92,7 +90,6 @@ export function ProjectTree({ onOpenProjectSettings, onNewVariant, onDuplicateVa
   // debit, hors de notre controle) — la progression (lots DEM traites / total) vient du backend
   // via polling, pas d'une simple estimation cote client.
   const [isImporting, setIsImporting] = useState(false)
-  const [detectingCrossingsTraceId, setDetectingCrossingsTraceId] = useState<string | null>(null)
   const [importProgress, setImportProgress] = useState<ImportProgress | null>(null)
   // Afficher/masquer le contenu (Ouvrages/Tronçons) de la variante SELECTIONNEE, independamment de
   // la selection elle-meme (demande utilisateur) — reinitialise a "affiche" a chaque changement de
@@ -297,25 +294,6 @@ export function ProjectTree({ onOpenProjectSettings, onNewVariant, onDuplicateVa
     }
   }
 
-  // Detection des traversees (consigne utilisateur : routes/rail/pistes, canaux/rivieres, chaabas,
-  // bâtiments) — declenchee EXPLICITEMENT (bouton par trace), jamais automatiquement : appel a un
-  // service externe (Overpass/OSM) potentiellement lent ou indisponible.
-  const handleDetectCrossings = async (trace: TraceGeometry) => {
-    if (!sessionId) return
-    setDetectingCrossingsTraceId(trace.id)
-    setStatusMessage('Détection des traversées en cours (Overpass/OpenStreetMap)...')
-    try {
-      const updated = await api.detectCrossings(sessionId, trace.id)
-      updateTrace(updated)
-      const count = updated.crossings?.length ?? 0
-      setStatusMessage(count > 0 ? `${count} traversée(s) détectée(s)` : 'Aucune traversée détectée')
-    } catch (error) {
-      setStatusMessage(`Détection des traversées échouée : ${(error as Error).message}`)
-    } finally {
-      setDetectingCrossingsTraceId(null)
-    }
-  }
-
   const percent =
     isImporting && importProgress && importProgress.total > 0
       ? Math.round((importProgress.completed / importProgress.total) * 100)
@@ -375,23 +353,10 @@ export function ProjectTree({ onOpenProjectSettings, onNewVariant, onDuplicateVa
           >
             <span style={{ flex: 1 }}>{`Trace (${Math.round(trace.length)} m)`}</span>
             {trace.crossings != null && (
-              <span className="trace-crossings-count" title="Traversées détectées">
+              <span className="trace-crossings-count" title="Traversées détectées (bouton sous PK, sur la carte)">
                 {trace.crossings.length}
               </span>
             )}
-            <button
-              type="button"
-              className="tree-inline-btn"
-              disabled={detectingCrossingsTraceId === trace.id}
-              onClick={(e) => {
-                e.stopPropagation()
-                handleDetectCrossings(trace)
-              }}
-              title="Détecter les traversées (routes, voies ferrées, cours d'eau, bâtiments)"
-              aria-label="Détecter les traversées"
-            >
-              {detectingCrossingsTraceId === trace.id ? '⏳' : '🛣️'}
-            </button>
           </li>
         ))}
         {!isImporting && traces.length === 0 && <li className="empty-hint">Aucune trace</li>}
@@ -645,13 +610,23 @@ export function ProjectTree({ onOpenProjectSettings, onNewVariant, onDuplicateVa
           const precedingHeadFlow = precedingTroncon
             ? segmentsById.get(precedingTroncon.segment_ids[0])?.head_flow ?? undefined
             : undefined
+          // Débit de L'OUVRAGE AMONT lui-même (consigne utilisateur) — seuls les réservoirs (stockage/
+          // mise en charge) portent un champ Débit propre (cf. ouvrageFields.ts) ; priorité sur le
+          // débit du tronçon précédent (moins directement lié à ce tronçon-ci).
+          const upstreamOuvrageFlow = (() => {
+            const upstreamNode = nodesById.get(editingTroncon.troncon.start_node_id)
+            const flow = upstreamNode?.data?.flow
+            return typeof flow === 'number' ? flow : undefined
+          })()
           // Valeur par defaut de la zone d'exclusion (consigne utilisateur : "estimée à partir de
           // celle dans préférences"), tant que ce tronçon n'a pas encore la sienne propre —
           // pourcentage des Preferences converti en metres sur la longueur REELLE de ce tronçon.
           const defaultExclusionM =
             preferences?.min_pressure_exclusion_pct != null
-              ? (preferences.min_pressure_exclusion_pct / 100) *
-                (editingTroncon.troncon.pk_end - editingTroncon.troncon.pk_start)
+              ? Math.round(
+                  (preferences.min_pressure_exclusion_pct / 100) *
+                    (editingTroncon.troncon.pk_end - editingTroncon.troncon.pk_start),
+                )
               : undefined
           return (
             <TronconDialog
@@ -659,7 +634,7 @@ export function ProjectTree({ onOpenProjectSettings, onNewVariant, onDuplicateVa
               regime={tronconRegime(editingTroncon.troncon, nodesById)}
               startNodeGroundZ={nodesById.get(editingTroncon.troncon.start_node_id)?.z}
               initialHydraulics={{
-                headFlow: firstSegment?.head_flow ?? precedingHeadFlow ?? undefined,
+                headFlow: firstSegment?.head_flow ?? upstreamOuvrageFlow ?? precedingHeadFlow ?? undefined,
                 upstreamWaterLevelMax: firstSegment?.upstream_water_level_max ?? undefined,
                 upstreamWaterLevelMin: firstSegment?.upstream_water_level_min ?? undefined,
                 upstreamWaterLevelMaxOffset: firstSegment?.upstream_water_level_max_offset ?? undefined,

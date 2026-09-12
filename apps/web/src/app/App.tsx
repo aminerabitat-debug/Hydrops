@@ -191,8 +191,8 @@ export function App() {
   // exiges valides (cf. setSelectedVariant, qui reinitialise tableScope a 'trace'). `forceFull`
   // ignore le tronçon selectionne (utilise par handleAcceptReposition, qui doit toujours relancer
   // un calcul COMPLET quel que soit l'etat de l'arborescence au moment de l'acceptation).
-  const runCalcul = async (forceFull = false) => {
-    if (!sessionId || !selectedVariantId) return
+  const runCalcul = async (forceFull = false): Promise<CalcRunResult | null> => {
+    if (!sessionId || !selectedVariantId) return null
     const scope =
       !forceFull && tableScope.kind === 'troncon' ? { traceId: tableScope.traceId, startNodeId: tableScope.startNodeId } : undefined
     try {
@@ -206,8 +206,10 @@ export function App() {
           ? `Calcul terminé${scopeLabel} avec ${result.alerts.length} alerte(s)`
           : `Calcul terminé${scopeLabel} sans alerte`,
       )
+      return result
     } catch (error) {
       setStatusMessage(`Calcul impossible : ${(error as Error).message}`)
+      return null
     }
   }
   const handleRunCalcul = () => runCalcul(false)
@@ -227,7 +229,14 @@ export function App() {
             "vérifiez-la dans \"Modifier le tronçon\".",
         )
       }
-      await runCalcul(true)
+      const result = await runCalcul(true)
+      // Plus rien a proposer (consigne utilisateur : la fenetre doit disparaitre une fois la
+      // proposition traitee) -> ferme le dialogue plutot que de le laisser affiche avec un
+      // resultat qui, meme rafraichi, ne presente plus aucune action possible. S'il reste d'autres
+      // suggestions (plusieurs reservoirs a deplacer), il se rouvre a jour pour la suivante.
+      if (result && result.reposition_suggestions.length === 0) {
+        setCalcResult(null)
+      }
     } catch (error) {
       setStatusMessage(`Déplacement impossible : ${(error as Error).message}`)
     }

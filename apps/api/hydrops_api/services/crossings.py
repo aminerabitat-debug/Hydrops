@@ -37,6 +37,12 @@ OVERPASS_URLS = [
     "https://overpass.openstreetmap.ru/api/interpreter",
 ]
 OVERPASS_TIMEOUT_S = 40.0
+# Delai de CONNEXION distinct, plus court que le delai global ci-dessus : un miroir injoignable
+# (DNS/reseau bloque, serveur en panne) doit echouer vite pour passer au suivant, plutot que de
+# faire attendre l'utilisateur ~40 s par miroir avant de conclure a l'echec (constate en usage
+# reel : ~70 s cumules sur 3 miroirs avant l'erreur). Un miroir qui REPOND, lui, garde tout le
+# temps du delai global pour traiter une requete lourde (trace dense/longue).
+_CONNECT_TIMEOUT_S = 8.0
 # Marge de securite : bien plus long que timeout HTTP client cote appelant (delai vecu par
 # l'utilisateur, cf. hydrops_api.routers.traces), pour laisser Overpass repondre plutot que de
 # couper la connexion trop tot depuis notre cote.
@@ -141,7 +147,9 @@ async def fetch_osm_features(
         south - BBOX_MARGIN_DEG, west - BBOX_MARGIN_DEG, north + BBOX_MARGIN_DEG, east + BBOX_MARGIN_DEG
     )
     owns_client = client is None
-    client = client or httpx.AsyncClient(timeout=OVERPASS_TIMEOUT_S)
+    client = client or httpx.AsyncClient(
+        timeout=httpx.Timeout(OVERPASS_TIMEOUT_S, connect=_CONNECT_TIMEOUT_S)
+    )
     payload = None
     last_error: Optional[Exception] = None
     try:

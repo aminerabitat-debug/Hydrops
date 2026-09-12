@@ -269,6 +269,16 @@ def _node_label(node_id: str, node_pk: Optional[dict[str, float]]) -> str:
 # alertes normales par ce prefixe pour ne jamais reinitialiser un tronçon a cause d'elles seules.
 EXCLUSION_ZONE_ALERT_MARKER = "Zone d'exclusion (pression min)"
 
+# Prefixe repere (consigne utilisateur : "ne bloque plus le calcul pour une question de pression
+# minimale, affiche juste une alerte") — signale a l'appelant (routers/network.py) qu'un manque de
+# pression (residuelle/min, ou niveau de reservoir insuffisant pour les tenir) ne doit PLUS
+# reinitialiser le tronçon : le dimensionnement calcule (DN/materiau/vitesse) reste applique tel
+# quel, seule l'alerte informe que la pression exigee n'est pas entierement tenue. Distinct de
+# l'alerte hydrostatique (_check_hydrostatic_feasibility, terrain au-dessus de la cote du
+# reservoir) qui, elle, ne produit aucun resultat exploitable (segments vides) et reste donc geree
+# a part par la proposition de repositionnement.
+MIN_PRESSURE_ALERT_MARKER = "Pression minimale non garantie"
+
 # Tolerance (m) sur les comparaisons de PK contre la borne de la zone d'exclusion — bien plus
 # large que la precision flottante habituelle (1e-9) car le PK du dernier point de terrain
 # echantillonne et celui du noeud de fin peuvent differer de quelques millimetres selon leur mode
@@ -398,10 +408,10 @@ def _check_terrain_pressure(
         pk_min = min(v[0] for v in violations)
         pk_max = max(v[0] for v in violations)
         alerts.append(
-            f"Pression minimale non respectée sur le terrain entre PK {pk_min:.0f} m et PK {pk_max:.0f} m "
-            f"({len(violations)} point(s) échantillonné(s), pire cas {worst[2]:.1f} m obtenus au PK "
-            f"{worst[0]:.0f} m pour {min_pressure:.1f} m requis) — revoir le découpage du tracé "
-            f"(brise-charge, tronçon plus court...)."
+            f"{MIN_PRESSURE_ALERT_MARKER} : pression minimale non respectée sur le terrain entre "
+            f"PK {pk_min:.0f} m et PK {pk_max:.0f} m ({len(violations)} point(s) échantillonné(s), "
+            f"pire cas {worst[2]:.1f} m obtenus au PK {worst[0]:.0f} m pour {min_pressure:.1f} m "
+            f"requis) — revoir le découpage du tracé (brise-charge, tronçon plus court...)."
         )
     if excluded_violations:
         worst = min(excluded_violations, key=lambda v: v[2])
@@ -581,10 +591,10 @@ def _gravitaire_pass(
     offset = effective_upstream_level_min - nodes[start_node].piezo_head
     if offset < -1e-6:
         alerts.append(
-            f"Niveau du réservoir amont ({_node_label(start_node, node_pk)}, min = "
-            f"{effective_upstream_level_min:.1f} m) insuffisant de {-offset:.1f} m pour garantir la "
-            f"pression minimale sur l'ensemble du tronçon — revoir le découpage du tracé "
-            f"(brise-charge, tronçon plus court...)."
+            f"{MIN_PRESSURE_ALERT_MARKER} : niveau du réservoir amont "
+            f"({_node_label(start_node, node_pk)}, min = {effective_upstream_level_min:.1f} m) "
+            f"insuffisant de {-offset:.1f} m pour garantir la pression minimale sur l'ensemble du "
+            f"tronçon — revoir le découpage du tracé (brise-charge, tronçon plus court...)."
         )
 
     for nid in node_ids_ordered:
@@ -595,9 +605,9 @@ def _gravitaire_pass(
         actual = nodes[nid].pressure_dynamic or 0.0
         if actual < required - 1e-6:
             alerts.append(
-                f"Pression insuffisante au {_node_label(nid, node_pk)} ({actual:.1f} m obtenus, "
-                f"{required:.1f} m requis) — revoir le découpage du tracé (brise-charge, tronçon "
-                f"plus court...)."
+                f"{MIN_PRESSURE_ALERT_MARKER} : pression insuffisante au {_node_label(nid, node_pk)} "
+                f"({actual:.1f} m obtenus, {required:.1f} m requis) — revoir le découpage du tracé "
+                f"(brise-charge, tronçon plus court...)."
             )
 
     results = list(reversed(results_reversed))

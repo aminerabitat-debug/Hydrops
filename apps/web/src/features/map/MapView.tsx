@@ -80,6 +80,7 @@ export function MapView() {
   const hoveredPk = useAppStore((s) => s.selection.hoveredPk)
   const mapFocusRequest = useAppStore((s) => s.mapFocusRequest)
   const showCrossings = useAppStore((s) => s.showCrossings)
+  const setShowCrossings = useAppStore((s) => s.setShowCrossings)
   const updateTrace = useAppStore((s) => s.updateTrace)
   const setStatusMessage = useAppStore((s) => s.setStatusMessage)
 
@@ -349,13 +350,23 @@ export function MapView() {
     [hoveredTrace],
   )
 
-  const handleDetectCrossings = async () => {
-    if (!sessionId || !hoveredTrace) return
+  // Consigne utilisateur : le 1er clic DETECTE (appel Overpass) ET affiche ; les clics suivants ne
+  // font plus qu'afficher/masquer les traversées déjà connues, sans reinterroger Overpass a
+  // chaque fois — `hoveredTrace.crossings == null` distingue "jamais détectées" de "détectées,
+  // liste vide" (cf. shared/types.ts).
+  const handleCrossingsButtonClick = async () => {
+    if (!hoveredTrace) return
+    if (hoveredTrace.crossings != null) {
+      setShowCrossings(!showCrossings)
+      return
+    }
+    if (!sessionId) return
     setDetectingCrossings(true)
     setStatusMessage('Détection des traversées en cours (Overpass/OpenStreetMap)...')
     try {
       const updated = await api.detectCrossings(sessionId, hoveredTrace.id)
       updateTrace(updated)
+      setShowCrossings(true)
       const count = updated.crossings?.length ?? 0
       setStatusMessage(count > 0 ? `${count} traversée(s) détectée(s)` : 'Aucune traversée détectée')
     } catch (error) {
@@ -395,11 +406,17 @@ export function MapView() {
       </button>
       <button
         type="button"
-        className="map-info-toggle map-crossings-toggle"
+        className={`map-info-toggle map-crossings-toggle ${hoveredTrace?.crossings != null && showCrossings ? 'active' : ''}`}
         disabled={!hoveredTrace || detectingCrossings}
-        onClick={handleDetectCrossings}
-        title="Détecter les traversées (routes, voies ferrées, cours d'eau, zones urbaines/forestières, bâtiments) sur la trace sélectionnée"
-        aria-label="Détecter les traversées"
+        onClick={handleCrossingsButtonClick}
+        title={
+          hoveredTrace?.crossings == null
+            ? "Détecter les traversées (routes, voies ferrées, cours d'eau, zones urbaines/forestières, bâtiments) sur la trace sélectionnée"
+            : showCrossings
+              ? 'Masquer les traversées'
+              : 'Afficher les traversées'
+        }
+        aria-label="Détecter/afficher les traversées"
       >
         {detectingCrossings ? '⏳' : '🛣️'}
       </button>

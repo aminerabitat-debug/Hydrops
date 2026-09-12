@@ -47,14 +47,21 @@ export const CURVE_COLORS = {
 } as const
 // Petite palette fixe pour distinguer les materiaux dans la bande de caracteristiques ("guitare",
 // consigne utilisateur) — couleurs volontairement sourdes pour ne pas rivaliser avec les courbes.
-const MATERIAL_BAND_COLORS: Record<string, string> = {
-  PVC: '#2d4a63',
-  PEHD: '#2d5a4a',
-  FD: '#5a3d2d',
-  PRV: '#4a2d5a',
-  ACIER: '#5a4a2d',
+// DEUX teintes par materiau (consigne utilisateur : "au moins 2 couleurs a interchanger pour voir
+// les nuances") — alternees par bande consecutive (index pair/impair), pas par materiau seul : deux
+// paliers de DN successifs du MEME materiau (telescopage) restaient sinon visuellement indistincts.
+const MATERIAL_BAND_COLORS: Record<string, [string, string]> = {
+  PVC: ['#2d4a63', '#3e6486'],
+  PEHD: ['#2d5a4a', '#3e7a64'],
+  FD: ['#5a3d2d', '#7a533e'],
+  PRV: ['#4a2d5a', '#64407a'],
+  ACIER: ['#5a4a2d', '#7a653e'],
 }
-const DEFAULT_MATERIAL_BAND_COLOR = '#33415c'
+const DEFAULT_MATERIAL_BAND_COLORS: [string, string] = ['#33415c', '#455a7c']
+// Largeur estimee du panneau d'info (bouton i, consigne utilisateur) — au-dela de cette distance
+// du bord droit, le curseur le ferait sortir de l'ecran : on le rebascule a gauche du curseur, et
+// il revient a droite des que la place suffit de nouveau (recalcule a chaque survol, jamais figé).
+const HOVER_INFO_FLIP_MARGIN_PX = 260
 
 interface ProfileChartProps {
   showTerrain: boolean
@@ -176,7 +183,12 @@ export function ProfileChart({
   const [size, setSize] = useState({ width: 0, height: 0 })
   // Une ligne par info (consigne utilisateur : "empilées sur la verticale", chacune coloree comme
   // la courbe dont elle provient — le PK reste blanc, cf. rendu plus bas).
-  const [hoverInfo, setHoverInfo] = useState<{ x: number; y: number; lines: { text: string; color: string }[] } | null>(null)
+  const [hoverInfo, setHoverInfo] = useState<{
+    x: number
+    y: number
+    lines: { text: string; color: string }[]
+    containerWidth: number
+  } | null>(null)
   // Pan au clic droit (cf. l'effet plus bas) — sur des refs, pas du state : suivies a chaque
   // frame pendant un drag, un `useState` y redeclencherait un rendu (donc l'effet lui-meme) a
   // chaque pixel, ce qui est exactement le souci de saccades qu'on evite par ailleurs (curseur).
@@ -712,7 +724,7 @@ export function ProfileChart({
         if (hydroMinZ != null) {
           lines.push({ text: `Pression hydrostatique min ${(hydroMinZ - z).toFixed(1)} m`, color: HYDROSTATIC_MIN_COLOR })
         }
-        setHoverInfo({ x, y: clientY - rect.top, lines })
+        setHoverInfo({ x, y: clientY - rect.top, lines, containerWidth: rect.width })
       } else if (infoMode) {
         setHoverInfo(null)
       }
@@ -759,7 +771,7 @@ export function ProfileChart({
           bouton d'info, qui a ete deplace dans la barre d'outils). */}
       {pipeSpans.length > 0 && (
         <div className="profile-guitar-band" style={{ height: GUITAR_BAND_HEIGHT }}>
-          {pipeSpans.map((span) => {
+          {pipeSpans.map((span, index) => {
             const visibleStart = Math.max(span.pkStart, pkMin)
             const visibleEnd = Math.min(span.pkEnd, pkMax)
             if (visibleEnd <= visibleStart) return null
@@ -767,11 +779,12 @@ export function ProfileChart({
             const width = guitarXScale(visibleEnd) - left
             const lengthKm = (span.pkEnd - span.pkStart) / 1000
             const label = `${span.material} DN${span.dn} ${span.pressureClass} · L=${lengthKm.toFixed(1)} km`
+            const shades = MATERIAL_BAND_COLORS[span.material] ?? DEFAULT_MATERIAL_BAND_COLORS
             return (
               <div
                 key={span.pkStart}
                 className="profile-guitar-segment"
-                style={{ left, width, background: MATERIAL_BAND_COLORS[span.material] ?? DEFAULT_MATERIAL_BAND_COLOR }}
+                style={{ left, width, background: shades[index % 2] }}
                 title={label}
               >
                 {label}
@@ -797,7 +810,14 @@ export function ProfileChart({
           onClick={handleClick}
         />
         {hoverInfo && (
-          <div className="profile-hover-tooltip" style={{ left: hoverInfo.x + 12, top: hoverInfo.y + 12 }}>
+          <div
+            className="profile-hover-tooltip"
+            style={
+              hoverInfo.x > hoverInfo.containerWidth - HOVER_INFO_FLIP_MARGIN_PX
+                ? { right: hoverInfo.containerWidth - hoverInfo.x + 12, top: hoverInfo.y + 12 }
+                : { left: hoverInfo.x + 12, top: hoverInfo.y + 12 }
+            }
+          >
             {hoverInfo.lines.map((line, i) => (
               <div key={i} style={{ color: line.color }}>
                 {line.text}

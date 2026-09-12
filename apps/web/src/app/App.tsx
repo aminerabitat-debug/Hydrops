@@ -229,14 +229,11 @@ export function App() {
             "vérifiez-la dans \"Modifier le tronçon\".",
         )
       }
-      const result = await runCalcul(true)
-      // Plus rien a proposer (consigne utilisateur : la fenetre doit disparaitre une fois la
-      // proposition traitee) -> ferme le dialogue plutot que de le laisser affiche avec un
-      // resultat qui, meme rafraichi, ne presente plus aucune action possible. S'il reste d'autres
-      // suggestions (plusieurs reservoirs a deplacer), il se rouvre a jour pour la suivante.
-      if (result && result.reposition_suggestions.length === 0) {
-        setCalcResult(null)
-      }
+      await runCalcul(true)
+      // Consigne utilisateur : accepter un deplacement doit le faire, relancer le calcul, PUIS
+      // fermer la fenetre — inconditionnellement, meme si le calcul complet fait apparaitre
+      // d'autres suggestions (elles seront proposees au prochain calcul, pas enchainees ici).
+      setCalcResult(null)
     } catch (error) {
       setStatusMessage(`Déplacement impossible : ${(error as Error).message}`)
     }

@@ -84,8 +84,14 @@ function formatOrDash(value: number | null | undefined, digits = 2): string {
 // en cours de route (constate concretement sur un cas reel). Quand `segment.segment_details` est
 // disponible, la cote piezo/pression dynamique est reconstruite piquet par piquet a partir de la
 // cote DEJA CONNUE du noeud reel aval et de la perte de charge cumulee relative de chaque piquet —
-// aucune nouvelle donnee moteur necessaire. Les cotes hydrostatiques (constantes le long du
-// tronçon, non affectees par le DN) gardent l'interpolation lineaire d'origine.
+// aucune nouvelle donnee moteur necessaire.
+// Les pressions HYDROSTATIQUES (max/min) souffrent du meme defaut pour une autre raison : le niveau
+// du reservoir est bien constant, mais `pressure_static_max/min = niveau - altitude du TERRAIN`, et
+// le terrain n'est generalement pas rectiligne entre les deux noeuds reels — interpoler ces valeurs
+// LINEAIREMENT (comme avant) est donc tout aussi faux qu'interpoler la cote piezo. Le niveau
+// constant est recupere depuis le noeud aval (deja calcule : `pressure_static_max + z du noeud` =
+// le niveau), puis applique directement a l'altitude REELLE de ce piquet (`rowZ`, deja connue,
+// aucune interpolation necessaire).
 function interpolateNodeField(
   pk: number,
   segment: Segment,
@@ -103,6 +109,14 @@ function interpolateNodeField(
         const piezo = downstreamPiezo + (lastCumulative - detail.head_loss_cumulative)
         return field === 'piezo_head' ? piezo : piezo - rowZ
       }
+    }
+  }
+  if ((field === 'pressure_static_max' || field === 'pressure_static_min') && rowZ != null) {
+    const downstreamNode = nodesById.get(segment.downstream_node_id)
+    const downstreamValue = downstreamNode?.[field]
+    if (downstreamNode != null && downstreamValue != null) {
+      const constantLevel = downstreamValue + downstreamNode.z
+      return constantLevel - rowZ
     }
   }
   const a = nodesById.get(segment.upstream_node_id)?.[field]
@@ -334,8 +348,8 @@ export function DataTable({ onAddNode, onEditNode, onAssignNode, onDeleteNode, a
         pdcTotale: pdcLineaire != null ? cumulative : null,
         piezo: interpolateNodeField(row.pk, segment, nodesById, 'piezo_head', row.z),
         pressureDyn: interpolateNodeField(row.pk, segment, nodesById, 'pressure_dynamic', row.z),
-        pressureStaticMax: interpolateNodeField(row.pk, segment, nodesById, 'pressure_static_max'),
-        pressureStaticMin: interpolateNodeField(row.pk, segment, nodesById, 'pressure_static_min'),
+        pressureStaticMax: interpolateNodeField(row.pk, segment, nodesById, 'pressure_static_max', row.z),
+        pressureStaticMin: interpolateNodeField(row.pk, segment, nodesById, 'pressure_static_min', row.z),
       }
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps

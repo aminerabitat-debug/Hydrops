@@ -23,6 +23,20 @@ export type TableScope =
 // 'info' est le defaut implicite de tout appel existant qui ne precise rien.
 export type StatusMessageType = 'info' | 'success' | 'warning' | 'error'
 
+// Fenetre log (consigne utilisateur : "les messages d'erreur doivent se répartir entre la barre
+// d'état et le log, avec plus de détails dans le log") — alimentee automatiquement par
+// setStatusMessage pour les types 'warning'/'error' (jamais pour 'info'/'success', qui restent
+// des statuts ephemeres sans interet a conserver). `detail`, quand fourni, porte l'information plus
+// complete (ex. la liste entiere des alertes d'un calcul) que le resume affiche dans la barre
+// d'etat — sinon `detail` vaut le meme texte que `summary`.
+export interface LogEntry {
+  id: string
+  timestamp: number
+  type: StatusMessageType
+  summary: string
+  detail: string
+}
+
 interface SelectionState {
   hoveredPk: number | null
   selectedTraceId: string | null
@@ -71,6 +85,12 @@ interface AppState {
   // logique metier associee. 'info' par defaut : la grande majorite des appels existants sont des
   // statuts neutres, jamais rétro-annotes un par un.
   statusMessageType: StatusMessageType
+  // Journal des messages d'erreur/avertissement (consigne utilisateur : "fenêtre log à placer en
+  // bas de la page... affichable à la demande") — alimente par setStatusMessage, jamais purge
+  // automatiquement (seul un "Vider" explicite le fait), pour que l'utilisateur retrouve un
+  // message meme apres qu'il ait defile hors de la barre d'etat.
+  logEntries: LogEntry[]
+  logWindowOpen: boolean
   mapFocusRequest: MapFocusRequest | null
   profileFocusRequest: ProfileFocusRequest | null
   // Disposition Carte/Profil-Table/Vue combinee — au store (pas local a App.tsx) pour que MapView
@@ -102,7 +122,11 @@ interface AppState {
   updateTrace: (trace: TraceGeometry) => void
   setNetwork: (nodes: Node[], segments: Segment[], troncons: TronconGroup[]) => void
   refreshNetwork: () => Promise<void>
-  setStatusMessage: (message: string, type?: StatusMessageType) => void
+  // `detail` optionnel (consigne utilisateur : "plus de détails dans le log") — sinon le log
+  // reprend `message` tel quel. N'alimente le journal que pour 'warning'/'error'.
+  setStatusMessage: (message: string, type?: StatusMessageType, detail?: string) => void
+  toggleLogWindow: () => void
+  clearLog: () => void
   requestMapFocus: (target: MapFocusTarget) => void
   requestProfileFocus: (range: { pkStart: number; pkEnd: number }) => void
   setLayoutMode: (mode: LayoutMode) => void
@@ -131,6 +155,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   selection: DEFAULT_SELECTION,
   statusMessage: 'Pret',
   statusMessageType: 'info',
+  logEntries: [],
+  logWindowOpen: false,
   mapFocusRequest: null,
   profileFocusRequest: null,
   layoutMode: 'both',
@@ -208,7 +234,19 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ nodes, segments, troncons })
   },
 
-  setStatusMessage: (message, type = 'info') => set({ statusMessage: message, statusMessageType: type }),
+  setStatusMessage: (message, type = 'info', detail) =>
+    set((s) => ({
+      statusMessage: message,
+      statusMessageType: type,
+      logEntries:
+        type === 'warning' || type === 'error'
+          ? [...s.logEntries, { id: crypto.randomUUID(), timestamp: Date.now(), type, summary: message, detail: detail ?? message }]
+          : s.logEntries,
+    })),
+
+  toggleLogWindow: () => set((s) => ({ logWindowOpen: !s.logWindowOpen })),
+
+  clearLog: () => set({ logEntries: [] }),
 
   requestMapFocus: (target) => set((s) => ({ mapFocusRequest: { target, nonce: (s.mapFocusRequest?.nonce ?? 0) + 1 } })),
 

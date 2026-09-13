@@ -47,20 +47,34 @@ export function interpolateLonLatAtPk(vertices: Vertex[], pk: number): [number, 
   return [last.lon, last.lat]
 }
 
-// Sommet le plus proche (distance euclidienne en lon/lat, suffisant pour un survol interactif —
-// pas une projection exacte sur le segment) d'un point donne — sert au petit bouton d'information
-// carte/profil (consigne utilisateur : ID + PK du piquet survole).
+// PK par PROJECTION sur le segment le plus proche (consigne utilisateur : "quand je clique à 2
+// endroits proches sur la carte... j'obtiens le même piquet" — l'ancienne version arrondissait au
+// SOMMET le plus proche, une grossiere approximation des que deux sommets du tracé source (KML,
+// souvent tres espaces) encadrent la zone cliquee : tout clic dans le meme "polygone de Voronoi"
+// autour d'un sommet renvoyait exactement son PK, quel que soit l'endroit precis clique). Meme
+// principe que le calcul equivalent cote backend (hydrops_api.services.crossings:_pk_at_point) :
+// pour chaque segment [v1, v2], projeter le point clique dessus (parametre t clampe a [0,1]),
+// garder la projection la plus proche, interpoler son PK — continu le long de TOUTE la trace, pas
+// seulement aux sommets.
 export function nearestPkForPoint(vertices: Vertex[], lon: number, lat: number): number {
-  let best = vertices[0]
+  let bestPk = vertices[0].pk
   let bestDist = Infinity
-  for (const v of vertices) {
-    const d = (v.lon - lon) ** 2 + (v.lat - lat) ** 2
-    if (d < bestDist) {
-      bestDist = d
-      best = v
+  for (let i = 0; i < vertices.length - 1; i++) {
+    const v1 = vertices[i]
+    const v2 = vertices[i + 1]
+    const dx = v2.lon - v1.lon
+    const dy = v2.lat - v1.lat
+    const segLenSq = dx * dx + dy * dy
+    const t = segLenSq <= 0 ? 0 : Math.max(0, Math.min(1, ((lon - v1.lon) * dx + (lat - v1.lat) * dy) / segLenSq))
+    const projLon = v1.lon + t * dx
+    const projLat = v1.lat + t * dy
+    const dist = (projLon - lon) ** 2 + (projLat - lat) ** 2
+    if (dist < bestDist) {
+      bestDist = dist
+      bestPk = v1.pk + t * (v2.pk - v1.pk)
     }
   }
-  return best.pk
+  return bestPk
 }
 
 // Sous-ensemble de coordonnees [lon,lat] couvrant [pkStart, pkEnd] le long d'une trace (extremites

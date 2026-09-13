@@ -84,6 +84,7 @@ export function ProfileTableView() {
   const selectedTraceId = useAppStore((s) => s.selection.selectedTraceId)
   const tableScope = useAppStore((s) => s.selection.tableScope)
   const profileFocusRequest = useAppStore((s) => s.profileFocusRequest)
+  const requestProfileFocus = useAppStore((s) => s.requestProfileFocus)
   const trace = traces.find((t) => t.id === selectedTraceId) ?? traces[0]
   const profile = trace?.elevation_profile
 
@@ -93,6 +94,19 @@ export function ProfileTableView() {
     if (!profileFocusRequest) return
     setZoomRange({ min: profileFocusRequest.pkStart, max: profileFocusRequest.pkEnd })
   }, [profileFocusRequest])
+
+  // Synchronisation zoom graphique -> table (consigne utilisateur : "quand je zoome sur le
+  // graphique, je veux qu'en basculant sur le tableau ce dernier se positionne autour des piquets
+  // du zoom") — reutilise le mecanisme de defilement de DataTable deja construit pour la synchro
+  // carte -> table (meme store field, cf. MapView.tsx). Ne se declenche qu'au BASCULEMENT vers le
+  // mode Data (pas a chaque changement de zoomRange en cours de Mode Graphique), avec la plage
+  // actuellement zoomee — rien a faire si aucun zoom manuel n'est en cours.
+  useEffect(() => {
+    if (mode === 'data' && zoomRange) {
+      requestProfileFocus({ pkStart: zoomRange.min, pkEnd: zoomRange.max })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode])
 
   // Changer de trace ou de troncon selectionne (arborescence) invalide un zoom manuel en cours —
   // la plage n'a plus forcement de sens sur le nouveau profil affiche. Idem pour une selection de
@@ -220,6 +234,9 @@ export function ProfileTableView() {
     setStatusMessage(
       result.alerts.length > 0 ? `Calcul terminé avec ${result.alerts.length} alerte(s)` : 'Calcul terminé sans alerte',
       result.alerts.length > 0 ? 'warning' : 'success',
+      result.alerts.length > 0
+        ? `Calcul terminé avec ${result.alerts.length} alerte(s) :\n${result.alerts.map((a) => `• ${a}`).join('\n')}`
+        : undefined,
     )
   }
 

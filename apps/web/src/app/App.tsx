@@ -8,6 +8,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { CalcResultDialog } from './CalcResultDialog'
 import { ConduitesWindow } from './ConduitesWindow'
 import { ConfirmDialog } from './ConfirmDialog'
+import { LogWindow } from './LogWindow'
 import { NewVariantDialog } from './NewVariantDialog'
 import { PreferencesWindow } from './PreferencesWindow'
 import { ProgressBar } from './ProgressBar'
@@ -54,6 +55,9 @@ export function App() {
   const statusMessage = useAppStore((s) => s.statusMessage)
   const statusMessageType = useAppStore((s) => s.statusMessageType)
   const setStatusMessage = useAppStore((s) => s.setStatusMessage)
+  const logEntries = useAppStore((s) => s.logEntries)
+  const logWindowOpen = useAppStore((s) => s.logWindowOpen)
+  const toggleLogWindow = useAppStore((s) => s.toggleLogWindow)
   // Disposition Carte/Profil-Table/Vue combinee — vit au store (pas un useState local) pour que
   // MapView (enfant de Workspace, jamais traverse par cette prop) puisse la lire directement sans
   // prop-drilling (consigne utilisateur : sync zoom carte -> profil, uniquement en Vue combinee).
@@ -223,6 +227,10 @@ export function App() {
           ? `Calcul terminé${scopeLabel} avec ${result.alerts.length} alerte(s)`
           : `Calcul terminé${scopeLabel} sans alerte`,
         result.alerts.length > 0 ? 'warning' : 'success',
+        // Detail du journal (consigne utilisateur : "plus de détails dans le log") — la liste
+        // complete des alertes, pas seulement leur nombre (deja visible dans CalcResultDialog,
+        // mais qui se ferme et n'est pas conserve ailleurs).
+        result.alerts.length > 0 ? `Calcul terminé${scopeLabel} avec ${result.alerts.length} alerte(s) :\n${result.alerts.map((a) => `• ${a}`).join('\n')}` : undefined,
       )
       return result
     } catch (error) {
@@ -292,6 +300,8 @@ export function App() {
         <Workspace layoutMode={layoutMode} />
       </div>
 
+      {logWindowOpen && <LogWindow />}
+
       <footer className="status-bar">
         {backendUnreachable && (
           <span className="status-bar-text warn">
@@ -305,6 +315,15 @@ export function App() {
           </span>
           {statusMessage}
         </span>
+        <button
+          type="button"
+          className={`status-bar-log-toggle ${logWindowOpen ? 'active' : ''}`}
+          onClick={toggleLogWindow}
+          title="Journal des messages d'avertissement/d'erreur"
+          aria-label="Ouvrir/fermer le journal des messages"
+        >
+          🗒 Journal{logEntries.length > 0 ? ` (${logEntries.length})` : ''}
+        </button>
       </footer>
 
       {dialog === 'newProject' && (

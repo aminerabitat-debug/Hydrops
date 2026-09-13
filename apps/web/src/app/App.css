@@ -1176,6 +1176,113 @@ body,
   margin-right: 4px;
 }
 
+/* Bouton de bascule du journal (consigne utilisateur : "affichable à la demande — clic sur un
+   bouton dans la barre d'état") — ancre a droite de la barre d'etat, quel que soit le message
+   courant. */
+.status-bar-log-toggle {
+  margin-left: auto;
+  flex: 0 0 auto;
+  height: 22px;
+  padding: 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--muted);
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.status-bar-log-toggle:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text);
+}
+
+.status-bar-log-toggle.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #0c1524;
+  font-weight: 700;
+}
+
+/* Fenetre log (consigne utilisateur) — panneau DOCKE juste au-dessus de la barre d'etat, pas une
+   modale (pas de fond assombri : reste possible d'interagir avec le reste de l'appli). */
+.log-window {
+  /* position: fixed (pas un enfant de grille en flux normal) : .app-shell a exactement 3 lignes
+     de grille (quick-bar/espace de travail/barre d'etat) — un 4e enfant en flux se glisserait dans
+     la ligne reservee a la barre d'etat (32px) au lieu d'avoir la sienne, ecrasant l'affichage des
+     deux. Le sortir du flux avec `fixed`, ancre juste au-dessus de la barre d'etat (32px de haut),
+     evite d'avoir a recalculer ces lignes de grille a chaque ouverture/fermeture. */
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 32px;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  max-height: 240px;
+  border-top: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  background: linear-gradient(180deg, #0f1727, #0d1524);
+}
+
+.log-window-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.log-window-header h3 {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.log-window-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.log-window-body {
+  overflow-y: auto;
+  padding: 6px 12px;
+}
+
+.log-entry {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  font-size: 12px;
+}
+
+.log-entry:last-child {
+  border-bottom: none;
+}
+
+.log-entry-time {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.log-entry-text {
+  color: var(--text);
+  white-space: pre-wrap;
+}
+
+.log-entry--warning .log-entry-text {
+  color: var(--warning);
+}
+
+.log-entry--error .log-entry-text {
+  color: var(--danger);
+}
+
 /* ---- Modales ---- */
 
 .modal-backdrop {

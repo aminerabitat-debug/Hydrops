@@ -8,7 +8,6 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { CalcResultDialog } from './CalcResultDialog'
 import { ConduitesWindow } from './ConduitesWindow'
 import { ConfirmDialog } from './ConfirmDialog'
-import { MenuBar } from './MenuBar'
 import { NewVariantDialog } from './NewVariantDialog'
 import { PreferencesWindow } from './PreferencesWindow'
 import { ProgressBar } from './ProgressBar'
@@ -248,23 +247,6 @@ export function App() {
 
   return (
     <div className="app-shell">
-      <MenuBar
-        projectOpen={Boolean(project)}
-        variantSelected={Boolean(selectedVariantId)}
-        onNewProject={() => setDialog('newProject')}
-        onOpenProject={() => openInputRef.current?.click()}
-        onSaveProject={handleSaveProject}
-        onNewVariant={() => setDialog('newVariant')}
-        onDuplicateVariant={() => handleDuplicateVariant(selectedVariantId)}
-        onDeleteVariant={() => handleRequestDeleteVariant(selectedVariantId)}
-        layoutMode={layoutMode}
-        onLayoutModeChange={setLayoutMode}
-        onAbout={() => setStatusMessage('HydroPS v0.1.0 — Lot 1 (socle, SIG/DEM, carte/profil/table)')}
-        onRunCalcul={handleRunCalcul}
-        onOpenPreferences={() => setDialog('preferences')}
-        onOpenConduites={() => setDialog('conduites')}
-      />
-
       <QuickBar
         projectOpen={Boolean(project)}
         variantSelected={Boolean(selectedVariantId)}

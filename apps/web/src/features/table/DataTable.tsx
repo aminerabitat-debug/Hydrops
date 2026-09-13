@@ -19,7 +19,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { api } from '../../shared/apiClient'
-import { crossingDisplayText } from '../../shared/crossingColors'
+import { crossingDisplayText, crossingLength } from '../../shared/crossingColors'
 import { buildVertices, interpolateLonLatAtPk } from '../../shared/geo'
 import { isPlaceholderNode, nodeDisplayLabel } from '../../shared/nodeLabels'
 import { useAppStore } from '../../state/store'
@@ -44,7 +44,10 @@ interface Row {
   isBis: boolean
 }
 
-const TOPO_COLUMNS = ['N° Piquet', 'Type', 'Distance partielle (m)', 'PK cumulé (m)', 'X', 'Y', 'Z (m)', 'Traversée']
+const TOPO_COLUMNS = [
+  'N° Piquet', 'Type', 'Distance partielle (m)', 'PK cumulé (m)', 'X', 'Y', 'Z (m)', 'Traversée',
+  'Longueur de la traversée (m)',
+]
 const PIPE_COLUMNS = ['Matériau', 'DN', 'Classe', 'DI (mm)', 'Rugosité (mm)']
 // Sorties du bouton Calcul > Calculer (consigne utilisateur) : rappel du debit, vitesse, PDC
 // unitaire/lineaire/totale, puis les lignes piezometrique et hydrostatique (si applicable) pour
@@ -60,7 +63,7 @@ const ACTION_COLUMN = ''
 
 const DEFAULT_COLUMN_WIDTHS: Record<string, number> = {
   'N° Piquet': 80, Type: 120, 'Distance partielle (m)': 150, 'PK cumulé (m)': 120,
-  X: 110, Y: 110, 'Z (m)': 90, 'Traversée': 170,
+  X: 110, Y: 110, 'Z (m)': 90, 'Traversée': 170, 'Longueur de la traversée (m)': 160,
   Matériau: 140, DN: 70, Classe: 80, 'DI (mm)': 80, 'Rugosité (mm)': 100,
   'Débit (m³/h)': 110, 'Vitesse (m/s)': 100, 'PDC unitaire (m/km)': 130, 'PDC linéaire (m)': 120,
   'PDC totale (m)': 110, 'Cote piézo (m)': 110, 'Pression dyn. (m)': 120,
@@ -175,9 +178,11 @@ export function DataTable({ onAddNode, onEditNode, onAssignNode, onDeleteNode, a
   const setHoveredPk = useAppStore((s) => s.setHoveredPk)
   const pkPickResolver = useAppStore((s) => s.pkPickResolver)
   const resolvePkPick = useAppStore((s) => s.resolvePkPick)
+  const profileFocusRequest = useAppStore((s) => s.profileFocusRequest)
 
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>(DEFAULT_COLUMN_WIDTHS)
   const resizingRef = useRef<{ key: string; startX: number; startWidth: number } | null>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
 
   const [materials, setMaterials] = useState<CatalogMaterial[]>([])
 
@@ -270,6 +275,26 @@ export function DataTable({ onAddNode, onEditNode, onAssignNode, onDeleteNode, a
       }
     })
   }, [trace, profile, nodes, segments, tableScope])
+
+  // Synchronisation zoom carte -> table (consigne utilisateur, cf. MapView.tsx qui emet cette
+  // demande en Vue combinée) — fait defiler la ligne la plus proche du CENTRE de la plage visible
+  // au milieu du conteneur, meme si la table n'est pas la vue active du moment (Mode Graphique) :
+  // elle sera deja au bon endroit si l'utilisateur bascule ensuite en Mode Data.
+  useEffect(() => {
+    if (!profileFocusRequest || rows.length === 0 || !containerRef.current) return
+    const center = (profileFocusRequest.pkStart + profileFocusRequest.pkEnd) / 2
+    let closest = rows[0]
+    let bestDist = Math.abs(closest.pk - center)
+    for (const r of rows) {
+      const d = Math.abs(r.pk - center)
+      if (d < bestDist) {
+        bestDist = d
+        closest = r
+      }
+    }
+    const rowEl = containerRef.current.querySelector<HTMLTableRowElement>(`tr[data-pk="${closest.pk}"]`)
+    rowEl?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  }, [profileFocusRequest, rows])
 
   // Traversées détectées (consigne utilisateur : colonne dédiée dans le profil Data) — rattachées
   // au piquet le plus proche (leur PK exact vient d'une projection géométrique, pas forcément
@@ -376,7 +401,7 @@ export function DataTable({ onAddNode, onEditNode, onAssignNode, onDeleteNode, a
   if (rows.length === 0) return <p className="empty-hint">Profil non disponible pour cette trace.</p>
 
   return (
-    <div className="data-table-container">
+    <div className="data-table-container" ref={containerRef}>
       <table className="data-table" style={{ tableLayout: 'fixed' }}>
         <colgroup>
           {columns.map((label, i) => (
@@ -442,6 +467,7 @@ export function DataTable({ onAddNode, onEditNode, onAssignNode, onDeleteNode, a
             return (
               <tr
                 key={row.piquetNumber}
+                data-pk={row.pk}
                 className={rowClasses}
                 onMouseEnter={() => setHoveredPk(row.pk)}
                 onMouseLeave={() => setHoveredPk(null)}
@@ -459,6 +485,13 @@ export function DataTable({ onAddNode, onEditNode, onAssignNode, onDeleteNode, a
                   title={(crossingsByRowPk.get(row.pk) ?? []).map((c) => crossingDisplayText(c)).join(', ') || undefined}
                 >
                   {(crossingsByRowPk.get(row.pk) ?? []).map((c) => crossingDisplayText(c)).join(', ')}
+                </td>
+                <td>
+                  {(crossingsByRowPk.get(row.pk) ?? [])
+                    .map((c) => crossingLength(c, trace?.crossings ?? []))
+                    .filter((length): length is number => length != null)
+                    .map((length) => `${Math.round(length)} m`)
+                    .join(', ')}
                 </td>
                 {tableScope.kind === 'troncon' && (
                   <>

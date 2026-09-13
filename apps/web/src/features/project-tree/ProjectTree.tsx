@@ -165,9 +165,9 @@ export function ProjectTree({ onOpenProjectSettings, onNewVariant, onDuplicateVa
       await api.patchVariant(sessionId, variantId, { name: newName })
       const state = await api.getProject(sessionId)
       setProjectState(state)
-      setStatusMessage(`Variante renommée : ${newName}`)
+      setStatusMessage(`Variante renommée : ${newName}`, 'success')
     } catch (error) {
-      setStatusMessage(`Erreur de renommage : ${(error as Error).message}`)
+      setStatusMessage(`Erreur de renommage : ${(error as Error).message}`, 'error')
     }
   }
 
@@ -183,10 +183,24 @@ export function ProjectTree({ onOpenProjectSettings, onNewVariant, onDuplicateVa
         existing: payload.existing,
         phase_id: payload.phaseId ?? '',
       })
+      // Deplacement (consigne utilisateur) : endpoint dedie, deja invalidant le calcul des
+      // tronçons voisins cote backend (PATCH .../position) — l'utilisateur doit relancer "Calculer".
+      if (payload.newPk != null) {
+        const moveResult = await api.patchNodePosition(sessionId, selectedVariantId, editingOuvrage.id, payload.newPk)
+        if (moveResult.needs_level_confirmation) {
+          setStatusMessage(
+            "Ouvrage déplacé — sa cote (saisie en valeur absolue) n'a pas été ajustée automatiquement : " +
+              "vérifiez-la dans \"Modifier le tronçon\".",
+            'warning',
+          )
+          await refreshNetwork()
+          return
+        }
+      }
       await refreshNetwork()
-      setStatusMessage('Ouvrage mis à jour')
+      setStatusMessage('Ouvrage mis à jour', 'success')
     } catch (error) {
-      setStatusMessage(`Erreur de modification : ${(error as Error).message}`)
+      setStatusMessage(`Erreur de modification : ${(error as Error).message}`, 'error')
     }
   }
 
@@ -199,14 +213,14 @@ export function ProjectTree({ onOpenProjectSettings, onNewVariant, onDuplicateVa
     try {
       if (isStructuralEndpoint(node, tracesById.get(node.trace_id))) {
         await api.patchNode(sessionId, selectedVariantId, node.id, { type: 'junction', name: '' })
-        setStatusMessage('Ouvrage retiré (extrémité redevenue non affectée)')
+        setStatusMessage('Ouvrage retiré (extrémité redevenue non affectée)', 'success')
       } else {
         await api.deleteNode(sessionId, selectedVariantId, node.id)
-        setStatusMessage('Ouvrage supprimé')
+        setStatusMessage('Ouvrage supprimé', 'success')
       }
       await refreshNetwork()
     } catch (error) {
-      setStatusMessage(`Erreur de suppression : ${(error as Error).message}`)
+      setStatusMessage(`Erreur de suppression : ${(error as Error).message}`, 'error')
     }
   }
 
@@ -237,7 +251,7 @@ export function ProjectTree({ onOpenProjectSettings, onNewVariant, onDuplicateVa
       ),
     )
     await refreshNetwork()
-    setStatusMessage('Tronçon mis à jour')
+    setStatusMessage('Tronçon mis à jour', 'success')
   }
 
   // "Supprimer" un troncon = reinitialiser sa mise en donnees (Materiau/DN/Classe) aux valeurs
@@ -248,9 +262,9 @@ export function ProjectTree({ onOpenProjectSettings, onNewVariant, onDuplicateVa
     try {
       await Promise.all(t.segment_ids.map((id) => api.resetSegment(sessionId, selectedVariantId, id)))
       await refreshNetwork()
-      setStatusMessage('Tronçon réinitialisé (données par défaut)')
+      setStatusMessage('Tronçon réinitialisé (données par défaut)', 'success')
     } catch (error) {
-      setStatusMessage(`Erreur de réinitialisation : ${(error as Error).message}`)
+      setStatusMessage(`Erreur de réinitialisation : ${(error as Error).message}`, 'error')
     }
   }
 
@@ -288,9 +302,9 @@ export function ProjectTree({ onOpenProjectSettings, onNewVariant, onDuplicateVa
       // (routers/traces.py), mais ca ne fait pas partie de ProjectStateResponse — a recharger
       // explicitement pour que la table de la variante courante l'affiche.
       await refreshNetwork()
-      setStatusMessage(`Trace importée : ${file.name} (${Math.round(job.trace.length)} m)`)
+      setStatusMessage(`Trace importée : ${file.name} (${Math.round(job.trace.length)} m)`, 'success')
     } catch (error) {
-      setStatusMessage(`Import KML/KMZ échoué : ${(error as Error).message}`)
+      setStatusMessage(`Import KML/KMZ échoué : ${(error as Error).message}`, 'error')
     } finally {
       setIsImporting(false)
       setImportProgress(null)

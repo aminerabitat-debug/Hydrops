@@ -10,7 +10,9 @@ export interface Vertex {
   pk: number
 }
 
-function haversineDistanceM(lon1: number, lat1: number, lon2: number, lat2: number): number {
+// Exportee (consigne utilisateur : outil de mesure de distance sur la carte) — meme formule que
+// celle utilisee en interne pour buildVertices, pas de duplication.
+export function haversineDistanceM(lon1: number, lat1: number, lon2: number, lat2: number): number {
   const toRad = (d: number) => (d * Math.PI) / 180
   const dPhi = toRad(lat2 - lat1)
   const dLambda = toRad(lon2 - lon1)

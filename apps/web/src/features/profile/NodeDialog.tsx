@@ -23,6 +23,7 @@ import {
   type OuvrageFieldSpec,
 } from '../../shared/ouvrageFields'
 import { listPhaseOptions } from '../../shared/phasing'
+import { useAppStore } from '../../state/store'
 import type { CreatableNodeType, Node, Project } from '../../shared/types'
 import { StationPhasingTable } from './StationPhasingTable'
 
@@ -34,6 +35,10 @@ export interface NodeSubmitPayload {
   withdrawnFlow: number
   existing: boolean
   phaseId: string | null
+  // Nouveau PK choisi via "Déplacer" (consigne utilisateur) — present seulement s'il differe du
+  // PK initial. Le calcul des tronçons voisins est invalide par le backend des ce champ est
+  // envoye (cf. PATCH .../nodes/{id}/position), l'utilisateur doit relancer "Calculer".
+  newPk?: number
 }
 
 // Types d'ouvrage geres par le tableau Genie Civil/Equipement plutot que par la simple case
@@ -137,6 +142,14 @@ export function NodeDialog({
   const [phaseId, setPhaseId] = useState(initialPhaseId ?? '')
   const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)
+  // Déplacement de l'ouvrage (consigne utilisateur, mode edition uniquement) : `newPk` reste
+  // `null` tant que l'utilisateur n'a rien choisi — le PK initial est alors envoyé tel quel (pas
+  // de PATCH position). Sélection graphique via le même mécanisme que TronconDialog.tsx (pk-picker
+  // partagé, cf. state/store.ts).
+  const [newPk, setNewPk] = useState<number | null>(null)
+  const pkPickResolver = useAppStore((s) => s.pkPickResolver)
+  const beginPkPick = useAppStore((s) => s.beginPkPick)
+  const cancelPkPick = useAppStore((s) => s.cancelPkPick)
 
   const phasingEnabled = project?.phasing_enabled ?? false
   const isStation = STATION_TYPES.includes(type)
@@ -207,6 +220,7 @@ export function NodeDialog({
         withdrawnFlow,
         existing: isStation ? false : existing,
         phaseId: phasingEnabled && !isStation ? phaseId || null : null,
+        ...(newPk != null ? { newPk } : {}),
       })
       onClose()
     } catch (e) {
@@ -214,6 +228,13 @@ export function NodeDialog({
     } finally {
       setSubmitting(false)
     }
+  }
+
+  // Bouton "…" du champ Position (consigne utilisateur : "possibilité de choisir un nouvel
+  // emplacement de manière graphique") — meme mecanisme que TronconDialog.tsx : masque cette
+  // fenetre (etat React conserve) pendant qu'un clic sur la carte/le profil/la table est attendu.
+  const handlePickPosition = () => {
+    beginPkPick((pickedPk) => setNewPk(Math.round(pickedPk)))
   }
 
   const renderField = (spec: OuvrageFieldSpec) => {
@@ -257,14 +278,16 @@ export function NodeDialog({
   }
 
   return (
-    <Modal
-      title={mode === 'create' ? `Ajouter un nœud au PK ${Math.round(pk)} m` : `Nœud au PK ${Math.round(pk)} m`}
-      onClose={onClose}
-      error={error}
-      confirmLabel={mode === 'create' ? 'Ajouter' : 'Enregistrer'}
-      onConfirm={handleConfirm}
-      confirmDisabled={submitting || !name.trim()}
-    >
+    <>
+      <div hidden={pkPickResolver != null}>
+      <Modal
+        title={mode === 'create' ? `Ajouter un nœud au PK ${Math.round(pk)} m` : `Nœud au PK ${Math.round(pk)} m`}
+        onClose={onClose}
+        error={error}
+        confirmLabel={mode === 'create' ? 'Ajouter' : 'Enregistrer'}
+        onConfirm={handleConfirm}
+        confirmDisabled={submitting || !name.trim()}
+      >
       <div className="modal-field">
         <label htmlFor="node-type">Type de nœud</label>
         <select id="node-type" value={type} onChange={(e) => handleTypeChange(e.target.value as CreatableNodeType)}>
@@ -273,6 +296,27 @@ export function NodeDialog({
           ))}
         </select>
       </div>
+      {mode === 'edit' && (
+        <div className="modal-field">
+          <label>Position (PK)</label>
+          <div className="troncon-constraint-pk-input">
+            <input type="text" readOnly value={`${Math.round(newPk ?? pk)} m${newPk != null ? ' (nouveau)' : ''}`} />
+            <button type="button" className="btn-row-icon" title="Choisir un nouvel emplacement sur la carte/le profil" onClick={handlePickPosition}>
+              …
+            </button>
+            {newPk != null && (
+              <button type="button" className="btn-row-icon" title="Annuler le déplacement" onClick={() => setNewPk(null)}>
+                ✕
+              </button>
+            )}
+          </div>
+          {newPk != null && (
+            <span className="modal-field-hint">
+              Le calcul des tronçons voisins sera réinitialisé — vous devrez relancer "Calculer".
+            </span>
+          )}
+        </div>
+      )}
       {namePrefix != null && (
         <div className="modal-field">
           <label htmlFor="node-name">Nom *</label>
@@ -407,6 +451,16 @@ export function NodeDialog({
           )}
         </>
       )}
-    </Modal>
+      </Modal>
+      </div>
+      {pkPickResolver && (
+        <div className="pk-pick-banner">
+          <span>Cliquez sur la carte, le profil graphique ou le profil Data pour choisir le nouvel emplacement…</span>
+          <button type="button" className="modal-btn modal-btn-cancel" onClick={cancelPkPick}>
+            Annuler
+          </button>
+        </div>
+      )}
+    </>
   )
 }

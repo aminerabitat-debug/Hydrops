@@ -13,7 +13,7 @@ import { PreferencesWindow } from './PreferencesWindow'
 import { ProgressBar } from './ProgressBar'
 import { ProjectDialog } from './ProjectDialog'
 import { QuickBar } from './QuickBar'
-import { Workspace, type LayoutMode } from './Workspace'
+import { Workspace } from './Workspace'
 import { ProjectTree } from '../features/project-tree/ProjectTree'
 import { api, type ProjectFormPayload } from '../shared/apiClient'
 import type { CalcRunResult, RepositionSuggestion } from '../shared/types'
@@ -21,6 +21,16 @@ import { useAppStore } from '../state/store'
 import './App.css'
 
 const HEARTBEAT_INTERVAL_MS = 60_000
+
+// Icone + classe CSS par type de message de statut (consigne utilisateur : "utiliser des icones
+// avec les messages de la barre d'état pour indiquer le type de message") — .warn/.ok existaient
+// deja (App.css) mais .ok n'etait jamais applique faute de notion de type ; .error est nouveau.
+const STATUS_MESSAGE_STYLE: Record<string, { icon: string; className: string }> = {
+  info: { icon: 'ℹ️', className: '' },
+  success: { icon: '✅', className: 'ok' },
+  warning: { icon: '⚠️', className: 'warn' },
+  error: { icon: '✕', className: 'error' },
+}
 
 type DialogState =
   | 'none'
@@ -42,9 +52,14 @@ export function App() {
   const setSelectedVariant = useAppStore((s) => s.setSelectedVariant)
   const refreshNetwork = useAppStore((s) => s.refreshNetwork)
   const statusMessage = useAppStore((s) => s.statusMessage)
+  const statusMessageType = useAppStore((s) => s.statusMessageType)
   const setStatusMessage = useAppStore((s) => s.setStatusMessage)
+  // Disposition Carte/Profil-Table/Vue combinee — vit au store (pas un useState local) pour que
+  // MapView (enfant de Workspace, jamais traverse par cette prop) puisse la lire directement sans
+  // prop-drilling (consigne utilisateur : sync zoom carte -> profil, uniquement en Vue combinee).
+  const layoutMode = useAppStore((s) => s.layoutMode)
+  const setLayoutMode = useAppStore((s) => s.setLayoutMode)
 
-  const [layoutMode, setLayoutMode] = useState<LayoutMode>('both')
   const [dialog, setDialog] = useState<DialogState>('none')
   const [backendUnreachable, setBackendUnreachable] = useState(false)
   const [pendingDeleteVariantId, setPendingDeleteVariantId] = useState<string | null>(null)
@@ -82,7 +97,7 @@ export function App() {
   }, [ensureSession])
 
   useEffect(() => {
-    refreshNetwork().catch((error) => setStatusMessage(`Erreur de chargement du réseau : ${(error as Error).message}`))
+    refreshNetwork().catch((error) => setStatusMessage(`Erreur de chargement du réseau : ${(error as Error).message}`, 'error'))
   }, [sessionId, selectedVariantId, refreshNetwork, setStatusMessage])
 
   useEffect(() => {
@@ -100,14 +115,14 @@ export function App() {
     const state = await api.newProject(sid, payload)
     setProjectState(state)
     await refreshNetwork()
-    setStatusMessage(`Projet "${state.project.name}" créé`)
+    setStatusMessage(`Projet "${state.project.name}" créé`, 'success')
   }
 
   const handleEditProject = async (payload: ProjectFormPayload) => {
     const sid = await ensureSession()
     const state = await api.patchProject(sid, payload)
     setProjectState(state)
-    setStatusMessage(`Paramètres du projet "${state.project.name}" mis à jour`)
+    setStatusMessage(`Paramètres du projet "${state.project.name}" mis à jour`, 'success')
   }
 
   const handleOpenFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -122,9 +137,9 @@ export function App() {
       // dans le fichier reouvert) — l'effet [sessionId, selectedVariantId] ne se redeclenche alors
       // pas tout seul, d'ou ce rechargement explicite des noeuds/segments du fichier reouvert.
       await refreshNetwork()
-      setStatusMessage(`Projet "${state.project.name}" ouvert depuis ${file.name}`)
+      setStatusMessage(`Projet "${state.project.name}" ouvert depuis ${file.name}`, 'success')
     } catch (error) {
-      setStatusMessage(`Erreur d'ouverture : ${(error as Error).message}`)
+      setStatusMessage(`Erreur d'ouverture : ${(error as Error).message}`, 'error')
     }
   }
 
@@ -138,9 +153,9 @@ export function App() {
       link.download = 'projet.hydrops'
       link.click()
       URL.revokeObjectURL(url)
-      setStatusMessage('Projet enregistré (.hydrops téléchargé)')
+      setStatusMessage('Projet enregistré (.hydrops téléchargé)', 'success')
     } catch (error) {
-      setStatusMessage(`Erreur d'enregistrement : ${(error as Error).message}`)
+      setStatusMessage(`Erreur d'enregistrement : ${(error as Error).message}`, 'error')
     }
   }
 
@@ -150,7 +165,7 @@ export function App() {
     const state = await api.getProject(sid)
     setProjectState(state)
     setSelectedVariant(variant.id)
-    setStatusMessage(`Variante créée : ${variant.name}`)
+    setStatusMessage(`Variante créée : ${variant.name}`, 'success')
   }
 
   const handleDuplicateVariant = async (variantId: string | null) => {
@@ -162,9 +177,9 @@ export function App() {
       setProjectState(state)
       setSelectedVariant(copy.id)
       await refreshNetwork()
-      setStatusMessage(`Variante dupliquée : ${copy.name}`)
+      setStatusMessage(`Variante dupliquée : ${copy.name}`, 'success')
     } catch (error) {
-      setStatusMessage(`Erreur de duplication : ${(error as Error).message}`)
+      setStatusMessage(`Erreur de duplication : ${(error as Error).message}`, 'error')
     }
   }
 
@@ -181,7 +196,7 @@ export function App() {
     const state = await api.getProject(sid)
     setProjectState(state)
     await refreshNetwork()
-    setStatusMessage('Variante supprimée')
+    setStatusMessage('Variante supprimée', 'success')
     setPendingDeleteVariantId(null)
   }
 
@@ -207,10 +222,11 @@ export function App() {
         result.alerts.length > 0
           ? `Calcul terminé${scopeLabel} avec ${result.alerts.length} alerte(s)`
           : `Calcul terminé${scopeLabel} sans alerte`,
+        result.alerts.length > 0 ? 'warning' : 'success',
       )
       return result
     } catch (error) {
-      setStatusMessage(`Calcul impossible : ${(error as Error).message}`)
+      setStatusMessage(`Calcul impossible : ${(error as Error).message}`, 'error')
       return null
     } finally {
       setCalculating(false)
@@ -231,6 +247,7 @@ export function App() {
         setStatusMessage(
           `${suggestion.node_label} déplacé — sa cote (saisie en valeur absolue) n'a pas été ajustée automatiquement : ` +
             "vérifiez-la dans \"Modifier le tronçon\".",
+          'warning',
         )
       }
       await runCalcul(true)
@@ -239,7 +256,7 @@ export function App() {
       // d'autres suggestions (elles seront proposees au prochain calcul, pas enchainees ici).
       setCalcResult(null)
     } catch (error) {
-      setStatusMessage(`Déplacement impossible : ${(error as Error).message}`)
+      setStatusMessage(`Déplacement impossible : ${(error as Error).message}`, 'error')
     }
   }
 
@@ -282,7 +299,12 @@ export function App() {
           </span>
         )}
         {calculating && <ProgressBar />}
-        <span className="status-bar-text">{statusMessage}</span>
+        <span className={`status-bar-text ${STATUS_MESSAGE_STYLE[statusMessageType].className}`}>
+          <span className="status-bar-icon" aria-hidden="true">
+            {STATUS_MESSAGE_STYLE[statusMessageType].icon}
+          </span>
+          {statusMessage}
+        </span>
       </footer>
 
       {dialog === 'newProject' && (
@@ -306,7 +328,7 @@ export function App() {
         <PreferencesWindow
           sessionId={sessionId}
           onClose={() => setDialog('none')}
-          onSaved={() => setStatusMessage('Préférences enregistrées')}
+          onSaved={() => setStatusMessage('Préférences enregistrées', 'success')}
         />
       )}
       {calcResult && (

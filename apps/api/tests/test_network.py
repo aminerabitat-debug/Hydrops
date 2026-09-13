@@ -286,6 +286,32 @@ def test_add_node_with_existing_and_phase(client, session_id, project_state, sam
     assert node["phase_id"] == "p2"
 
 
+def test_add_node_splitting_forced_segment_resets_forced_on_both_halves(
+    client, session_id, project_state, sample_kml_bytes, import_trace
+):
+    # Un troncon scinde par l'ajout d'un ouvrage n'a jamais ete valide independamment sur ses
+    # deux moities — l'arborescence ne doit pas les afficher "vertes" (tronconIsForced cote
+    # frontend) tant que l'utilisateur n'a pas force/calcule chacune a nouveau.
+    variant_id, trace = _import_sample(client, session_id, project_state, sample_kml_bytes, import_trace)
+    segments = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments").json()
+    segment_id = segments[0]["id"]
+    client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/segments/{segment_id}",
+        json={"forced_material": "PEHD", "forced_dn": 110},
+    )
+
+    response = client.post(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes",
+        json={"trace_id": trace["id"], "pk": trace["length"] / 2, "type": "storage_reservoir", "name": "Res1"},
+    )
+    assert response.status_code == 201, response.text
+
+    new_segments = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments").json()
+    assert len(new_segments) == 2
+    for seg in new_segments:
+        assert seg["forced"] is False
+
+
 def test_patch_segment_rejects_unknown_catalog_combination(client, session_id, project_state, sample_kml_bytes, import_trace):
     variant_id, trace = _import_sample(client, session_id, project_state, sample_kml_bytes, import_trace)
     segments = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments").json()

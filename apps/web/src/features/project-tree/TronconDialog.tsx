@@ -131,11 +131,17 @@ export function TronconDialog({
   onSubmit,
 }: TronconDialogProps) {
   const [hydraulics, setHydraulics] = useState<TronconHydraulicValues>(initialHydraulics)
+  // Valeurs par defaut +3 m / +1 m (consigne utilisateur) pour un troncon GRAVITAIRE qui n'a
+  // encore aucune cote hydrostatique enregistree — un troncon deja renseigne (absolu ou "+N")
+  // garde sa vraie valeur, ce defaut ne s'applique qu'a la creation.
+  const isGravitaireForDefaults = regime !== 'refoulement'
   const [rawUpstreamMax, setRawUpstreamMax] = useState(
-    formatInitialLevel(initialHydraulics.upstreamWaterLevelMax, initialHydraulics.upstreamWaterLevelMaxOffset),
+    formatInitialLevel(initialHydraulics.upstreamWaterLevelMax, initialHydraulics.upstreamWaterLevelMaxOffset) ||
+      (isGravitaireForDefaults ? '+3' : ''),
   )
   const [rawUpstreamMin, setRawUpstreamMin] = useState(
-    formatInitialLevel(initialHydraulics.upstreamWaterLevelMin, initialHydraulics.upstreamWaterLevelMinOffset),
+    formatInitialLevel(initialHydraulics.upstreamWaterLevelMin, initialHydraulics.upstreamWaterLevelMinOffset) ||
+      (isGravitaireForDefaults ? '+1' : ''),
   )
   const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)

@@ -417,6 +417,10 @@ def add_node(session_id: str, variant_id: str, payload: NewNodeRequest, request:
     )
     package.nodes[str(node.id)] = node
 
+    # forced=False (jamais copie de enclosing.forced) : les deux troncons issus de la scission
+    # n'ont jamais ete valides independamment (forced_material/forced_dn, eux, repartent aussi a
+    # None par defaut ci-dessous) — sinon l'arborescence les affichait "verts"/valides
+    # (tronconIsForced) alors qu'aucun calcul n'a encore ete relance depuis la scission.
     upstream_seg = Segment(
         id=uuid.uuid4(),
         upstream_node_id=enclosing.upstream_node_id,
@@ -431,7 +435,7 @@ def add_node(session_id: str, variant_id: str, payload: NewNodeRequest, request:
         pressure_class=enclosing.pressure_class,
         roughness=enclosing.roughness,
         flow=enclosing.flow,
-        forced=enclosing.forced,
+        forced=False,
     )
     downstream_seg = Segment(
         id=uuid.uuid4(),
@@ -447,7 +451,7 @@ def add_node(session_id: str, variant_id: str, payload: NewNodeRequest, request:
         pressure_class=enclosing.pressure_class,
         roughness=enclosing.roughness,
         flow=enclosing.flow,
-        forced=enclosing.forced,
+        forced=False,
     )
     del package.segments[str(enclosing.id)]
     package.segments[str(upstream_seg.id)] = upstream_seg

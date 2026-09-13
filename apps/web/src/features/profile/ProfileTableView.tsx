@@ -83,8 +83,16 @@ export function ProfileTableView() {
   const setShowCrossings = useAppStore((s) => s.setShowCrossings)
   const selectedTraceId = useAppStore((s) => s.selection.selectedTraceId)
   const tableScope = useAppStore((s) => s.selection.tableScope)
+  const profileFocusRequest = useAppStore((s) => s.profileFocusRequest)
   const trace = traces.find((t) => t.id === selectedTraceId) ?? traces[0]
   const profile = trace?.elevation_profile
+
+  // Synchronisation zoom carte -> profil (consigne utilisateur, cf. MapView.tsx qui emet cette
+  // demande en Vue combinée) — reutilise le meme setter que le zoom manuel a la molette.
+  useEffect(() => {
+    if (!profileFocusRequest) return
+    setZoomRange({ min: profileFocusRequest.pkStart, max: profileFocusRequest.pkEnd })
+  }, [profileFocusRequest])
 
   // Changer de trace ou de troncon selectionne (arborescence) invalide un zoom manuel en cours —
   // la plage n'a plus forcement de sens sur le nouveau profil affiche. Idem pour une selection de
@@ -132,7 +140,7 @@ export function ProfileTableView() {
       })
     }
     await refreshNetwork()
-    setStatusMessage(`Nœud ajouté au PK ${Math.round(pendingAdd.pk)} m`)
+    setStatusMessage(`Nœud ajouté au PK ${Math.round(pendingAdd.pk)} m`, 'success')
   }
 
   const handlePatchNode = async (payload: NodeSubmitPayload) => {
@@ -146,8 +154,22 @@ export function ProfileTableView() {
       existing: payload.existing,
       phase_id: payload.phaseId ?? '',
     })
+    // Deplacement (consigne utilisateur) : endpoint dedie, deja invalidant le calcul des tronçons
+    // voisins cote backend (PATCH .../position) — l'utilisateur doit relancer "Calculer".
+    if (payload.newPk != null) {
+      const moveResult = await api.patchNodePosition(sessionId, selectedVariantId, editingNode.id, payload.newPk)
+      if (moveResult.needs_level_confirmation) {
+        setStatusMessage(
+          "Ouvrage déplacé — sa cote (saisie en valeur absolue) n'a pas été ajustée automatiquement : " +
+            "vérifiez-la dans \"Modifier le tronçon\".",
+          'warning',
+        )
+        await refreshNetwork()
+        return
+      }
+    }
     await refreshNetwork()
-    setStatusMessage('Nœud mis à jour')
+    setStatusMessage('Nœud mis à jour', 'success')
   }
 
   // Une extremite structurelle de trace (PK 0 ou longueur) ne peut pas etre supprimee — cf.
@@ -162,10 +184,10 @@ export function ProfileTableView() {
     if (!sessionId || !selectedVariantId) return
     if (isStructuralEndpoint(node)) {
       await api.patchNode(sessionId, selectedVariantId, node.id, { type: 'junction', name: '' })
-      setStatusMessage('Ouvrage retiré (extrémité redevenue non affectée)')
+      setStatusMessage('Ouvrage retiré (extrémité redevenue non affectée)', 'success')
     } else {
       await api.deleteNode(sessionId, selectedVariantId, node.id)
-      setStatusMessage('Nœud supprimé')
+      setStatusMessage('Nœud supprimé', 'success')
     }
     await refreshNetwork()
   }
@@ -197,6 +219,7 @@ export function ProfileTableView() {
     await refreshNetwork()
     setStatusMessage(
       result.alerts.length > 0 ? `Calcul terminé avec ${result.alerts.length} alerte(s)` : 'Calcul terminé sans alerte',
+      result.alerts.length > 0 ? 'warning' : 'success',
     )
   }
 
@@ -219,7 +242,18 @@ export function ProfileTableView() {
       if (selectedSpans.length < 2) return
       const segmentId = selectedSpans[0].segmentId
       if (selectedSpans.some((s) => s.segmentId !== segmentId)) {
-        setStatusMessage("Sélectionnez des bandes du même tronçon pour l'homogénéisation.")
+        setStatusMessage("Sélectionnez des bandes du même tronçon pour l'homogénéisation.", 'error')
+        return
+      }
+      // Consigne utilisateur : l'homogénéisation ne généralise QUE la classe de pression — une
+      // sélection dont le matériau ou le DN diffère d'une bande à l'autre serait incohérente
+      // (quel matériau/DN garder ?), donc rejetée avant tout appel API.
+      const { material, dn } = selectedSpans[0]
+      if (selectedSpans.some((s) => s.material !== material || s.dn !== dn)) {
+        setStatusMessage(
+          "Homogénéisation impossible : la sélection contient des matériaux ou des DN différents (seule la classe de pression peut être généralisée).",
+          'error',
+        )
         return
       }
       const segment = segments.find((s) => s.id === segmentId)
@@ -236,7 +270,7 @@ export function ProfileTableView() {
       ])
       await runScopedCalcul()
     } catch (error) {
-      setStatusMessage(`Homogénéisation impossible : ${(error as Error).message}`)
+      setStatusMessage(`Homogénéisation impossible : ${(error as Error).message}`, 'error')
     } finally {
       setHomogenizing(false)
     }

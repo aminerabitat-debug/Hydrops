@@ -87,6 +87,21 @@ export function crossingKindLabel(kind: CrossingKind): string {
   }[kind]
 }
 
+// Longueur d'une traversee de ZONE (urbain/forestier, consigne utilisateur : "colonne Longueur de
+// la traversée") — n'a de sens QUE pour une entree de zone : le backend modelise une traversee de
+// zone comme deux Crossing distincts de meme `kind`, "Entrée zone ..."/"Sortie zone ..." (jamais
+// une paire dediee, cf. hydrops_api.services.crossings:_compute_zone_crossings), donc calculee ici
+// a l'affichage plutot que stockee. `null` pour une traversee ponctuelle (route/voie ferree/cours
+// d'eau/bâtiment — un point n'a pas de "longueur") et pour une ligne "Sortie" elle-meme (affichee
+// une seule fois, sur son "Entrée" correspondante, pour eviter la redondance).
+export function crossingLength(crossing: Pick<Crossing, 'kind' | 'label' | 'pk'>, all: Crossing[]): number | null {
+  if (!isZoneKind(crossing.kind) || !crossing.label?.startsWith('Entrée')) return null
+  const exit = all
+    .filter((c) => c.kind === crossing.kind && c.label?.startsWith('Sortie') && c.pk > crossing.pk)
+    .sort((a, b) => a.pk - b.pk)[0]
+  return exit ? exit.pk - crossing.pk : null
+}
+
 // Texte complet pour une traversee donnee — utilise le libelle deja lisible du backend pour une
 // entree/sortie de zone (ex. "Entrée zone urbaine", cf. crossings.py:_zone_crossing) tel quel, et
 // combine terme + nom/sous-categorie pour une traversee ponctuelle.

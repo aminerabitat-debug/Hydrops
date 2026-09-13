@@ -5,6 +5,7 @@
 
 import { create } from 'zustand'
 
+import type { LayoutMode } from '../app/Workspace'
 import { api } from '../shared/apiClient'
 import type { Node, Project, ProjectStateResponse, Segment, TraceGeometry, TronconGroup, Variant } from '../shared/types'
 
@@ -17,6 +18,10 @@ import type { Node, Project, ProjectStateResponse, Segment, TraceGeometry, Tronc
 export type TableScope =
   | { kind: 'trace' }
   | { kind: 'troncon'; pkStart: number; pkEnd: number; label: string; traceId: string; startNodeId: string }
+
+// Type du message de statut (consigne utilisateur : icones par type dans la barre d'etat) —
+// 'info' est le defaut implicite de tout appel existant qui ne precise rien.
+export type StatusMessageType = 'info' | 'success' | 'warning' | 'error'
 
 interface SelectionState {
   hoveredPk: number | null
@@ -36,6 +41,16 @@ export type MapFocusTarget =
   | { kind: 'node'; nodeId: string }
   | { kind: 'troncon'; traceId: string; pkStart: number; pkEnd: number }
 
+// Demande de recadrage PROFIL/TABLE emise par la carte (consigne utilisateur : "en Vue combinée,
+// zoomer sur la carte doit centrer le profil/la table sur les piquets au centre de la carte") —
+// direction inverse de MapFocusRequest ci-dessus, meme principe de `nonce` pour re-declencher
+// l'effet meme si la MEME plage est redemandee (ex. deux zooms qui se terminent sur la meme vue).
+export interface ProfileFocusRequest {
+  pkStart: number
+  pkEnd: number
+  nonce: number
+}
+
 interface MapFocusRequest {
   target: MapFocusTarget
   nonce: number
@@ -51,7 +66,18 @@ interface AppState {
   troncons: TronconGroup[]
   selection: SelectionState
   statusMessage: string
+  // Type du dernier message de statut (consigne utilisateur : "utiliser des icones... pour
+  // indiquer le type de message") — pilote l'icone/couleur dans la barre d'etat (App.tsx), pas de
+  // logique metier associee. 'info' par defaut : la grande majorite des appels existants sont des
+  // statuts neutres, jamais rétro-annotes un par un.
+  statusMessageType: StatusMessageType
   mapFocusRequest: MapFocusRequest | null
+  profileFocusRequest: ProfileFocusRequest | null
+  // Disposition Carte/Profil-Table/Vue combinee — au store (pas local a App.tsx) pour que MapView
+  // (enfant de Workspace, jamais traverse par cette prop) sache si on est en Vue combinee sans
+  // prop-drilling a travers Workspace (consigne utilisateur : sync zoom carte -> profil, uniquement
+  // en Vue combinee).
+  layoutMode: LayoutMode
   // Affichage/masquage des traversees (consigne utilisateur) — partage entre le profil et la
   // carte, d'ou sa place ici plutot que localement dans ProfileTableView.
   showCrossings: boolean
@@ -76,8 +102,10 @@ interface AppState {
   updateTrace: (trace: TraceGeometry) => void
   setNetwork: (nodes: Node[], segments: Segment[], troncons: TronconGroup[]) => void
   refreshNetwork: () => Promise<void>
-  setStatusMessage: (message: string) => void
+  setStatusMessage: (message: string, type?: StatusMessageType) => void
   requestMapFocus: (target: MapFocusTarget) => void
+  requestProfileFocus: (range: { pkStart: number; pkEnd: number }) => void
+  setLayoutMode: (mode: LayoutMode) => void
   setShowCrossings: (show: boolean) => void
   beginPkPick: (resolve: (pk: number) => void) => void
   resolvePkPick: (pk: number) => void
@@ -102,7 +130,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   troncons: [],
   selection: DEFAULT_SELECTION,
   statusMessage: 'Pret',
+  statusMessageType: 'info',
   mapFocusRequest: null,
+  profileFocusRequest: null,
+  layoutMode: 'both',
   showCrossings: true,
   pkPickResolver: null,
 
@@ -177,9 +208,14 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ nodes, segments, troncons })
   },
 
-  setStatusMessage: (message) => set({ statusMessage: message }),
+  setStatusMessage: (message, type = 'info') => set({ statusMessage: message, statusMessageType: type }),
 
   requestMapFocus: (target) => set((s) => ({ mapFocusRequest: { target, nonce: (s.mapFocusRequest?.nonce ?? 0) + 1 } })),
+
+  requestProfileFocus: (range) =>
+    set((s) => ({ profileFocusRequest: { ...range, nonce: (s.profileFocusRequest?.nonce ?? 0) + 1 } })),
+
+  setLayoutMode: (mode) => set({ layoutMode: mode }),
 
   setShowCrossings: (show) => set({ showCrossings: show }),
 

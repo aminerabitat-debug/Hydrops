@@ -37,19 +37,18 @@ export const CURVE_COLORS = {
   // sous-categorie, cf. shared/crossingColors.ts) : neutre, ne represente aucune nature en particulier.
   crossing: '#eab308',
 } as const
-// Petite palette fixe pour distinguer les materiaux dans la bande de caracteristiques ("guitare",
-// consigne utilisateur) — couleurs volontairement sourdes pour ne pas rivaliser avec les courbes.
-// DEUX teintes par materiau (consigne utilisateur : "au moins 2 couleurs a interchanger pour voir
-// les nuances") — alternees par bande consecutive (index pair/impair), pas par materiau seul : deux
-// paliers de DN successifs du MEME materiau (telescopage) restaient sinon visuellement indistincts.
-const MATERIAL_BAND_COLORS: Record<string, [string, string]> = {
-  PVC: ['#2d4a63', '#3e6486'],
-  PEHD: ['#2d5a4a', '#3e7a64'],
-  FD: ['#5a3d2d', '#7a533e'],
-  PRV: ['#4a2d5a', '#64407a'],
-  ACIER: ['#5a4a2d', '#7a653e'],
-}
-const DEFAULT_MATERIAL_BAND_COLORS: [string, string] = ['#33415c', '#455a7c']
+// Palette de la bande de caracteristiques ("guitare", consigne utilisateur : "une couleur par DN,
+// nuancer... pour indiquer le changement de PN, hachurage leger pour distinguer les changements de
+// materiau"). Calculee sur les DN/classes REELLEMENT presents dans ce profil (pas une palette
+// globale figee — le DN va de 20 a 2500mm selon le materiau) : une teinte par DN distinct
+// (repartition egale autour du cercle chromatique, separation maximale garantie quel que soit le
+// nombre de DN affiches), nuancee en luminosite selon le rang de la classe de pression (PN/K/PMS,
+// via le meme `pms` — mCE — deja utilise pour choisir la classe la plus elevee a l'homogeneisation)
+// au sein de ce DN. Saturation modere fixe pour rester "sourd" et ne pas rivaliser avec les
+// courbes.
+const BAND_SATURATION_PCT = 40
+const BAND_LIGHTNESS_MIN_PCT = 32
+const BAND_LIGHTNESS_MAX_PCT = 55
 // Largeur estimee du panneau d'info (bouton i, consigne utilisateur) — au-dela de cette distance
 // du bord droit, le curseur le ferait sortir de l'ecran : on le rebascule a gauche du curseur, et
 // il revient a droite des que la place suffit de nouveau (recalcule a chaque survol, jamais figé).
@@ -337,6 +336,33 @@ export function ProfileChart({
     }
     return spans
   }, [segments, traceNodes, pipeCatalog])
+
+  // Fonction de couleur pour une bande (cf. commentaire de palette ci-dessus) — recalculee des que
+  // les DN/classes reellement affiches changent, jamais une palette globale.
+  const bandColor = useMemo(() => {
+    const distinctDns = [...new Set(pipeSpans.map((s) => s.dn))].sort((a, b) => a - b)
+    const hueForDn = new Map<number, number>()
+    distinctDns.forEach((dn, i) => hueForDn.set(dn, (360 / distinctDns.length) * i))
+
+    const lightnessForDnClass = new Map<string, number>()
+    for (const dn of distinctDns) {
+      const classesForDn = [...new Map(pipeSpans.filter((s) => s.dn === dn).map((s) => [s.pressureClass, s.pms ?? 0])).entries()]
+        .sort((a, b) => a[1] - b[1])
+      classesForDn.forEach(([pressureClass], rank) => {
+        const lightness =
+          classesForDn.length > 1
+            ? BAND_LIGHTNESS_MIN_PCT + ((BAND_LIGHTNESS_MAX_PCT - BAND_LIGHTNESS_MIN_PCT) * rank) / (classesForDn.length - 1)
+            : (BAND_LIGHTNESS_MIN_PCT + BAND_LIGHTNESS_MAX_PCT) / 2
+        lightnessForDnClass.set(`${dn}|${pressureClass}`, lightness)
+      })
+    }
+
+    return (span: SelectedPipeSpan) => {
+      const hue = hueForDn.get(span.dn) ?? 210
+      const lightness = lightnessForDnClass.get(`${span.dn}|${span.pressureClass}`) ?? (BAND_LIGHTNESS_MIN_PCT + BAND_LIGHTNESS_MAX_PCT) / 2
+      return `hsl(${hue}, ${BAND_SATURATION_PCT}%, ${lightness}%)`
+    }
+  }, [pipeSpans])
 
   // Plages homogeneisees (consigne utilisateur : petit trait sous la/les bande(s) concernee(s) tant
   // que la contrainte source="homogenization" existe) — deduites directement des contraintes du
@@ -880,16 +906,18 @@ export function ProfileChart({
             const width = guitarXScale(visibleEnd) - left
             const lengthKm = (span.pkEnd - span.pkStart) / 1000
             const label = `${span.material} DN${span.dn} ${span.pressureClass} · L=${lengthKm.toFixed(1)} km`
-            const shades = MATERIAL_BAND_COLORS[span.material] ?? DEFAULT_MATERIAL_BAND_COLORS
             const isSelected = selectedSpans.some((s) => s.pkStart === span.pkStart && s.segmentId === span.segmentId)
             const isHomogenized = homogenizedRanges.some(
               (r) => span.pkStart >= r.pkStart - 1e-6 && span.pkEnd <= r.pkEnd + 1e-6,
             )
+            // Hachurage (consigne utilisateur) : jamais sur la premiere bande, seulement quand le
+            // materiau change par rapport a la bande precedente (pipeSpans est trie par PK).
+            const isNewMaterial = index > 0 && pipeSpans[index - 1].material !== span.material
             return (
               <div
                 key={span.pkStart}
-                className={`profile-guitar-segment ${isSelected ? 'selected' : ''} ${isHomogenized ? 'homogenized' : ''}`}
-                style={{ left, width, background: shades[index % 2] }}
+                className={`profile-guitar-segment ${isSelected ? 'selected' : ''} ${isHomogenized ? 'homogenized' : ''} ${isNewMaterial ? 'material-hatched' : ''}`}
+                style={{ left, width, background: bandColor(span) }}
                 title={label}
                 onClick={(event) => handleGuitarSegmentClick(index, event)}
               >

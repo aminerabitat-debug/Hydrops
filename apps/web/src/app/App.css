@@ -699,15 +699,46 @@ body,
   top: 78px;
 }
 
+.map-measure-toggle {
+  top: 112px;
+}
+
 .map-progress {
   position: absolute;
-  top: 112px;
+  top: 146px;
   left: 10px;
   z-index: 10;
   background: rgba(12, 21, 36, 0.85);
   border: 1px solid rgba(255, 255, 255, 0.18);
   border-radius: 6px;
   padding: 4px 8px;
+}
+
+/* Overlay de la mesure de distance (consigne utilisateur) — meme habillage que .map-progress,
+   juste a cote du bouton bascule "regle". */
+.map-measure-info {
+  position: absolute;
+  top: 112px;
+  left: 44px;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(12, 21, 36, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 12px;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.map-measure-marker {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #eab308;
+  border: 1.5px solid #0c1524;
 }
 
 .map-hover-tooltip,
@@ -770,6 +801,18 @@ body,
   bottom: 2px;
   height: 2px;
   background: var(--accent-2, #7bd389);
+}
+
+/* Hachurage leger (consigne utilisateur : "des qu'un nouveau matériau est introduit") — ::before
+   peint avant le texte (contenu de l'element) dans le meme contexte d'empilement, donc reste
+   dessous, sans gener la lecture. Jamais sur la 1ere bande (cf. ProfileChart.tsx:isNewMaterial). */
+.profile-guitar-segment.material-hatched::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image: radial-gradient(circle, rgba(255, 255, 255, 0.35) 1px, transparent 1.5px);
+  background-size: 6px 6px;
+  pointer-events: none;
 }
 
 .map-node-marker {
@@ -1123,6 +1166,14 @@ body,
 
 .status-bar-text.ok {
   color: var(--accent-2);
+}
+
+.status-bar-text.error {
+  color: var(--danger);
+}
+
+.status-bar-icon {
+  margin-right: 4px;
 }
 
 /* ---- Modales ---- */

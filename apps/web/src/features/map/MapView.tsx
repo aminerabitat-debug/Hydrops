@@ -11,7 +11,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { ProgressBar } from '../../app/ProgressBar'
 import { api } from '../../shared/apiClient'
 import { crossingColor, crossingDisplayText, crossingZoneFillColor, isZoneKind } from '../../shared/crossingColors'
-import { buildVertices, coordinatesForPkRange, interpolateLonLatAtPk, nearestPkForPoint } from '../../shared/geo'
+import { buildVertices, coordinatesForPkRange, haversineDistanceM, interpolateLonLatAtPk, nearestPkForPoint } from '../../shared/geo'
 import { fetchApproximateLocationFromIp } from '../../shared/ipGeolocation'
 import { isPlaceholderNode, nodeColor, nodeDisplayLabel, nodeInitials } from '../../shared/nodeLabels'
 import { useAppStore } from '../../state/store'
@@ -83,6 +83,12 @@ export function MapView() {
     | { mode: 'edit'; traceId: string; crossing: Crossing }
     | null
   >(null)
+  // Mesure de distance (consigne utilisateur) — meme paradigme que les autres modes ci-dessus :
+  // bascule + clic sur la carte (n'importe ou, pas restreint a une trace). `measurePoints` en
+  // WGS84 [lon, lat], un segment de ligne temporaire relie les points cliques dans l'ordre.
+  const [measureMode, setMeasureMode] = useState(false)
+  const [measurePoints, setMeasurePoints] = useState<[number, number][]>([])
+  const measureMarkersRef = useRef<maplibregl.Marker[]>([])
 
   const sessionId = useAppStore((s) => s.sessionId)
   const traces = useAppStore((s) => s.traces)
@@ -97,6 +103,8 @@ export function MapView() {
   const setStatusMessage = useAppStore((s) => s.setStatusMessage)
   const pkPickResolver = useAppStore((s) => s.pkPickResolver)
   const resolvePkPick = useAppStore((s) => s.resolvePkPick)
+  const layoutMode = useAppStore((s) => s.layoutMode)
+  const requestProfileFocus = useAppStore((s) => s.requestProfileFocus)
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return
@@ -403,9 +411,9 @@ export function MapView() {
       updateTrace(updated)
       setShowCrossings(true)
       const count = updated.crossings?.length ?? 0
-      setStatusMessage(count > 0 ? `${count} traversée(s) détectée(s)` : 'Aucune traversée détectée')
+      setStatusMessage(count > 0 ? `${count} traversée(s) détectée(s)` : 'Aucune traversée détectée', 'success')
     } catch (error) {
-      setStatusMessage(`Détection des traversées échouée : ${(error as Error).message}`)
+      setStatusMessage(`Détection des traversées échouée : ${(error as Error).message}`, 'error')
     } finally {
       setDetectingCrossings(false)
     }
@@ -464,6 +472,120 @@ export function MapView() {
       map.off('click', 'traces-line', handleClick)
     }
   }, [pkPickResolver, hoveredTrace, hoveredTraceVertices, resolvePkPick])
+
+  // Mesure de distance (consigne utilisateur) : en mode actif, chaque clic sur la carte (n'importe
+  // ou, pas restreint a une couche) ajoute un point — pas de couche cible comme addCrossingMode/
+  // pkPickResolver ci-dessus, une mesure n'est pas liee a une trace.
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map || !measureMode) return
+    const handleClick = (event: maplibregl.MapMouseEvent) => {
+      setMeasurePoints((pts) => [...pts, [event.lngLat.lng, event.lngLat.lat]])
+    }
+    map.on('click', handleClick)
+    return () => {
+      map.off('click', handleClick)
+    }
+  }, [measureMode])
+
+  // Distance cumulee (consigne utilisateur) — meme formule haversine que le reste de l'app
+  // (shared/geo.ts), sommee entre points consecutifs cliques.
+  const measureTotalDistanceM = useMemo(() => {
+    let total = 0
+    for (let i = 1; i < measurePoints.length; i++) {
+      const [lon1, lat1] = measurePoints[i - 1]
+      const [lon2, lat2] = measurePoints[i]
+      total += haversineDistanceM(lon1, lat1, lon2, lat2)
+    }
+    return total
+  }, [measurePoints])
+
+  // Ligne temporaire reliant les points de mesure (meme patron add-source-ou-setData que le halo
+  // de zone de traversee ci-dessous) + marqueurs a chaque point clique.
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map) return
+    const applyMeasureLine = () => {
+      if (!map.isStyleLoaded()) return
+      const data: GeoJSON.FeatureCollection = {
+        type: 'FeatureCollection',
+        features:
+          measurePoints.length >= 2
+            ? [{ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: measurePoints } }]
+            : [],
+      }
+      const source = map.getSource('measure-line') as maplibregl.GeoJSONSource | undefined
+      if (source) {
+        source.setData(data)
+      } else {
+        map.addSource('measure-line', { type: 'geojson', data })
+        map.addLayer({
+          id: 'measure-line-layer',
+          type: 'line',
+          source: 'measure-line',
+          layout: { 'line-cap': 'round', 'line-join': 'round' },
+          paint: { 'line-color': '#eab308', 'line-width': 2, 'line-dasharray': [2, 2] },
+        })
+      }
+    }
+    if (map.isStyleLoaded()) applyMeasureLine()
+    else map.once('load', applyMeasureLine)
+    map.on('styledata', applyMeasureLine)
+    return () => {
+      map.off('styledata', applyMeasureLine)
+    }
+  }, [measurePoints])
+
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map) return
+    measureMarkersRef.current.forEach((m) => m.remove())
+    measureMarkersRef.current = measurePoints.map(([lon, lat]) => {
+      const el = document.createElement('div')
+      el.className = 'map-measure-marker'
+      return new maplibregl.Marker({ element: el }).setLngLat([lon, lat]).addTo(map)
+    })
+    return () => {
+      measureMarkersRef.current.forEach((m) => m.remove())
+      measureMarkersRef.current = []
+    }
+  }, [measurePoints])
+
+  const handleToggleMeasure = () => {
+    setMeasureMode((v) => !v)
+    setMeasurePoints([])
+  }
+
+  const formatMeasureDistance = (meters: number): string =>
+    meters >= 1000 ? `${(meters / 1000).toFixed(2)} km` : `${Math.round(meters)} m`
+
+  // Synchronisation zoom carte -> profil/table (consigne utilisateur : "en Vue combinée, quand un
+  // tracé est sélectionné, zoomer sur la carte doit centrer le profil/la table sur les piquets au
+  // centre de la carte") — direction inverse de mapFocusRequest, uniquement en Vue combinee et avec
+  // un tracé explicitement selectionne (pas de repli sur le premier tracé comme hoveredTrace
+  // ci-dessus : ce n'est PAS le meme besoin — ici on ne veut agir que sur une selection explicite).
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map || layoutMode !== 'both' || !selectedTraceId) return
+    const trace = traces.find((t) => t.id === selectedTraceId)
+    if (!trace) return
+    const vertices = buildVertices(trace.geometry.coordinates as [number, number][])
+    const handleMoveEnd = () => {
+      const bounds = map.getBounds()
+      const west = bounds.getWest()
+      const east = bounds.getEast()
+      const south = bounds.getSouth()
+      const north = bounds.getNorth()
+      const visible = vertices.filter((v) => v.lon >= west && v.lon <= east && v.lat >= south && v.lat <= north)
+      if (visible.length < 2) return
+      const pks = visible.map((v) => v.pk)
+      requestProfileFocus({ pkStart: Math.min(...pks), pkEnd: Math.max(...pks) })
+    }
+    map.on('moveend', handleMoveEnd)
+    return () => {
+      map.off('moveend', handleMoveEnd)
+    }
+  }, [layoutMode, selectedTraceId, traces, requestProfileFocus])
 
   // Halo le long du trace pour une traversee de ZONE (urbain/forestier, consigne utilisateur :
   // "une sorte de shadow autour du tracé dans cette zone") — un sous-segment de geometrie par paire
@@ -530,14 +652,14 @@ export function MapView() {
         : await api.updateCrossing(sessionId, crossingDialog.traceId, crossingDialog.crossing.id, payload)
     updateTrace(updated)
     setShowCrossings(true)
-    setStatusMessage(crossingDialog.mode === 'create' ? 'Traversée ajoutée' : 'Traversée modifiée')
+    setStatusMessage(crossingDialog.mode === 'create' ? 'Traversée ajoutée' : 'Traversée modifiée', 'success')
   }
 
   const handleCrossingDelete = async () => {
     if (!sessionId || !crossingDialog || crossingDialog.mode !== 'edit') return
     const updated = await api.deleteCrossing(sessionId, crossingDialog.traceId, crossingDialog.crossing.id)
     updateTrace(updated)
-    setStatusMessage('Traversée supprimée')
+    setStatusMessage('Traversée supprimée', 'success')
   }
 
   return (
@@ -578,6 +700,25 @@ export function MapView() {
       >
         📍
       </button>
+      <button
+        type="button"
+        className={`map-info-toggle map-measure-toggle ${measureMode ? 'active' : ''}`}
+        onClick={handleToggleMeasure}
+        title="Mesurer une distance (cliquer plusieurs points sur la carte)"
+        aria-label="Mesurer une distance"
+      >
+        📏
+      </button>
+      {measureMode && (
+        <div className="map-measure-info">
+          <span>Distance : {measurePoints.length >= 2 ? formatMeasureDistance(measureTotalDistanceM) : '—'}</span>
+          {measurePoints.length > 0 && (
+            <button type="button" className="btn-row-icon" title="Effacer les points" onClick={() => setMeasurePoints([])}>
+              ✕
+            </button>
+          )}
+        </div>
+      )}
       {detectingCrossings && (
         <div className="map-progress">
           <ProgressBar label="Détection des traversées…" />

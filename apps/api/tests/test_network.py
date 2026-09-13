@@ -267,6 +267,25 @@ def test_add_node_with_data_and_flows(client, session_id, project_state, sample_
     assert node["data"] == {"installation_type": "Submersible"}
 
 
+def test_add_node_with_existing_and_phase(client, session_id, project_state, sample_kml_bytes, import_trace):
+    variant_id, trace = _import_sample(client, session_id, project_state, sample_kml_bytes, import_trace)
+    response = client.post(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes",
+        json={
+            "trace_id": trace["id"],
+            "pk": 20,
+            "type": "storage_reservoir",
+            "name": "Res1",
+            "existing": True,
+            "phase_id": "p2",
+        },
+    )
+    assert response.status_code == 201, response.text
+    node = response.json()
+    assert node["existing"] is True
+    assert node["phase_id"] == "p2"
+
+
 def test_patch_segment_rejects_unknown_catalog_combination(client, session_id, project_state, sample_kml_bytes, import_trace):
     variant_id, trace = _import_sample(client, session_id, project_state, sample_kml_bytes, import_trace)
     segments = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments").json()
@@ -740,3 +759,40 @@ def test_reset_segment_clears_constraints(client, session_id, project_state, sam
     response = client.post(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments/{segment_id}/reset")
     assert response.status_code == 200, response.text
     assert response.json().get("constraints", []) == []
+
+
+def test_patch_node_sets_existing_and_phase(client, session_id, project_state, sample_kml_bytes, import_trace):
+    variant_id, trace = _import_sample(client, session_id, project_state, sample_kml_bytes, import_trace)
+    nodes = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes").json()
+    node_id = nodes[0]["id"]
+
+    response = client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes/{node_id}",
+        json={"type": "storage_reservoir", "existing": True, "phase_id": "p2"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["existing"] is True
+    assert body["phase_id"] == "p2"
+
+    # "" revient a "non definie" (meme convention que forced_material) — sans toucher `existing`.
+    response2 = client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes/{node_id}",
+        json={"phase_id": ""},
+    )
+    assert response2.status_code == 200, response2.text
+    body2 = response2.json()
+    assert body2.get("phase_id") is None
+    assert body2["existing"] is True
+
+
+def test_patch_segment_sets_phase(client, session_id, project_state, sample_kml_bytes, import_trace):
+    variant_id, trace = _import_sample(client, session_id, project_state, sample_kml_bytes, import_trace)
+    segment_id = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments").json()[0]["id"]
+
+    response = client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/segments/{segment_id}",
+        json={"phase_id": "p2"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["phase_id"] == "p2"

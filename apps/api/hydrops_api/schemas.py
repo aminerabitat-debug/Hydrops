@@ -13,6 +13,17 @@ class AnnualVolumePointRequest(BaseModel):
     value: float
 
 
+class ProjectPhaseRequest(BaseModel):
+    """Une phase 2+ (consigne utilisateur, case "Phasage" sous Volume annuel a livrer) — cf.
+    hydropack.models.ProjectPhase. La phase 1 est implicite (first_investment_year/
+    commissioning_year ci-dessous), jamais representee ici."""
+
+    id: str
+    index: int = Field(ge=2)
+    investment_year: int
+    commissioning_year: int
+
+
 class ProjectFormFields(BaseModel):
     """Champs communs a la creation et a l'edition (fenetre "Parametres du projet", meme
     formulaire dans les deux cas — cf. NewProjectDialog cote frontend)."""
@@ -38,6 +49,9 @@ class ProjectFormFields(BaseModel):
     lifetimes_electromechanical: int = 15
     lifetimes_instrumentation_control: int = 10
     lifetimes_other: int = 20
+    # Phasage (consigne utilisateur) — decoche par defaut, `phases` reste vide.
+    phasing_enabled: bool = False
+    phases: list[ProjectPhaseRequest] = []
 
 
 class NewProjectRequest(ProjectFormFields):
@@ -94,6 +108,8 @@ class NewNodeRequest(BaseModel):
     data: Optional[dict] = None
     injected_flow: float = 0
     withdrawn_flow: float = 0
+    existing: bool = False
+    phase_id: Optional[str] = None
 
 
 class PatchNodeRequest(BaseModel):
@@ -110,6 +126,12 @@ class PatchNodeRequest(BaseModel):
     data: Optional[dict] = None
     injected_flow: Optional[float] = None
     withdrawn_flow: Optional[float] = None
+    # Phasage (consigne utilisateur, case "Élément existant" + liste déroulante de phase — non
+    # pertinent pour une station de pompage/traitement, cf. data.station_phasing, ni un piquage).
+    # Absents (None) = ne pas toucher a la valeur existante (comme les autres champs ci-dessus) ;
+    # le frontend renvoie toujours explicitement `existing`/`phase_id` quand ce panneau est visible.
+    existing: Optional[bool] = None
+    phase_id: Optional[str] = None
 
 
 class PatchSegmentRequest(BaseModel):
@@ -140,6 +162,10 @@ class PatchSegmentRequest(BaseModel):
     # toucher a la contrainte existante.
     forced_material: Optional[str] = None
     forced_dn: Optional[int] = None
+    # Phase de realisation DU TRONÇON ENTIER (consigne utilisateur, liste deroulante — visible
+    # seulement si Project.phasing_enabled) — "" revient a "non definie", meme convention que
+    # forced_material ci-dessus.
+    phase_id: Optional[str] = None
 
 
 class SegmentConstraintRequest(BaseModel):

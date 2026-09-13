@@ -96,6 +96,22 @@
         "checked_by": { "type": "string" },
         "approved_by": { "type": "string" }
       }
+    },
+    "phasing_enabled": { "type": "boolean", "default": false, "description": "Case a cocher sous Volume annuel a livrer — desactive par defaut" },
+    "phases": {
+      "type": "array",
+      "description": "Phases 2+ (la phase 1 est implicite : first_investment_year/commissioning_year)",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "index", "investment_year", "commissioning_year"],
+        "properties": {
+          "id": { "type": "string" },
+          "index": { "type": "integer", "minimum": 2 },
+          "investment_year": { "type": "integer" },
+          "commissioning_year": { "type": "integer" }
+        }
+      }
     }
   }
 }

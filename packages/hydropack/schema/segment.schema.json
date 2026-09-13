@@ -80,6 +80,7 @@
           "source": { "type": "string", "enum": ["manual", "homogenization", "existing"], "default": "manual" }
         }
       }
-    }
+    },
+    "phase_id": { "type": ["string", "null"], "description": "Phase de realisation DU TRONÇON ENTIER (Project.phases) — distincte du phase_id d'une contrainte individuelle" }
   }
 }

@@ -18,10 +18,13 @@ import {
   TREATMENT_PLANT_SUBTYPES,
   applyFieldDefaults,
   computeReservoirCapacity,
+  getStationPhasing,
   inheritableOuvrageData,
   type OuvrageFieldSpec,
 } from '../../shared/ouvrageFields'
-import type { CreatableNodeType, Node } from '../../shared/types'
+import { listPhaseOptions } from '../../shared/phasing'
+import type { CreatableNodeType, Node, Project } from '../../shared/types'
+import { StationPhasingTable } from './StationPhasingTable'
 
 export interface NodeSubmitPayload {
   type: CreatableNodeType
@@ -29,17 +32,29 @@ export interface NodeSubmitPayload {
   data: Record<string, unknown>
   injectedFlow: number
   withdrawnFlow: number
+  existing: boolean
+  phaseId: string | null
 }
+
+// Types d'ouvrage geres par le tableau Genie Civil/Equipement plutot que par la simple case
+// "Element existant" + phase (consigne utilisateur : "Pour les stations, prévoir un tableau...").
+const STATION_TYPES: CreatableNodeType[] = ['pumping_station', 'treatment_plant']
 
 interface NodeDialogProps {
   mode: 'create' | 'edit'
   pk: number
   existingNodes: Node[]
+  // Projet courant — sert uniquement a savoir si le phasage est active (project.phasing_enabled)
+  // et a peupler la liste deroulante des phases (consigne utilisateur, Lot phasage). Absent =
+  // aucun phasage propose (comme si phasing_enabled etait faux).
+  project?: Project | null
   initialType?: CreatableNodeType
   initialName?: string | null
   initialData?: Record<string, unknown> | null
   initialInjectedFlow?: number
   initialWithdrawnFlow?: number
+  initialExisting?: boolean
+  initialPhaseId?: string | null
   // Id du noeud en cours d'edition — exclu de la verification d'unicite du nom (sinon un noeud
   // dont le nom n'a pas change se heurterait toujours a "lui-meme").
   excludeNodeId?: string
@@ -91,11 +106,14 @@ export function NodeDialog({
   mode,
   pk,
   existingNodes,
+  project,
   initialType,
   initialName,
   initialData,
   initialInjectedFlow,
   initialWithdrawnFlow,
+  initialExisting,
+  initialPhaseId,
   excludeNodeId,
   precedingOuvrage,
   onClose,
@@ -115,8 +133,14 @@ export function NodeDialog({
   const initialFlow = resolveInitialFlow(initialInjectedFlow ?? 0, initialWithdrawnFlow ?? 0)
   const [flowDirection, setFlowDirection] = useState<FlowDirection>(initialFlow.direction)
   const [flowValue, setFlowValue] = useState<number>(initialFlow.value)
+  const [existing, setExisting] = useState(initialExisting ?? false)
+  const [phaseId, setPhaseId] = useState(initialPhaseId ?? '')
   const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)
+
+  const phasingEnabled = project?.phasing_enabled ?? false
+  const isStation = STATION_TYPES.includes(type)
+  const stationPhasing = useMemo(() => getStationPhasing(data), [data])
 
   const namePrefix = useMemo(() => TYPE_OPTIONS.find((o) => o.value === type)?.namePrefix, [type])
   const fieldSpecs = OUVRAGE_FIELDS[type]
@@ -175,7 +199,15 @@ export function NodeDialog({
     try {
       const injectedFlow = type === 'tie_in' && flowDirection === 'Injection' ? flowValue : 0
       const withdrawnFlow = type === 'tie_in' && flowDirection === 'Prélèvement' ? flowValue : 0
-      await onSubmit({ type, name: trimmedName, data, injectedFlow, withdrawnFlow })
+      await onSubmit({
+        type,
+        name: trimmedName,
+        data,
+        injectedFlow,
+        withdrawnFlow,
+        existing: isStation ? false : existing,
+        phaseId: phasingEnabled && !isStation ? phaseId || null : null,
+      })
       onClose()
     } catch (e) {
       setError((e as Error).message)
@@ -295,6 +327,34 @@ export function NodeDialog({
       )}
 
       {fieldSpecs?.map(renderField)}
+
+      {phasingEnabled && type !== 'tie_in' && !isStation && (
+        <>
+          <label className="modal-checkbox-label">
+            <input type="checkbox" checked={existing} onChange={(e) => setExisting(e.target.checked)} />
+            <span>Élément existant</span>
+          </label>
+          {!existing && (
+            <div className="modal-field">
+              <label htmlFor="node-phase">Phase de réalisation</label>
+              <select id="node-phase" value={phaseId} onChange={(e) => setPhaseId(e.target.value)}>
+                <option value="">— Non affecté —</option>
+                {listPhaseOptions(project).map((p) => (
+                  <option key={p.id} value={p.id}>Phase {p.index}</option>
+                ))}
+              </select>
+            </div>
+          )}
+        </>
+      )}
+
+      {phasingEnabled && isStation && (
+        <StationPhasingTable
+          phasing={stationPhasing}
+          phases={listPhaseOptions(project)}
+          onChange={(next) => setField('station_phasing', next)}
+        />
+      )}
 
       {(type === 'storage_reservoir' || type === 'surge_reservoir') && reservoirCapacity != null && (
         <p className="modal-field-hint" style={{ margin: 0 }}>

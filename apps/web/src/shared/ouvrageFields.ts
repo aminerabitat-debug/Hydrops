@@ -175,6 +175,31 @@ export function applyFieldDefaults(
   return withDefaults
 }
 
+// Phasage des stations (pumping_station/treatment_plant) — consigne utilisateur : "un tableau
+// Génie Civil et Equipement dans les lignes et Phases dans les colonnes". Stocke dans
+// Node.data.station_phasing (donnee libre cote backend, aucun schema dedie necessaire). Chaque
+// cellule est soit "existant" (case cochee), soit un debit en m3/h pour l'investissement de cette
+// phase, soit vide (aucun investissement prevu dans cette phase pour cette ligne).
+export interface StationPhaseCell {
+  existing: boolean
+  flow_m3h?: number
+}
+
+export interface StationPhasingData {
+  civil: Record<string, StationPhaseCell>
+  equipment: Record<string, StationPhaseCell>
+}
+
+export const STATION_PHASING_ROWS: { key: 'civil' | 'equipment'; label: string }[] = [
+  { key: 'civil', label: 'Génie civil' },
+  { key: 'equipment', label: 'Équipement' },
+]
+
+export function getStationPhasing(data: Record<string, unknown> | null | undefined): StationPhasingData {
+  const raw = data?.station_phasing as Partial<StationPhasingData> | undefined
+  return { civil: raw?.civil ?? {}, equipment: raw?.equipment ?? {} }
+}
+
 const COMMON_UTILITY_FILIERES = [
   "Bâtiment d'exploitation",
   'Atelier',

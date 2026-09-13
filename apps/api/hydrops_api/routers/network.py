@@ -412,6 +412,8 @@ def add_node(session_id: str, variant_id: str, payload: NewNodeRequest, request:
         data=payload.data,
         injected_flow=payload.injected_flow,
         withdrawn_flow=payload.withdrawn_flow,
+        existing=payload.existing,
+        phase_id=payload.phase_id,
     )
     package.nodes[str(node.id)] = node
 
@@ -477,6 +479,10 @@ def patch_node(session_id: str, variant_id: str, node_id: str, payload: PatchNod
         updates["injected_flow"] = payload.injected_flow
     if payload.withdrawn_flow is not None:
         updates["withdrawn_flow"] = payload.withdrawn_flow
+    if payload.existing is not None:
+        updates["existing"] = payload.existing
+    if payload.phase_id is not None:
+        updates["phase_id"] = payload.phase_id or None
     if not updates:
         return node.model_dump(mode="json", exclude_none=True)
 
@@ -759,6 +765,8 @@ def patch_segment(session_id: str, variant_id: str, segment_id: str, payload: Pa
     if forced_touched:
         updates["forced_material"] = forced_material_update
         updates["forced_dn"] = forced_dn_update
+    if payload.phase_id is not None:
+        updates["phase_id"] = payload.phase_id or None
 
     updated = segment.model_copy(update=updates)
     package.segments[segment_id] = updated

@@ -58,6 +58,84 @@ def test_patch_project_updates_fields(client, session_id, project_state):
     assert body["project"]["name"] == "Projet Test"
 
 
+def test_patch_project_phasing_disabled_by_default(client, session_id, project_state):
+    assert project_state["project"]["phasing_enabled"] is False
+    assert project_state["project"]["phases"] == []
+
+
+def test_patch_project_accepts_valid_phasing(client, session_id, project_state):
+    # Defaut ProjectFormFields : first_investment_year=2026, amortization_years=25 (fenetre
+    # jusqu'a 2051) — phase 2 bien apres le 1er investissement, mise en service ulterieure,
+    # dans la fenetre d'amortissement.
+    response = client.patch(
+        f"/api/v1/projects/{session_id}",
+        json=_full_form(
+            phasing_enabled=True,
+            phases=[{"id": "p2", "index": 2, "investment_year": 2030, "commissioning_year": 2032}],
+        ),
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()["project"]
+    assert body["phasing_enabled"] is True
+    assert body["phases"] == [{"id": "p2", "index": 2, "investment_year": 2030, "commissioning_year": 2032}]
+
+
+def test_patch_project_rejects_phase_investment_not_after_previous(client, session_id, project_state):
+    # Phase 2 investie la MEME annee (ou avant) que le 1er investissement (2026, defaut) —
+    # consigne utilisateur : "Phase 2 doit être ultérieure à phase 1".
+    response = client.patch(
+        f"/api/v1/projects/{session_id}",
+        json=_full_form(
+            phasing_enabled=True,
+            phases=[{"id": "p2", "index": 2, "investment_year": 2026, "commissioning_year": 2030}],
+        ),
+    )
+    assert response.status_code == 422
+    assert "postérieure" in response.json()["detail"].lower()
+
+
+def test_patch_project_rejects_commissioning_before_investment(client, session_id, project_state):
+    # Consigne utilisateur : "année de mise en service doit être ultérieur à année d'investissement".
+    response = client.patch(
+        f"/api/v1/projects/{session_id}",
+        json=_full_form(
+            phasing_enabled=True,
+            phases=[{"id": "p2", "index": 2, "investment_year": 2030, "commissioning_year": 2029}],
+        ),
+    )
+    assert response.status_code == 422
+    assert "mise en service" in response.json()["detail"].lower()
+
+
+def test_patch_project_rejects_phase_beyond_amortization_window(client, session_id, project_state):
+    # Consigne utilisateur : "le tout doit s'intégrer dans la durée d'amortissement" — defaut
+    # first_investment_year=2026 + amortization_years=25 = fenetre jusqu'a 2051.
+    response = client.patch(
+        f"/api/v1/projects/{session_id}",
+        json=_full_form(
+            phasing_enabled=True,
+            phases=[{"id": "p2", "index": 2, "investment_year": 2049, "commissioning_year": 2060}],
+        ),
+    )
+    assert response.status_code == 422
+    assert "amortissement" in response.json()["detail"].lower()
+
+
+def test_patch_project_rejects_second_phase_investment_not_after_first(client, session_id, project_state):
+    # Deux phases : la 3e doit etre ulterieure a la 2e, pas seulement a la phase 1 implicite.
+    response = client.patch(
+        f"/api/v1/projects/{session_id}",
+        json=_full_form(
+            phasing_enabled=True,
+            phases=[
+                {"id": "p2", "index": 2, "investment_year": 2030, "commissioning_year": 2032},
+                {"id": "p3", "index": 3, "investment_year": 2030, "commissioning_year": 2033},
+            ],
+        ),
+    )
+    assert response.status_code == 422
+
+
 def test_patch_project_preserves_fields_outside_the_form(client, session_id, project_state):
     # "description" n'est pas un champ du formulaire "Parametres du projet" — une edition ne doit
     # pas l'effacer silencieusement si une PATCH precedente ou l'import l'avait renseigne.

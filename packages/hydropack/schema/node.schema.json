@@ -41,6 +41,8 @@
     "piezo_head": { "type": ["number", "null"], "description": "Cote piezometrique calculee (m) — sortie du calcul hydraulique" },
     "pressure_dynamic": { "type": ["number", "null"], "description": "Pression hydrodynamique calculee (m) — sortie du calcul hydraulique" },
     "pressure_static_max": { "type": ["number", "null"], "description": "Pression hydrostatique max calculee (m) — troncon gravitaire uniquement" },
-    "pressure_static_min": { "type": ["number", "null"], "description": "Pression hydrostatique min calculee (m) — troncon gravitaire uniquement" }
+    "pressure_static_min": { "type": ["number", "null"], "description": "Pression hydrostatique min calculee (m) — troncon gravitaire uniquement" },
+    "existing": { "type": "boolean", "default": false, "description": "Ouvrage deja en place (phasage, consigne utilisateur) — pas un investissement de ce projet" },
+    "phase_id": { "type": ["string", "null"], "description": "Phase de realisation (Project.phases) — non pertinent pour une station (cf. data.station_phasing) ni un piquage" }
   }
 }

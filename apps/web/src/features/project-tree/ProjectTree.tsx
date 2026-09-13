@@ -180,6 +180,8 @@ export function ProjectTree({ onOpenProjectSettings, onNewVariant, onDuplicateVa
         data: payload.data,
         injected_flow: payload.injectedFlow,
         withdrawn_flow: payload.withdrawnFlow,
+        existing: payload.existing,
+        phase_id: payload.phaseId ?? '',
       })
       await refreshNetwork()
       setStatusMessage('Ouvrage mis à jour')
@@ -230,6 +232,7 @@ export function ProjectTree({ onOpenProjectSettings, onNewVariant, onDuplicateVa
           min_velocity: hydraulics.minVelocity,
           forced_material: hydraulics.forcedMaterial ?? '',
           forced_dn: hydraulics.forcedDn,
+          phase_id: hydraulics.phaseId ?? '',
         }),
       ),
     )
@@ -585,11 +588,14 @@ export function ProjectTree({ onOpenProjectSettings, onNewVariant, onDuplicateVa
           mode="edit"
           pk={editingOuvrage.pk}
           existingNodes={nodes}
+          project={project}
           initialType={editingOuvrage.type as CreatableNodeType}
           initialName={editingOuvrage.name}
           initialData={editingOuvrage.data}
           initialInjectedFlow={editingOuvrage.injected_flow}
           initialWithdrawnFlow={editingOuvrage.withdrawn_flow}
+          initialExisting={editingOuvrage.existing}
+          initialPhaseId={editingOuvrage.phase_id}
           excludeNodeId={editingOuvrage.id}
           onClose={() => setEditingOuvrage(null)}
           onSubmit={handlePatchOuvrage}
@@ -647,8 +653,10 @@ export function ProjectTree({ onOpenProjectSettings, onNewVariant, onDuplicateVa
                 minVelocity: firstSegment?.min_velocity ?? preferences?.default_min_velocity ?? undefined,
                 forcedMaterial: firstSegment?.forced_material ?? undefined,
                 forcedDn: firstSegment?.forced_dn ?? undefined,
+                phaseId: firstSegment?.phase_id ?? undefined,
               }}
               pipeCatalog={pipeCatalog}
+              project={project}
               sessionId={sessionId ?? ''}
               variantId={selectedVariantId ?? ''}
               segmentIds={editingTroncon.troncon.segment_ids}

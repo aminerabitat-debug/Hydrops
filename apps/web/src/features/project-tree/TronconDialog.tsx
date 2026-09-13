@@ -12,8 +12,9 @@ import { useMemo, useState } from 'react'
 
 import { Modal } from '../../app/Modal'
 import { api } from '../../shared/apiClient'
+import { listPhaseOptions } from '../../shared/phasing'
 import { useAppStore } from '../../state/store'
-import type { PipeCatalogRow, SegmentConstraint } from '../../shared/types'
+import type { PipeCatalogRow, Project, SegmentConstraint } from '../../shared/types'
 import type { TronconRegime } from '../../shared/troncons'
 
 export interface TronconHydraulicValues {
@@ -39,6 +40,10 @@ export interface TronconHydraulicValues {
   // jamais ecrits depuis cette fenetre : toujours renvoyes tels quels (inchanges) a la sauvegarde.
   forcedMaterial?: string
   forcedDn?: number
+  // Phase de realisation du tronçon entier (consigne utilisateur, volet "Phasage") — distincte du
+  // phase_id porte par une SegmentConstraint individuelle (une contrainte ponctuelle peut avoir sa
+  // propre phase, independamment de celle du tronçon).
+  phaseId?: string | null
 }
 
 interface TronconDialogProps {
@@ -52,6 +57,9 @@ interface TronconDialogProps {
   // Catalogue "Conduites" (menu Base de données) — peuple les listes Materiau/DN/Classe du
   // panneau Contraintes, filtre aux lignes actives.
   pipeCatalog: PipeCatalogRow[]
+  // Projet courant — le volet "Phasage" (liste deroulante de phase) n'est propose que si
+  // project.phasing_enabled (consigne utilisateur, cf. NodeDialog pour le meme principe).
+  project?: Project | null
   // Panneau "Contraintes" (consigne utilisateur) : sauvegarde IMMEDIATE (pas dependante du bouton
   // Enregistrer, comme l'homogeneisation du profil graphique) — chaque ajout/edition/suppression
   // appelle directement l'API et broadcast la meme liste a tous les segments reels du tronçon
@@ -113,6 +121,7 @@ export function TronconDialog({
   initialHydraulics,
   startNodeGroundZ,
   pipeCatalog,
+  project,
   sessionId,
   variantId,
   segmentIds,
@@ -135,6 +144,10 @@ export function TronconDialog({
   const [draft, setDraft] = useState<ConstraintDraft | null>(null)
   const [constraintError, setConstraintError] = useState('')
   const [savingConstraints, setSavingConstraints] = useState(false)
+  const [existingDraft, setExistingDraft] = useState<ConstraintDraft | null>(null)
+
+  const phasingEnabled = project?.phasing_enabled ?? false
+  const [phaseId, setPhaseId] = useState(initialHydraulics.phaseId ?? '')
 
   const pkPickResolver = useAppStore((s) => s.pkPickResolver)
   const beginPkPick = useAppStore((s) => s.beginPkPick)
@@ -159,6 +172,17 @@ export function TronconDialog({
     return [...new Set(rows.map((r) => r.pressure_class))].sort()
   }, [pipeCatalog, draft?.material, draft?.dn])
 
+  const dnsForExistingMaterial = useMemo(() => {
+    if (!existingDraft?.material) return [...new Set(pipeCatalog.filter((r) => r.active).map((r) => r.dn))].sort((a, b) => a - b)
+    return [...new Set(pipeCatalog.filter((r) => r.active && r.material === existingDraft.material).map((r) => r.dn))].sort((a, b) => a - b)
+  }, [pipeCatalog, existingDraft?.material])
+  const classesForExistingSelection = useMemo(() => {
+    let rows = pipeCatalog.filter((r) => r.active)
+    if (existingDraft?.material) rows = rows.filter((r) => r.material === existingDraft.material)
+    if (existingDraft?.dn) rows = rows.filter((r) => r.dn === Number(existingDraft.dn))
+    return [...new Set(rows.map((r) => r.pressure_class))].sort()
+  }, [pipeCatalog, existingDraft?.material, existingDraft?.dn])
+
   const handleConfirm = async () => {
     setSubmitting(true)
     setError('')
@@ -169,6 +193,7 @@ export function TronconDialog({
         upstreamWaterLevelMaxOffset: resolvedMax.offset,
         upstreamWaterLevelMin: resolvedMin.value,
         upstreamWaterLevelMinOffset: resolvedMin.offset,
+        phaseId: phasingEnabled ? phaseId || null : hydraulics.phaseId,
       })
       onClose()
     } catch (e) {
@@ -181,7 +206,10 @@ export function TronconDialog({
   // Sauvegarde immediate (consigne utilisateur) : broadcast la MEME liste a tous les segments
   // reels du tronçon (meme convention que les parametres hydrauliques ci-dessus), puis adopte la
   // liste renvoyee par le serveur (ids assignes serveur pour une contrainte nouvellement ajoutee).
-  const saveConstraints = async (next: (Omit<SegmentConstraint, 'id'> & { id?: string })[]) => {
+  // Renvoie true en cas de succes / false en cas d'erreur (422 de contradiction, etc.) — les
+  // appelants s'en servent pour savoir s'ils doivent refermer LEUR brouillon (Contraintes vs
+  // Éléments existants partagent cette fonction mais pas le meme etat de brouillon).
+  const saveConstraints = async (next: (Omit<SegmentConstraint, 'id'> & { id?: string })[]): Promise<boolean> => {
     setSavingConstraints(true)
     setConstraintError('')
     try {
@@ -189,8 +217,10 @@ export function TronconDialog({
       setConstraints(results[0]?.constraints ?? [])
       onConstraintsSaved()
       setDraft(null)
+      return true
     } catch (e) {
       setConstraintError((e as Error).message)
+      return false
     } finally {
       setSavingConstraints(false)
     }
@@ -226,6 +256,54 @@ export function TronconDialog({
     }
     const next = draft.id ? constraints.map((c) => (c.id === draft.id ? entry : c)) : [...constraints, entry]
     saveConstraints(next)
+  }
+
+  // Volet "Éléments existants" (consigne utilisateur) : meme forme que "Contraintes" mais
+  // Matériau/DN/Classe sont TOUS obligatoires (une conduite existante est entièrement connue,
+  // contrairement a une contrainte de dimensionnement qui peut ne fixer qu'un champ). Une fois
+  // enregistré, l'élément apparait AUSSI dans le tableau "Contraintes" (grisé, is_existing=true —
+  // deja gere par ce tableau) mais n'est modifiable/supprimable que depuis CE volet.
+  const existingElements = useMemo(() => constraints.filter((c) => c.is_existing), [constraints])
+  const handleAddExistingClick = () => setExistingDraft(EMPTY_DRAFT)
+  const handleEditExistingClick = (c: SegmentConstraint) => {
+    setExistingDraft({
+      id: c.id,
+      material: c.material ?? '',
+      dn: c.dn != null ? String(c.dn) : '',
+      pressureClass: c.pressure_class ?? '',
+      pkStart: c.pk_start != null ? String(c.pk_start) : '',
+      pkEnd: c.pk_end != null ? String(c.pk_end) : '',
+    })
+  }
+  const handleDeleteExisting = (id: string) => saveConstraints(constraints.filter((c) => c.id !== id))
+
+  const handleSaveExistingDraft = () => {
+    if (!existingDraft) return
+    if (!existingDraft.material || !existingDraft.dn || !existingDraft.pressureClass) {
+      setConstraintError("Élément existant : Matériau, DN et Classe sont obligatoires.")
+      return
+    }
+    const entry: Omit<SegmentConstraint, 'id'> & { id?: string } = {
+      id: existingDraft.id,
+      material: existingDraft.material,
+      dn: Number(existingDraft.dn),
+      pressure_class: existingDraft.pressureClass,
+      pk_start: existingDraft.pkStart ? Number(existingDraft.pkStart) : null,
+      pk_end: existingDraft.pkEnd ? Number(existingDraft.pkEnd) : null,
+      is_existing: true,
+      phase_id: null,
+      source: 'existing',
+    }
+    const next = existingDraft.id
+      ? constraints.map((c) => (c.id === existingDraft.id ? entry : c))
+      : [...constraints, entry]
+    saveConstraints(next).then((ok) => {
+      if (ok) setExistingDraft(null)
+    })
+  }
+
+  const handlePickExistingPk = (field: 'pkStart' | 'pkEnd') => {
+    beginPkPick((pk) => setExistingDraft((d) => (d ? { ...d, [field]: String(Math.round(pk)) } : d)))
   }
 
   // Bouton "…" (consigne utilisateur) : ferme temporairement CETTE fenetre (masquee via `hidden`
@@ -346,6 +424,23 @@ export function TronconDialog({
             </span>
           </div>
         </div>
+
+        {phasingEnabled && (
+          <div className="troncon-constraints-panel">
+            <div className="troncon-constraints-header">
+              <h3>Phasage</h3>
+            </div>
+            <div className="modal-field">
+              <label htmlFor="troncon-phase">Phase de réalisation</label>
+              <select id="troncon-phase" value={phaseId} onChange={(e) => setPhaseId(e.target.value)}>
+                <option value="">— Non affecté —</option>
+                {listPhaseOptions(project).map((p) => (
+                  <option key={p.id} value={p.id}>Phase {p.index}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+        )}
 
         <div className="troncon-constraints-panel">
           <div className="troncon-constraints-header">
@@ -493,6 +588,148 @@ export function TronconDialog({
                 </button>
                 <button type="button" className="modal-btn modal-btn-confirm" onClick={handleSaveDraft} disabled={savingConstraints}>
                   {draft.id ? 'Modifier' : 'Ajouter'}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="troncon-constraints-panel">
+          <div className="troncon-constraints-header">
+            <h3>Éléments existants</h3>
+            <div className="troncon-constraints-actions">
+              <button type="button" className="modal-btn modal-btn-cancel" onClick={handleAddExistingClick} disabled={savingConstraints}>
+                Ajouter
+              </button>
+            </div>
+          </div>
+          <span className="modal-field-hint">
+            Conduites déjà en place — Matériau, DN et Classe obligatoires. Apparaissent grisées dans le tableau Contraintes.
+          </span>
+          {constraintError && <div className="modal-error">{constraintError}</div>}
+          {existingElements.length > 0 && (
+            <table className="troncon-constraints-table">
+              <thead>
+                <tr>
+                  <th>Matériau</th>
+                  <th>DN</th>
+                  <th>Classe</th>
+                  <th>PK début</th>
+                  <th>PK fin</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {existingElements.map((c) => (
+                  <tr key={c.id}>
+                    <td>{c.material}</td>
+                    <td>{c.dn}</td>
+                    <td>{c.pressure_class}</td>
+                    <td>{c.pk_start != null ? Math.round(c.pk_start) : 'début'}</td>
+                    <td>{c.pk_end != null ? Math.round(c.pk_end) : 'fin'}</td>
+                    <td>
+                      <button type="button" className="btn-row-icon" title="Modifier" onClick={() => handleEditExistingClick(c)}>
+                        ✎
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-row-icon"
+                        title="Supprimer"
+                        onClick={() => handleDeleteExisting(c.id)}
+                        disabled={savingConstraints}
+                      >
+                        🗑
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+
+          {existingDraft && (
+            <div className="troncon-constraint-draft">
+              <div className="modal-field">
+                <label htmlFor="existing-material">Matériau *</label>
+                <select
+                  id="existing-material"
+                  value={existingDraft.material}
+                  onChange={(e) => setExistingDraft((d) => (d ? { ...d, material: e.target.value } : d))}
+                >
+                  <option value="">— choisir —</option>
+                  {activeMaterials.map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="modal-field">
+                <label htmlFor="existing-dn">DN *</label>
+                <select
+                  id="existing-dn"
+                  value={existingDraft.dn}
+                  onChange={(e) => setExistingDraft((d) => (d ? { ...d, dn: e.target.value } : d))}
+                >
+                  <option value="">— choisir —</option>
+                  {dnsForExistingMaterial.map((dn) => (
+                    <option key={dn} value={dn}>
+                      {dn}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="modal-field">
+                <label htmlFor="existing-class">Classe *</label>
+                <select
+                  id="existing-class"
+                  value={existingDraft.pressureClass}
+                  onChange={(e) => setExistingDraft((d) => (d ? { ...d, pressureClass: e.target.value } : d))}
+                >
+                  <option value="">— choisir —</option>
+                  {classesForExistingSelection.map((pc) => (
+                    <option key={pc} value={pc}>
+                      {pc}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="modal-field">
+                <label htmlFor="existing-pk-start">PK début</label>
+                <div className="troncon-constraint-pk-input">
+                  <input
+                    id="existing-pk-start"
+                    type="number"
+                    placeholder="début du tronçon"
+                    value={existingDraft.pkStart}
+                    onChange={(e) => setExistingDraft((d) => (d ? { ...d, pkStart: e.target.value } : d))}
+                  />
+                  <button type="button" className="btn-row-icon" title="Choisir sur la carte/le profil" onClick={() => handlePickExistingPk('pkStart')}>
+                    …
+                  </button>
+                </div>
+              </div>
+              <div className="modal-field">
+                <label htmlFor="existing-pk-end">PK fin</label>
+                <div className="troncon-constraint-pk-input">
+                  <input
+                    id="existing-pk-end"
+                    type="number"
+                    placeholder="fin du tronçon"
+                    value={existingDraft.pkEnd}
+                    onChange={(e) => setExistingDraft((d) => (d ? { ...d, pkEnd: e.target.value } : d))}
+                  />
+                  <button type="button" className="btn-row-icon" title="Choisir sur la carte/le profil" onClick={() => handlePickExistingPk('pkEnd')}>
+                    …
+                  </button>
+                </div>
+              </div>
+              <div className="troncon-constraints-actions">
+                <button type="button" className="modal-btn modal-btn-cancel" onClick={() => setExistingDraft(null)}>
+                  Annuler
+                </button>
+                <button type="button" className="modal-btn modal-btn-confirm" onClick={handleSaveExistingDraft} disabled={savingConstraints}>
+                  {existingDraft.id ? 'Modifier' : 'Ajouter'}
                 </button>
               </div>
             </div>

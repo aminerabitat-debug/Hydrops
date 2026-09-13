@@ -38,8 +38,33 @@ export function ProjectDialog({ mode, initialProject, onClose, onSubmit }: Proje
       ? initialProject.annual_volume.points.map((p) => String(p.value)).join('\n')
       : '',
   )
+  // Phasage (consigne utilisateur : case a cocher sous "Volume annuel a livrer", decochee par
+  // defaut) — la phase 1 est implicite (annee du 1er investissement/mise en service ci-dessus),
+  // ce tableau ne porte que les phases 2+ ajoutees par l'utilisateur. Les erreurs de coherence
+  // (ordre chronologique, fenetre d'amortissement) sont validees cote serveur et affichees via le
+  // meme bandeau d'erreur que le reste du formulaire (pas de duplication de la logique ici).
+  const [phasingEnabled, setPhasingEnabled] = useState(initialProject?.phasing_enabled ?? false)
+  const [phases, setPhases] = useState(() =>
+    (initialProject?.phases ?? []).map((p) => ({
+      id: p.id,
+      index: p.index,
+      investmentYear: String(p.investment_year),
+      commissioningYear: String(p.commissioning_year),
+    })),
+  )
   const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)
+
+  const handleAddPhase = () => {
+    const nextIndex = phases.length > 0 ? Math.max(...phases.map((p) => p.index)) + 1 : 2
+    setPhases((prev) => [
+      ...prev,
+      { id: crypto.randomUUID(), index: nextIndex, investmentYear: '', commissioningYear: '' },
+    ])
+  }
+  const handleRemovePhase = (id: string) => setPhases((prev) => prev.filter((p) => p.id !== id))
+  const handlePhaseFieldChange = (id: string, field: 'investmentYear' | 'commissioningYear', value: string) =>
+    setPhases((prev) => prev.map((p) => (p.id === id ? { ...p, [field]: value } : p)))
 
   const amortizationCount = Math.max(1, Number(amortizationYears) || 1)
   const volumeSeries = useMemo(
@@ -64,6 +89,15 @@ export function ProjectDialog({ mode, initialProject, onClose, onSubmit }: Proje
         ...(hasVariableVolume
           ? { annual_volume_points: volumeSeries.map((v) => ({ year: v.year, value: v.value })) }
           : { annual_volume_value: Number(constantVolume) }),
+        phasing_enabled: phasingEnabled,
+        phases: phasingEnabled
+          ? phases.map((p) => ({
+              id: p.id,
+              index: p.index,
+              investment_year: Number(p.investmentYear),
+              commissioning_year: Number(p.commissioningYear),
+            }))
+          : [],
       })
       onClose()
     } catch (e) {
@@ -175,6 +209,66 @@ export function ProjectDialog({ mode, initialProject, onClose, onSubmit }: Proje
             <p className="volume-preview-hint">* valeur interpolée/extrapolée (case vide)</p>
           </div>
         </>
+      )}
+
+      <div className="modal-field">
+        <label className="modal-checkbox-label">
+          <input type="checkbox" checked={phasingEnabled} onChange={(e) => setPhasingEnabled(e.target.checked)} />
+          <span>Phasage</span>
+        </label>
+        <span className="modal-field-hint">
+          L'année du 1er investissement ci-dessus est la Phase 1. Ajoutez les phases suivantes ci-dessous.
+        </span>
+      </div>
+
+      {phasingEnabled && (
+        <div className="project-phases-panel">
+          <table className="troncon-constraints-table">
+            <thead>
+              <tr>
+                <th>Phase</th>
+                <th>Année d'investissement</th>
+                <th>Année de mise en service</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>1</td>
+                <td>{firstInvestmentYear}</td>
+                <td>{commissioningYear}</td>
+                <td></td>
+              </tr>
+              {phases.map((p) => (
+                <tr key={p.id}>
+                  <td>{p.index}</td>
+                  <td>
+                    <input
+                      type="number"
+                      value={p.investmentYear}
+                      onChange={(e) => handlePhaseFieldChange(p.id, 'investmentYear', e.target.value)}
+                    />
+                  </td>
+                  <td>
+                    <input
+                      type="number"
+                      value={p.commissioningYear}
+                      onChange={(e) => handlePhaseFieldChange(p.id, 'commissioningYear', e.target.value)}
+                    />
+                  </td>
+                  <td>
+                    <button type="button" className="btn-row-icon" title="Supprimer cette phase" onClick={() => handleRemovePhase(p.id)}>
+                      🗑
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <button type="button" className="modal-btn modal-btn-cancel" onClick={handleAddPhase}>
+            Ajouter une phase
+          </button>
+        </div>
       )}
     </Modal>
   )

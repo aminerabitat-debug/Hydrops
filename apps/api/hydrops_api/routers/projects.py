@@ -77,6 +77,8 @@ def _apply_project_form_fields(existing: Project | None, project_id: uuid.UUID, 
                 instrumentation_control=payload.lifetimes_instrumentation_control,
                 other=payload.lifetimes_other,
             ).model_dump(mode="json"),
+            "phasing_enabled": payload.phasing_enabled,
+            "phases": [p.model_dump(mode="json") for p in payload.phases],
         }
     )
     return Project.model_validate(base)
@@ -88,7 +90,10 @@ def new_project(session_id: str, payload: NewProjectRequest, request: Request):
     require_session(store, session_id)
 
     now = datetime.now(timezone.utc)
-    project = _apply_project_form_fields(None, uuid.uuid4(), payload)
+    try:
+        project = _apply_project_form_fields(None, uuid.uuid4(), payload)
+    except ValidationError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
     metadata = Metadata(software_version=get_settings().software_version, created_at=now, modified_at=now)
 
     # Une variante par defaut est creee immediatement : le parcours Lot 1 (creer projet -> importer

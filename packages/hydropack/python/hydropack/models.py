@@ -62,6 +62,18 @@ class Branding(BaseModel):
     approved_by: Optional[str] = None
 
 
+class ProjectPhase(BaseModel):
+    """Une phase de realisation DU PROJET (consigne utilisateur, case "Phasage" sous "Volume
+    annuel a livrer") — la phase 1 est IMPLICITE (annee du 1er investissement/mise en service du
+    projet, cf. Project.first_investment_year/commissioning_year), jamais representee ici ; ce
+    tableau ne porte que les phases 2 et suivantes, ajoutees par l'utilisateur."""
+
+    id: str
+    index: int = Field(ge=2)
+    investment_year: int
+    commissioning_year: int
+
+
 class Project(BaseModel):
     id: UUID
     name: str = Field(min_length=1)
@@ -85,6 +97,42 @@ class Project(BaseModel):
     number_format: Optional[str] = None
     page_format: Literal["A4", "Letter"] = "A4"
     branding: Optional[Branding] = None
+    # Phasage du projet (consigne utilisateur : case a cocher sous "Volume annuel a livrer",
+    # decochee par defaut) — desactive, `phases` reste vide et n'est jamais propose a la saisie
+    # (Tronçon/Nœuds/Stations). Purement declaratif : n'alimente aucun calcul hydraulique ni cout
+    # (aucun moteur de cout n'existe encore dans ce projet) — de la capture de donnees en vue d'une
+    # future estimation phasee.
+    phasing_enabled: bool = False
+    phases: list[ProjectPhase] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _phases_are_consistent(self) -> "Project":
+        """Phases triees par `index`, `investment_year` strictement croissant d'une phase a la
+        suivante (et par rapport a la phase 1 implicite, `first_investment_year`),
+        `commissioning_year` posterieure a `investment_year` pour CHAQUE phase, et la derniere
+        mise en service ne depasse jamais la fenetre d'amortissement (consigne utilisateur : "le
+        tout doit s'integrer dans la duree d'amortissement")."""
+        if not self.phases:
+            return self
+        ordered = sorted(self.phases, key=lambda p: p.index)
+        previous_investment_year = self.first_investment_year
+        for phase in ordered:
+            if phase.commissioning_year <= phase.investment_year:
+                raise ValueError(
+                    f"Phase {phase.index} : l'année de mise en service doit être postérieure à l'année d'investissement"
+                )
+            if phase.investment_year <= previous_investment_year:
+                raise ValueError(
+                    f"Phase {phase.index} : l'année d'investissement doit être postérieure à celle de la phase précédente"
+                )
+            previous_investment_year = phase.investment_year
+        amortization_deadline = self.first_investment_year + self.amortization_years
+        if ordered[-1].commissioning_year > amortization_deadline:
+            raise ValueError(
+                "La mise en service de la dernière phase dépasse la fenêtre d'amortissement "
+                f"({amortization_deadline})"
+            )
+        return self
 
 
 class MaintenanceRule(BaseModel):
@@ -234,6 +282,13 @@ class Node(BaseModel):
     pressure_dynamic: Optional[float] = None
     pressure_static_max: Optional[float] = None
     pressure_static_min: Optional[float] = None
+    # Phasage (consigne utilisateur, visible seulement si Project.phasing_enabled) — pour tout
+    # ouvrage SAUF station de pompage/traitement (cf. `data.station_phasing` ci-dessous, un tableau
+    # Genie Civil/Equipement x Phases plus riche qu'une simple case) et piquage (jamais de
+    # phasage). `existing=True` = ouvrage deja en place, pas un investissement de ce projet ;
+    # `phase_id=None` avec `existing=False` = phase non definie (aucune contrainte de calendrier).
+    existing: bool = False
+    phase_id: Optional[str] = None
 
     @field_validator("type", mode="before")
     @classmethod
@@ -346,6 +401,12 @@ class Segment(BaseModel):
     # effectivement consultée par le calcul — un tronçon à plusieurs Segments réels (piquages
     # transparents) n'en a qu'une, valable sur toute sa longueur en PK absolu.
     constraints: list[SegmentConstraint] = Field(default_factory=list)
+    # Phase de REALISATION DU TRONÇON ENTIER (consigne utilisateur, liste deroulante dans
+    # "Modifier le tronçon", visible seulement si Project.phasing_enabled) — distincte du
+    # `phase_id` d'une SegmentConstraint individuelle (une contrainte precise peut avoir sa propre
+    # phase, ex. un renforcement partiel prevu plus tard). Meme convention que les autres
+    # parametres de tronçon : seul `first_seg.phase_id` est consulte.
+    phase_id: Optional[str] = None
     # Sorties du calcul hydraulique (bouton Calculer) pour ce segment — cf.
     # packages/hydrops-engine/hydrops_engine/hydraulics.py. `flow`/`roughness` (deja existants
     # ci-dessus) sont aussi ecrases par le calcul : `flow` devient le debit reellement transite

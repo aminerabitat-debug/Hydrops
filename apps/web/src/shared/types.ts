@@ -99,6 +99,19 @@ export interface Project {
   language: 'fr' | 'en'
   units_system: 'SI' | 'US'
   page_format: 'A4' | 'Letter'
+  // Phasage (consigne utilisateur : case a cocher sous "Volume annuel a livrer", decochee par
+  // defaut) — decoche, `phases` reste vide et n'est propose nulle part a la saisie (Tronçon/
+  // Nœuds/Stations).
+  phasing_enabled: boolean
+  phases: ProjectPhase[]
+}
+
+// Une phase 2+ (la phase 1 est implicite : first_investment_year/commissioning_year ci-dessus).
+export interface ProjectPhase {
+  id: string
+  index: number
+  investment_year: number
+  commissioning_year: number
 }
 
 export interface Metadata {
@@ -197,6 +210,11 @@ export interface Node {
   pressure_dynamic?: number | null
   pressure_static_max?: number | null
   pressure_static_min?: number | null
+  // Phasage (consigne utilisateur, visible seulement si Project.phasing_enabled) — non pertinent
+  // pour une station de pompage/traitement (cf. data.station_phasing, tableau Genie Civil/
+  // Equipement x Phases) ni un piquage (jamais de phasage).
+  existing?: boolean
+  phase_id?: string | null
 }
 
 const ENDPOINT_PK_TOLERANCE_M = 1e-6
@@ -266,6 +284,10 @@ export interface Segment {
   // unique forced_material/forced_dn ci-dessus pour la saisie, qui restent lus pour compatibilite
   // ascendante). Panneau "Contraintes" de la fenetre Tronçon.
   constraints?: SegmentConstraint[]
+  // Phase de realisation DU TRONÇON ENTIER (consigne utilisateur, liste deroulante dans "Modifier
+  // le tronçon", visible seulement si Project.phasing_enabled) — distincte du phase_id d'une
+  // SegmentConstraint individuelle.
+  phase_id?: string | null
 }
 
 export interface SegmentConstraint {

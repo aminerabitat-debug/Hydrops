@@ -55,6 +55,8 @@ export interface ProjectFormPayload {
   lifetimes_electromechanical?: number
   lifetimes_instrumentation_control?: number
   lifetimes_other?: number
+  phasing_enabled?: boolean
+  phases?: { id: string; index: number; investment_year: number; commissioning_year: number }[]
 }
 
 export const api = {
@@ -249,6 +251,8 @@ export const api = {
       data?: Record<string, unknown>
       injected_flow?: number
       withdrawn_flow?: number
+      existing?: boolean
+      phase_id?: string
     },
   ): Promise<Node> {
     const response = await fetch(`${API_BASE}/projects/${sessionId}/variants/${variantId}/nodes`, {
@@ -269,6 +273,8 @@ export const api = {
       data?: Record<string, unknown>
       injected_flow?: number
       withdrawn_flow?: number
+      existing?: boolean
+      phase_id?: string
     },
   ): Promise<Node> {
     const response = await fetch(`${API_BASE}/projects/${sessionId}/variants/${variantId}/nodes/${nodeId}`, {
@@ -328,6 +334,7 @@ export const api = {
       min_velocity?: number
       forced_material?: string
       forced_dn?: number
+      phase_id?: string
     },
   ): Promise<Segment> {
     const response = await fetch(

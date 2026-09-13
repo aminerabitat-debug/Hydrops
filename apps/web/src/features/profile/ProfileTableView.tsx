@@ -72,6 +72,7 @@ export function ProfileTableView() {
   const [editingNode, setEditingNode] = useState<Node | null>(null)
 
   const sessionId = useAppStore((s) => s.sessionId)
+  const project = useAppStore((s) => s.project)
   const selectedVariantId = useAppStore((s) => s.selection.selectedVariantId)
   const nodes = useAppStore((s) => s.nodes)
   const segments = useAppStore((s) => s.segments)
@@ -105,7 +106,7 @@ export function ProfileTableView() {
 
   const handleSubmitPendingAdd = async (payload: NodeSubmitPayload) => {
     if (!sessionId || !selectedVariantId || !trace || pendingAdd == null) return
-    const { type, name, data, injectedFlow, withdrawnFlow } = payload
+    const { type, name, data, injectedFlow, withdrawnFlow, existing, phaseId } = payload
     if (pendingAdd.placeholderNodeId) {
       // Le PK visé porte deja un placeholder d'extremite (jamais montre comme tel a
       // l'utilisateur) : on l'affecte au lieu d'en creer un second au meme PK (rejete par le
@@ -116,6 +117,8 @@ export function ProfileTableView() {
         data,
         injected_flow: injectedFlow,
         withdrawn_flow: withdrawnFlow,
+        existing,
+        phase_id: phaseId ?? '',
       })
     } else {
       await api.addNode(sessionId, selectedVariantId, trace.id, pendingAdd.pk, {
@@ -124,6 +127,8 @@ export function ProfileTableView() {
         data,
         injected_flow: injectedFlow,
         withdrawn_flow: withdrawnFlow,
+        existing,
+        phase_id: phaseId ?? undefined,
       })
     }
     await refreshNetwork()
@@ -138,6 +143,8 @@ export function ProfileTableView() {
       data: payload.data,
       injected_flow: payload.injectedFlow,
       withdrawn_flow: payload.withdrawnFlow,
+      existing: payload.existing,
+      phase_id: payload.phaseId ?? '',
     })
     await refreshNetwork()
     setStatusMessage('Nœud mis à jour')
@@ -404,6 +411,7 @@ export function ProfileTableView() {
           mode="create"
           pk={pendingAdd.pk}
           existingNodes={nodes}
+          project={project}
           excludeNodeId={pendingAdd.placeholderNodeId}
           precedingOuvrage={findPrecedingOuvrage(nodes, trace.id, pendingAdd.pk)}
           onClose={() => setPendingAdd(null)}
@@ -415,11 +423,14 @@ export function ProfileTableView() {
           mode="edit"
           pk={editingNode.pk}
           existingNodes={nodes}
+          project={project}
           initialType={editingNode.type as CreatableNodeType}
           initialName={editingNode.name}
           initialData={editingNode.data}
           initialInjectedFlow={editingNode.injected_flow}
           initialWithdrawnFlow={editingNode.withdrawn_flow}
+          initialExisting={editingNode.existing}
+          initialPhaseId={editingNode.phase_id}
           excludeNodeId={editingNode.id}
           onClose={() => setEditingNode(null)}
           onSubmit={handlePatchNode}

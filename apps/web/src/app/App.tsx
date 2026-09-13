@@ -228,8 +228,9 @@ export function App() {
           : `Calcul terminé${scopeLabel} sans alerte`,
         result.alerts.length > 0 ? 'warning' : 'success',
         // Detail du journal (consigne utilisateur : "plus de détails dans le log") — la liste
-        // complete des alertes, pas seulement leur nombre (deja visible dans CalcResultDialog,
-        // mais qui se ferme et n'est pas conserve ailleurs).
+        // complete des alertes, pas seulement leur nombre. CalcResultDialog ne montre plus les
+        // alertes (consigne utilisateur, elles doivent rester restreintes barre d'etat + journal) :
+        // ce log est desormais leur SEUL affichage persistant.
         result.alerts.length > 0 ? `Calcul terminé${scopeLabel} avec ${result.alerts.length} alerte(s) :\n${result.alerts.map((a) => `• ${a}`).join('\n')}` : undefined,
       )
       return result
@@ -350,7 +351,7 @@ export function App() {
           onSaved={() => setStatusMessage('Préférences enregistrées', 'success')}
         />
       )}
-      {calcResult && (
+      {calcResult && calcResult.reposition_suggestions.length > 0 && (
         <CalcResultDialog result={calcResult} onClose={() => setCalcResult(null)} onAcceptReposition={handleAcceptReposition} />
       )}
     </div>

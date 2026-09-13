@@ -1,9 +1,11 @@
-// Résultat du bouton Calcul > Calculer (consigne utilisateur) : confirmation + alertes du moteur
-// hydraulique (segments pour lesquels aucune conduite du catalogue ne respecte toutes les
-// contraintes — choix du meilleur compromis disponible, cf. hydrops_engine.hydraulics).
-// Sur une alerte hydrostatique gravitaire déplaçable, propose d'accepter/refuser un déplacement
-// du réservoir au PK compatible le plus proche (consigne utilisateur) — l'acceptation relance un
-// calcul complet (tous les tronçons), pas seulement celui qui a déclenché la suggestion.
+// Suite du bouton Calcul > Calculer — PLUS le recapitulatif/la liste des alertes (consigne
+// utilisateur : ces messages doivent rester restreints a la barre d'etat + au journal, cf.
+// state/store.ts:setStatusMessage/LogWindow.tsx, jamais une fenetre qui interrompt apres CHAQUE
+// calcul). Cette fenetre ne sert plus qu'aux propositions de repositionnement (App.tsx ne l'ouvre
+// que si `reposition_suggestions` en contient au moins une) : sur une alerte hydrostatique
+// gravitaire deplacable, propose d'accepter/refuser un deplacement du reservoir au PK compatible
+// le plus proche — l'acceptation relance un calcul complet (tous les tronçons), pas seulement
+// celui qui a declenche la suggestion.
 
 import { useState } from 'react'
 
@@ -32,24 +34,7 @@ export function CalcResultDialog({ result, onClose, onAcceptReposition }: CalcRe
   }
 
   return (
-    <Modal title="Résultat du calcul" onClose={onClose} confirmLabel="Fermer" onConfirm={onClose}>
-      <p style={{ margin: 0, color: 'var(--text)', fontSize: 14 }}>
-        Calcul terminé : {result.segments_updated} segment(s) et {result.nodes_updated} nœud(s) mis à jour.
-      </p>
-      {result.alerts.length > 0 ? (
-        <>
-          <p style={{ margin: 0, color: 'var(--text)', fontSize: 13, fontWeight: 600 }}>
-            {result.alerts.length} alerte(s) :
-          </p>
-          <ul style={{ margin: 0, paddingLeft: 18, color: 'var(--muted)', fontSize: 12, display: 'flex', flexDirection: 'column', gap: 6 }}>
-            {result.alerts.map((a, i) => (
-              <li key={i}>{a}</li>
-            ))}
-          </ul>
-        </>
-      ) : (
-        <p style={{ margin: 0, color: 'var(--accent-2)', fontSize: 13 }}>Aucune alerte — toutes les contraintes sont respectées.</p>
-      )}
+    <Modal title="Repositionnement suggéré" onClose={onClose} confirmLabel="Fermer" onConfirm={onClose}>
       {result.reposition_suggestions
         .filter((s) => !decidedNodeIds.has(s.node_id))
         .map((s) => (

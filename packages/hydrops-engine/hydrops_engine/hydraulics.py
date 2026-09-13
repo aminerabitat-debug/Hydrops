@@ -167,18 +167,23 @@ class SegmentSpec:
     # d'augmentation du DN gravitaire (cf. max_di_mm_for_velocity), qui s'arrete des qu'elle
     # l'atteindrait plutot que de grossir indefiniment.
     min_velocity_ms: Optional[float] = None
-    # Contrainte Materiau/DN forcee (fenetre "Modifier le tronçon", consigne utilisateur) : ce
-    # segment n'est plus auto-dimensionne (aucune recherche catalogue par vitesse/PMS, cf.
-    # _resolve_forced_pipe) — la classe de pression la moins chere disponible pour ce (materiau,
-    # DN) est retenue, et le calcul s'applique meme si la pression/vitesse resultante viole une
-    # contrainte (alerte informative, jamais bloquante, contrairement au dimensionnement
+    # Contrainte Materiau/DN forcee (fenetre "Modifier le tronçon", ou contrainte d'homogeneisation
+    # des classes — consigne utilisateur) : ce segment n'est plus auto-dimensionne (aucune recherche
+    # catalogue par vitesse/PMS, cf. _resolve_forced_pipe). Si `forced_pressure_class` (ci-dessous)
+    # n'est PAS renseigne (cas historique, "Modifier le tronçon" seul), la classe de pression la
+    # moins chere disponible pour ce (materiau, DN) est retenue automatiquement. S'il L'EST (ex.
+    # homogeneisation, qui force les trois a la fois pour figer le DN SANS perdre la classe choisie
+    # par l'utilisateur), c'est EXACTEMENT cette classe qui est retenue — jamais une autre, meme
+    # moins chere. Dans les deux cas, le calcul s'applique meme si la pression/vitesse resultante
+    # viole une contrainte (alerte informative, jamais bloquante, contrairement au dimensionnement
     # automatique). Toujours ensemble : aucun sens a l'un sans l'autre.
     forced_material: Optional[str] = None
     forced_dn: Optional[int] = None
     # Contrainte PARTIELLE par plage de PK (consigne utilisateur, glossaire Piquet/Segment/Troncon —
     # ex. "FD partout, DN500 seulement entre pk 1550 et 5664") : contrairement a forced_material/
-    # forced_dn ci-dessus (les DEUX ensemble, cf. docstring), seuls les champs effectivement
-    # renseignes ici sont fixes — les autres restent choisis automatiquement (le moins cher
+    # forced_dn ci-dessus (les DEUX ensemble, cf. docstring) qui figent aussi ce champ s'il est
+    # renseigne, seuls les champs effectivement renseignes ici sont fixes quand material/dn ne sont
+    # PAS tous les deux donnes — les autres restent choisis automatiquement (le moins cher
     # respectant vitesse/PMS/materiaux autorises parmi ce qui reste). Peut coexister avec un seul
     # des deux champs ci-dessus (ex. forced_dn seul, sans forced_material) — resolu par
     # routers/network.py a partir de Segment.constraints avant construction du SegmentSpec.
@@ -259,16 +264,30 @@ def _partial_forced_material_fn(
     return lambda dn: frozenset({forced_material})
 
 
-def _resolve_forced_pipe(catalog: list[CatalogPipe], material: str, dn: int, min_pms_m: float) -> tuple[Optional[CatalogPipe], bool]:
-    """Pour un (materiau, DN) force (consigne utilisateur, aucune classe de pression imposee) :
-    retient la ligne active la moins chere satisfaisant `min_pms_m`, ou a defaut (aucune ne le
-    respecte) la moins chere tout court — jamais un echec silencieux, le 2e element du tuple
-    (`pms_ok`) indique si le PMS requis est effectivement tenu, a charge de l'appelant d'alerter
-    si non. `None` si la combinaison n'existe meme pas dans le catalogue actif (ne devrait pas
-    arriver, ecarte a la saisie cote API — cf. services/catalog.py:material_dn_exists)."""
+def _resolve_forced_pipe(
+    catalog: list[CatalogPipe], material: str, dn: int, min_pms_m: float, pressure_class: Optional[str] = None
+) -> tuple[Optional[CatalogPipe], bool]:
+    """Pour un (materiau, DN) force (consigne utilisateur) : si `pressure_class` est EGALEMENT
+    fourni (ex. contrainte d'homogeneisation, qui force desormais les trois champs a la fois pour
+    figer le DN sans perdre la classe choisie par l'utilisateur — sinon elle serait silencieusement
+    ignoree et recalculee a la moins chere, ce qui viderait l'homogeneisation de son sens), retient
+    EXACTEMENT cette ligne catalogue (le DI peut alors varier avec la classe pour les materiaux ou
+    elle en depend, jamais le DN) ; sinon (ex. "Modifier le tronçon" sans classe forcee, seul cas
+    historique), retient la ligne active la moins chere satisfaisant `min_pms_m`, ou a defaut
+    (aucune ne le respecte) la moins chere tout court. Jamais un echec silencieux, le 2e element du
+    tuple (`pms_ok`) indique si le PMS requis est effectivement tenu, a charge de l'appelant
+    d'alerter si non. `None` si la combinaison n'existe meme pas dans le catalogue actif (ne devrait
+    pas arriver pour materiau+DN seuls, ecarte a la saisie cote API — cf.
+    services/catalog.py:material_dn_exists ; possible pour une classe precise si desactivee depuis)."""
     matches = [p for p in catalog if p.active and p.material == material and p.dn == dn]
     if not matches:
         return None, False
+    if pressure_class is not None:
+        exact = [p for p in matches if p.pressure_class == pressure_class]
+        if not exact:
+            return None, False
+        chosen = exact[0]
+        return chosen, chosen.pms_m >= min_pms_m - 1e-9
     meeting_pms = [p for p in matches if p.pms_m >= min_pms_m - 1e-9]
     pool = meeting_pms or matches
     chosen = min(pool, key=lambda p: (p.price, p.pressure_class))
@@ -530,14 +549,19 @@ def _gravitaire_pass(
         seg_label = f"Segment entre {_node_label(upstream_node, node_pk)} et {_node_label(downstream_node, node_pk)}"
         if seg.forced_material is not None and seg.forced_dn is not None:
             # Materiau/DN forces (consigne utilisateur) : plus d'auto-dimensionnement pour ce
-            # segment — la classe de pression la moins chere disponible est retenue, et le calcul
-            # s'applique meme si le PMS/la vitesse n'est pas respecte (alerte informative,
-            # jamais bloquante contrairement au dimensionnement automatique).
-            cand, pms_ok = _resolve_forced_pipe(catalog, seg.forced_material, seg.forced_dn, max_pms_needed)
+            # segment. Si une classe est EN PLUS forcee (homogeneisation), elle est retenue
+            # exactement telle quelle (cf. _resolve_forced_pipe) ; sinon la moins chere disponible
+            # est retenue automatiquement. Le calcul s'applique meme si le PMS/la vitesse n'est pas
+            # respecte (alerte informative, jamais bloquante contrairement au dimensionnement
+            # automatique).
+            cand, pms_ok = _resolve_forced_pipe(
+                catalog, seg.forced_material, seg.forced_dn, max_pms_needed, seg.forced_pressure_class
+            )
             if cand is None:
+                class_suffix = f" {seg.forced_pressure_class}" if seg.forced_pressure_class else ""
                 alerts.append(
-                    f"{seg_label} : aucune conduite active {seg.forced_material} DN{seg.forced_dn} au "
-                    f"catalogue — vérifier la fenêtre Conduites."
+                    f"{seg_label} : aucune conduite active {seg.forced_material} DN{seg.forced_dn}"
+                    f"{class_suffix} au catalogue — vérifier la fenêtre Conduites."
                 )
                 candidates = _candidates(catalog, 0.0, None, None, None) or list(catalog)
                 cand = candidates[0]
@@ -890,14 +914,19 @@ def solve_refoulement_troncon(
             )
             min_pms_needed = min_pms_by_segment.get(seg.id, 0.0)
             if seg.forced_material is not None and seg.forced_dn is not None:
-                # Materiau/DN forces (consigne utilisateur) : la classe de pression la moins chere
-                # COUVRANT le PMS requis est retenue si elle existe (comme en gravitaire, cf.
-                # solve_gravitaire_troncon) — sinon la moins chere tout court, avec alerte.
-                cand, pms_ok = _resolve_forced_pipe(catalog, seg.forced_material, seg.forced_dn, min_pms_needed)
+                # Materiau/DN forces (consigne utilisateur) : si une classe est EN PLUS forcee
+                # (homogeneisation), elle est retenue exactement telle quelle (cf.
+                # _resolve_forced_pipe) ; sinon la moins chere COUVRANT le PMS requis est retenue
+                # si elle existe (comme en gravitaire, cf. solve_gravitaire_troncon) — a defaut la
+                # moins chere tout court, avec alerte.
+                cand, pms_ok = _resolve_forced_pipe(
+                    catalog, seg.forced_material, seg.forced_dn, min_pms_needed, seg.forced_pressure_class
+                )
                 if cand is None:
+                    class_suffix = f" {seg.forced_pressure_class}" if seg.forced_pressure_class else ""
                     alerts.append(
-                        f"{seg_label} : aucune conduite active {seg.forced_material} DN{seg.forced_dn} "
-                        f"au catalogue — vérifier la fenêtre Conduites."
+                        f"{seg_label} : aucune conduite active {seg.forced_material} DN{seg.forced_dn}"
+                        f"{class_suffix} au catalogue — vérifier la fenêtre Conduites."
                     )
                     candidates = _candidates(catalog, 0.0, None, None, None) or list(catalog)
                     cand = candidates[0]

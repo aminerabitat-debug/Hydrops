@@ -910,9 +910,12 @@ export function ProfileChart({
             const isHomogenized = homogenizedRanges.some(
               (r) => span.pkStart >= r.pkStart - 1e-6 && span.pkEnd <= r.pkEnd + 1e-6,
             )
-            // Hachurage (consigne utilisateur) : jamais sur la premiere bande, seulement quand le
-            // materiau change par rapport a la bande precedente (pipeSpans est trie par PK).
-            const isNewMaterial = index > 0 && pipeSpans[index - 1].material !== span.material
+            // Hachurage (consigne utilisateur) : compare au materiau DE BASE du tronçon (1ere
+            // bande), pas a la bande precedente — sinon un retour au materiau d'origine APRES une
+            // zone contrainte a un autre materiau se retrouvait aussi hachure (puisqu'il differe
+            // de cette zone-la), alors que ce materiau d'origine ne doit jamais l'etre (c'est LUI
+            // la reference "par defaut, pas d'hachurage", pas la bande juste avant).
+            const isNewMaterial = span.material !== pipeSpans[0].material
             return (
               <div
                 key={span.pkStart}

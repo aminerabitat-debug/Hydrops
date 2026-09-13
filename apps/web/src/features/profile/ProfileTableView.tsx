@@ -278,10 +278,33 @@ export function ProfileTableView() {
       const pkStart = Math.min(...selectedSpans.map((s) => s.pkStart))
       const pkEnd = Math.max(...selectedSpans.map((s) => s.pkEnd))
       const highest = selectedSpans.reduce((a, b) => ((b.pms ?? -Infinity) > (a.pms ?? -Infinity) ? b : a))
+      // Les contraintes existantes qui ont produit les bandes selectionnees (typiquement les
+      // contraintes manuelles de classe sur ces plages) chevauchent forcement [pkStart, pkEnd] —
+      // les laisser en place ferait perdre a la resolution "plage la plus etroite gagne"
+      // (routers/network.py:_resolve_constraints_at_pk) : une contrainte plus etroite que la
+      // nouvelle contrainte d'homogeneisation continuerait de s'appliquer sur sa propre sous-plage,
+      // laissant la classe NON uniforme a l'interieur meme de la zone qu'on vient d'homogeneiser.
+      // On retire donc toute contrainte dont la plage chevauche [pkStart, pkEnd] avant d'ajouter la
+      // nouvelle — seule la contrainte d'homogeneisation gouverne alors toute cette etendue.
+      const remainingConstraints = (segment.constraints ?? []).filter((c) => {
+        const cStart = c.pk_start ?? segment.pk_start
+        const cEnd = c.pk_end ?? segment.pk_end
+        return cEnd <= pkStart || cStart >= pkEnd
+      })
+      // Consigne utilisateur : "le seul cas où le DN peut changer... est quand on utilise un
+      // matériau où le DI dépend de la classe" — donc forcer EXPLICITEMENT material+dn (deja
+      // valides identiques sur toute la selection, cf. verification ci-dessus) EN PLUS de la
+      // classe, pas seulement la classe seule. Laisser material/dn a null delegue au moteur une
+      // resolution "partiellement forcee" (auto-dimensionnement + telescopage), qui peut alors
+      // faire varier le DN — y compris HORS de la zone homogeneisee, le telescopage appliquant une
+      // contrainte de monotonie sur tout le tronçon, pas seulement sur la plage forcee. En forçant
+      // aussi material+dn ici, la resolution passe par le lookup catalogue EXACT (materiau+DN+
+      // classe, cf. hydrops_engine._resolve_forced_pipe) : le DN ne bouge plus du tout, seul le DI
+      // peut varier avec la classe si le catalogue le prevoit pour ce materiau.
       await api.putSegmentConstraints(sessionId, selectedVariantId, segmentId, [
-        ...(segment.constraints ?? []),
+        ...remainingConstraints,
         {
-          material: null, dn: null, pressure_class: highest.pressureClass, pk_start: pkStart, pk_end: pkEnd,
+          material, dn, pressure_class: highest.pressureClass, pk_start: pkStart, pk_end: pkEnd,
           is_existing: false, phase_id: null, source: 'homogenization',
         },
       ])

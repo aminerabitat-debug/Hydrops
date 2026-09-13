@@ -11,7 +11,7 @@ import { isStructuralEndpoint as isStructuralEndpointOf } from '../../shared/typ
 import type { CreatableNodeType, Node, PipeCatalogRow } from '../../shared/types'
 import { DataTable } from '../table/DataTable'
 import { NodeDialog, type NodeSubmitPayload } from './NodeDialog'
-import { CURVE_COLORS, ProfileChart } from './ProfileChart'
+import { CURVE_COLORS, ProfileChart, type SelectedPipeSpan } from './ProfileChart'
 
 // Un ajout au PK visé (pas de noeud reel a ce PK) declenche POST .../nodes ; l'affectation d'un
 // placeholder d'extremite (noeud "junction" deja present, plus jamais montre a l'utilisateur comme
@@ -58,6 +58,11 @@ export function ProfileTableView() {
   // manuel, la plage affichee reste celle deduite de tableScope (trace entiere ou troncon
   // selectionne, cf. ProfileChart).
   const [zoomRange, setZoomRange] = useState<{ min: number; max: number } | null>(null)
+  // Selection des bandes "guitare" en vue d'une homogeneisation de classe (consigne utilisateur) —
+  // controlee ici (comme zoomRange) pour exposer le bouton "Homogénéisation des classes" a cote de
+  // "Réinitialiser le zoom", alors que la selection elle-meme se pilote depuis ProfileChart (clics).
+  const [selectedSpans, setSelectedSpans] = useState<SelectedPipeSpan[]>([])
+  const [homogenizing, setHomogenizing] = useState(false)
 
   useEffect(() => {
     api.listConduites().then(setPipeCatalog).catch(() => setPipeCatalog([]))
@@ -81,9 +86,11 @@ export function ProfileTableView() {
   const profile = trace?.elevation_profile
 
   // Changer de trace ou de troncon selectionne (arborescence) invalide un zoom manuel en cours —
-  // la plage n'a plus forcement de sens sur le nouveau profil affiche.
+  // la plage n'a plus forcement de sens sur le nouveau profil affiche. Idem pour une selection de
+  // bandes "guitare" en cours (homogeneisation).
   useEffect(() => {
     setZoomRange(null)
+    setSelectedSpans([])
   }, [selectedTraceId, tableScope])
 
   // Les courbes derivees du calcul (piezo/PMS/hydrostatiques) et la bande de caracteristiques ne
@@ -156,6 +163,78 @@ export function ProfileTableView() {
     await refreshNetwork()
   }
 
+  // Contrainte d'homogeneisation active correspondant EXACTEMENT a la selection courante (memes
+  // bornes PK, meme segment reel) — determine si le bouton doit proposer "Annuler" plutot que
+  // "Homogénéiser" (consigne utilisateur : le bouton bascule tant que la selection n'a pas changé).
+  const activeHomogenization = useMemo(() => {
+    if (selectedSpans.length < 2) return null
+    const segmentId = selectedSpans[0].segmentId
+    if (selectedSpans.some((s) => s.segmentId !== segmentId)) return null
+    const segment = segments.find((s) => s.id === segmentId)
+    if (!segment) return null
+    const pkStart = Math.min(...selectedSpans.map((s) => s.pkStart))
+    const pkEnd = Math.max(...selectedSpans.map((s) => s.pkEnd))
+    const constraint = (segment.constraints ?? []).find(
+      (c) =>
+        c.source === 'homogenization' &&
+        Math.abs((c.pk_start ?? segment.pk_start) - pkStart) < 1e-6 &&
+        Math.abs((c.pk_end ?? segment.pk_end) - pkEnd) < 1e-6,
+    )
+    return constraint ? { segment, pkStart, pkEnd, constraintId: constraint.id } : null
+  }, [selectedSpans, segments])
+
+  const runScopedCalcul = async () => {
+    if (!sessionId || !selectedVariantId) return
+    const scope = tableScope.kind === 'troncon' ? { traceId: tableScope.traceId, startNodeId: tableScope.startNodeId } : undefined
+    const result = await api.runCalculation(sessionId, selectedVariantId, scope)
+    await refreshNetwork()
+    setStatusMessage(
+      result.alerts.length > 0 ? `Calcul terminé avec ${result.alerts.length} alerte(s)` : 'Calcul terminé sans alerte',
+    )
+  }
+
+  // "Homogénéisation des classes" (consigne utilisateur) : generalise la classe de pression la
+  // plus elevee parmi la selection sur toute son etendue (union des PK), sous forme d'une
+  // contrainte dediee (source="homogenization", cf. panneau "Contraintes" de la fenetre Tronçon) —
+  // rejouable/annulable en revenant sur EXACTEMENT la meme selection (cf. activeHomogenization).
+  const handleHomogenize = async () => {
+    if (!sessionId || !selectedVariantId) return
+    setHomogenizing(true)
+    try {
+      if (activeHomogenization) {
+        const remaining = (activeHomogenization.segment.constraints ?? []).filter(
+          (c) => c.id !== activeHomogenization.constraintId,
+        )
+        await api.putSegmentConstraints(sessionId, selectedVariantId, activeHomogenization.segment.id, remaining)
+        await runScopedCalcul()
+        return
+      }
+      if (selectedSpans.length < 2) return
+      const segmentId = selectedSpans[0].segmentId
+      if (selectedSpans.some((s) => s.segmentId !== segmentId)) {
+        setStatusMessage("Sélectionnez des bandes du même tronçon pour l'homogénéisation.")
+        return
+      }
+      const segment = segments.find((s) => s.id === segmentId)
+      if (!segment) return
+      const pkStart = Math.min(...selectedSpans.map((s) => s.pkStart))
+      const pkEnd = Math.max(...selectedSpans.map((s) => s.pkEnd))
+      const highest = selectedSpans.reduce((a, b) => ((b.pms ?? -Infinity) > (a.pms ?? -Infinity) ? b : a))
+      await api.putSegmentConstraints(sessionId, selectedVariantId, segmentId, [
+        ...(segment.constraints ?? []),
+        {
+          material: null, dn: null, pressure_class: highest.pressureClass, pk_start: pkStart, pk_end: pkEnd,
+          is_existing: false, phase_id: null, source: 'homogenization',
+        },
+      ])
+      await runScopedCalcul()
+    } catch (error) {
+      setStatusMessage(`Homogénéisation impossible : ${(error as Error).message}`)
+    } finally {
+      setHomogenizing(false)
+    }
+  }
+
   const metrics = useMemo(() => {
     if (!trace || !profile || profile.raw.length === 0) return null
     const rawElevations = profile.raw.map((p) => p.z)
@@ -175,7 +254,16 @@ export function ProfileTableView() {
   return (
     <>
       <div className="profile-header">
-        <h2>Profil en long</h2>
+        <div className="profile-title-group">
+          <h2>Profil en long</h2>
+          <button
+            type="button"
+            className="btn-toggle"
+            onClick={() => setMode((m) => (m === 'graph' ? 'data' : 'graph'))}
+          >
+            {mode === 'graph' ? 'Mode Data' : 'Mode Graphique'}
+          </button>
+        </div>
         <div className="metrics">
           <div className="metric">Distance : {metrics ? metrics.distance : '—'}</div>
           <div className="metric">Altitude min : {metrics ? `${metrics.min} m` : '—'}</div>
@@ -187,45 +275,6 @@ export function ProfileTableView() {
       </div>
       <div className="profile-subheader">
         <div className="metrics curve-controls">
-          <button type="button" className="btn-toggle" onClick={() => setMode((m) => (m === 'graph' ? 'data' : 'graph'))}>
-            {mode === 'graph' ? 'Mode Data' : 'Mode Graphique'}
-          </button>
-          <label className="metric">
-            <input type="checkbox" checked={showTerrain} onChange={(e) => setShowTerrain(e.target.checked)} />
-            <span className="curve-color-swatch" style={{ background: CURVE_COLORS.terrain }} />
-            <span>Terrain</span>
-          </label>
-          {hasCalculatedData && (
-            <>
-              <label className="metric" title="Cote piézométrique calculée (bouton Calcul > Calculer), par tronçon">
-                <input type="checkbox" checked={showPiezo} onChange={(e) => setShowPiezo(e.target.checked)} />
-                <span className="curve-color-swatch" style={{ background: CURVE_COLORS.piezo }} />
-                <span>Ligne piézométrique</span>
-              </label>
-              <label className="metric" title="Altitude du terrain + PMS (pression maximale de service) de la conduite en place — tracée en pointillés">
-                <input type="checkbox" checked={showPms} onChange={(e) => setShowPms(e.target.checked)} />
-                <span className="curve-color-swatch curve-color-swatch--dashed" style={{ borderColor: CURVE_COLORS.pms }} />
-                <span>Enveloppe PMS</span>
-              </label>
-              <label className="metric" title="Niveau (constant) du plan d'eau amont max des tronçons gravitaires">
-                <input type="checkbox" checked={showHydrostaticMax} onChange={(e) => setShowHydrostaticMax(e.target.checked)} />
-                <span className="curve-color-swatch" style={{ background: CURVE_COLORS.hydrostaticMax }} />
-                <span>Ligne hydrostatique Max</span>
-              </label>
-              <label className="metric" title="Niveau (constant) du plan d'eau amont min des tronçons gravitaires">
-                <input type="checkbox" checked={showHydrostaticMin} onChange={(e) => setShowHydrostaticMin(e.target.checked)} />
-                <span className="curve-color-swatch" style={{ background: CURVE_COLORS.hydrostaticMin }} />
-                <span>Ligne hydrostatique Min</span>
-              </label>
-            </>
-          )}
-          {trace?.crossings != null && (
-            <label className="metric" title="Traversées détectées (routes, voies ferrées, cours d'eau, bâtiments) — base OpenStreetMap, indicative">
-              <input type="checkbox" checked={showCrossings} onChange={(e) => setShowCrossings(e.target.checked)} />
-              <span className="curve-color-swatch" style={{ background: CURVE_COLORS.crossing }} />
-              <span>Traversées ({trace.crossings.length})</span>
-            </label>
-          )}
           <button
             type="button"
             className={`metric btn-toggle-node ${addNodeMode ? 'active' : ''}`}
@@ -265,6 +314,21 @@ export function ProfileTableView() {
               ⤢ Réinitialiser le zoom
             </button>
           )}
+          {mode === 'graph' && (
+            <button
+              type="button"
+              className="metric btn-toggle-node"
+              onClick={handleHomogenize}
+              disabled={homogenizing || (activeHomogenization == null && selectedSpans.length < 2)}
+              title={
+                activeHomogenization
+                  ? "Annuler cette homogénéisation de classe"
+                  : "Sélectionner au moins 2 bandes (Ctrl/Shift+clic) puis cliquer pour généraliser la classe de pression la plus élevée sur toute la sélection"
+              }
+            >
+              {activeHomogenization ? "Annulation de l'homogénéisation" : 'Homogénéisation des classes'}
+            </button>
+          )}
         </div>
       </div>
       <div className="profile-content">
@@ -281,6 +345,8 @@ export function ProfileTableView() {
             infoMode={infoMode}
             zoomRange={zoomRange}
             onZoomChange={setZoomRange}
+            selectedSpans={selectedSpans}
+            onSelectedSpansChange={setSelectedSpans}
             onAddNode={(pk) => setPendingAdd({ pk })}
             onEditNode={(node) => setEditingNode(node)}
             onAssignNode={(node) => setPendingAdd({ pk: node.pk, placeholderNodeId: node.id })}
@@ -293,6 +359,44 @@ export function ProfileTableView() {
             onDeleteNode={handleDeleteNode}
             addNodeMode={addNodeMode}
           />
+        )}
+      </div>
+      <div className="profile-legend-footer">
+        <label className="metric">
+          <input type="checkbox" checked={showTerrain} onChange={(e) => setShowTerrain(e.target.checked)} />
+          <span className="curve-color-swatch" style={{ background: CURVE_COLORS.terrain }} />
+          <span>Terrain</span>
+        </label>
+        {hasCalculatedData && (
+          <>
+            <label className="metric" title="Cote piézométrique calculée (bouton Calcul > Calculer), par tronçon">
+              <input type="checkbox" checked={showPiezo} onChange={(e) => setShowPiezo(e.target.checked)} />
+              <span className="curve-color-swatch" style={{ background: CURVE_COLORS.piezo }} />
+              <span>Ligne piézométrique</span>
+            </label>
+            <label className="metric" title="Altitude du terrain + PMS (pression maximale de service) de la conduite en place — tracée en pointillés">
+              <input type="checkbox" checked={showPms} onChange={(e) => setShowPms(e.target.checked)} />
+              <span className="curve-color-swatch curve-color-swatch--dashed" style={{ borderColor: CURVE_COLORS.pms }} />
+              <span>Enveloppe PMS</span>
+            </label>
+            <label className="metric" title="Niveau (constant) du plan d'eau amont max des tronçons gravitaires">
+              <input type="checkbox" checked={showHydrostaticMax} onChange={(e) => setShowHydrostaticMax(e.target.checked)} />
+              <span className="curve-color-swatch" style={{ background: CURVE_COLORS.hydrostaticMax }} />
+              <span>Ligne hydrostatique Max</span>
+            </label>
+            <label className="metric" title="Niveau (constant) du plan d'eau amont min des tronçons gravitaires">
+              <input type="checkbox" checked={showHydrostaticMin} onChange={(e) => setShowHydrostaticMin(e.target.checked)} />
+              <span className="curve-color-swatch" style={{ background: CURVE_COLORS.hydrostaticMin }} />
+              <span>Ligne hydrostatique Min</span>
+            </label>
+          </>
+        )}
+        {trace?.crossings != null && (
+          <label className="metric" title="Traversées détectées (routes, voies ferrées, cours d'eau, bâtiments) — base OpenStreetMap, indicative">
+            <input type="checkbox" checked={showCrossings} onChange={(e) => setShowCrossings(e.target.checked)} />
+            <span className="curve-color-swatch" style={{ background: CURVE_COLORS.crossing }} />
+            <span>Traversées ({trace.crossings.length})</span>
+          </label>
         )}
       </div>
       {pendingAdd != null && trace && (

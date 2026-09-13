@@ -656,3 +656,87 @@ def test_patch_node_position_recomputes_relative_level_offset(
     updated_downstream_segment = next(s for s in segments_after if s["id"] == downstream_segment["id"])
     assert updated_downstream_segment["upstream_water_level_min"] == pytest.approx(new_z + 3.0)
     assert updated_downstream_segment["upstream_water_level_min_offset"] == pytest.approx(3.0)
+
+
+def test_put_segment_constraints_replaces_list_and_invalidates_calc_outputs(
+    client, session_id, project_state, sample_kml_bytes, import_trace
+):
+    variant_id, trace = _import_sample(client, session_id, project_state, sample_kml_bytes, import_trace)
+    segment_id = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments").json()[0]["id"]
+
+    response = client.put(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/segments/{segment_id}/constraints",
+        json={"constraints": [{"material": "FD"}, {"dn": 500, "pk_start": 100.0, "pk_end": 200.0}]},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert len(body["constraints"]) == 2
+    assert all(c["id"] for c in body["constraints"])
+    assert body["constraints"][0]["material"] == "FD"
+    assert body["constraints"][1]["dn"] == 500
+
+    # Remplacement complet (consigne utilisateur, meme convention que Preferences) : un nouvel
+    # appel avec une liste plus courte supprime bien ce qui n'y figure plus.
+    response2 = client.put(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/segments/{segment_id}/constraints",
+        json={"constraints": [{"material": "PEHD"}]},
+    )
+    assert response2.status_code == 200, response2.text
+    assert len(response2.json()["constraints"]) == 1
+    assert response2.json()["constraints"][0]["material"] == "PEHD"
+
+
+def test_put_segment_constraints_rejects_crossing_contradiction(
+    client, session_id, project_state, sample_kml_bytes, import_trace
+):
+    # Deux plages qui se CROISENT (ni imbrication ni disjonction) et renseignent differemment le
+    # MEME champ (materiau) — consigne utilisateur : "s'assurer que les contraintes ne sont pas
+    # contradictoires".
+    variant_id, trace = _import_sample(client, session_id, project_state, sample_kml_bytes, import_trace)
+    segment_id = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments").json()[0]["id"]
+
+    response = client.put(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/segments/{segment_id}/constraints",
+        json={
+            "constraints": [
+                {"material": "FD", "pk_start": 0.0, "pk_end": 300.0},
+                {"material": "PVC", "pk_start": 200.0, "pk_end": 500.0},
+            ]
+        },
+    )
+    assert response.status_code == 422
+    assert "contradictoires" in response.json()["detail"].lower()
+
+
+def test_put_segment_constraints_allows_nested_ranges(
+    client, session_id, project_state, sample_kml_bytes, import_trace
+):
+    # Une plage entierement contenue dans une autre reste autorisee (mecanisme de specificite,
+    # pas une contradiction) — c'est exactement le cas d'usage donne par l'utilisateur : materiau
+    # sur tout le tronçon, DN sur une sous-plage.
+    variant_id, trace = _import_sample(client, session_id, project_state, sample_kml_bytes, import_trace)
+    segment_id = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments").json()[0]["id"]
+
+    response = client.put(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/segments/{segment_id}/constraints",
+        json={
+            "constraints": [
+                {"material": "FD"},
+                {"dn": 500, "pk_start": 100.0, "pk_end": 200.0},
+            ]
+        },
+    )
+    assert response.status_code == 200, response.text
+
+
+def test_reset_segment_clears_constraints(client, session_id, project_state, sample_kml_bytes, import_trace):
+    variant_id, trace = _import_sample(client, session_id, project_state, sample_kml_bytes, import_trace)
+    segment_id = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments").json()[0]["id"]
+    client.put(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/segments/{segment_id}/constraints",
+        json={"constraints": [{"material": "FD"}]},
+    )
+
+    response = client.post(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments/{segment_id}/reset")
+    assert response.status_code == 200, response.text
+    assert response.json().get("constraints", []) == []

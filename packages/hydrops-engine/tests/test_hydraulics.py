@@ -611,6 +611,65 @@ def test_solve_gravitaire_troncon_forced_dn_unknown_combination_alerts_and_falls
     assert len(result.segments) == 1
 
 
+def test_solve_gravitaire_troncon_forced_dn_only_autopicks_cheapest_material():
+    # Contrainte PARTIELLE (consigne utilisateur, contraintes par plage de PK) : DN force SEUL,
+    # sans materiau — le materiau le moins cher disponible a ce DN est choisi automatiquement (PVC
+    # DN110 @ 72.8 < PEHD DN110 @ 101.9 dans _catalog()), sans jamais figer le materiau.
+    catalog = _catalog()
+    nodes_z = {"A": 40.0, "B": 0.0}
+    segments = [SegmentSpec(id="s1", length_m=500.0, flow_m3s=0.001, forced_dn=110)]
+    result = solve_gravitaire_troncon(
+        node_ids_ordered=["A", "B"], node_ground_z=nodes_z, segments_ordered=segments,
+        upstream_level_max=50.0, upstream_level_min=49.0, min_pressure=None,
+        downstream_residual_pressure=None, catalog=catalog, singular_loss_markup_pct=10.0,
+        fluid_temperature_c=20.0,
+    )
+    assert not result.alerts
+    seg_s1 = result.segments[0]
+    assert seg_s1.dn == 110
+    assert seg_s1.material == "PVC"
+
+
+def test_solve_gravitaire_troncon_forced_material_only_autosizes_dn():
+    # Materiau force SEUL, sans DN — le DN le moins cher respectant la vitesse max est choisi
+    # automatiquement, restreint a ce materiau (jamais PEHD, meme si moins cher a un autre DN).
+    catalog = _catalog()
+    nodes_z = {"A": 40.0, "B": 0.0}
+    segments = [SegmentSpec(id="s1", length_m=500.0, flow_m3s=0.001, max_velocity_ms=2.0, forced_material="PVC")]
+    result = solve_gravitaire_troncon(
+        node_ids_ordered=["A", "B"], node_ground_z=nodes_z, segments_ordered=segments,
+        upstream_level_max=50.0, upstream_level_min=49.0, min_pressure=None,
+        downstream_residual_pressure=None, catalog=catalog, singular_loss_markup_pct=10.0,
+        fluid_temperature_c=20.0,
+    )
+    assert not result.alerts
+    seg_s1 = result.segments[0]
+    assert seg_s1.material == "PVC"
+    assert seg_s1.dn == 110  # le plus petit/moins cher PVC qui respecte la vitesse max
+
+
+def test_solve_gravitaire_troncon_forced_pressure_class_only_autosizes_material_and_dn():
+    # Classe de pression forcee SEULE (ex. homogeneisation, consigne utilisateur) — materiau ET DN
+    # restent choisis automatiquement, mais seulement parmi les conduites de cette classe.
+    catalog = [
+        CatalogPipe(id=1, dn=110, di_mm=99.4, material="PVC", pressure_class="PN6", pms_m=61.2, price=50.0, roughness_mm=0.01),
+        CatalogPipe(id=2, dn=110, di_mm=99.4, material="PVC", pressure_class="PN16", pms_m=163.1, price=90.0, roughness_mm=0.01),
+    ]
+    nodes_z = {"A": 100.0, "B": 0.0}
+    segments = [SegmentSpec(id="s1", length_m=500.0, flow_m3s=0.001, forced_pressure_class="PN16")]
+    result = solve_gravitaire_troncon(
+        node_ids_ordered=["A", "B"], node_ground_z=nodes_z, segments_ordered=segments,
+        upstream_level_max=105.0, upstream_level_min=104.0, min_pressure=None,
+        downstream_residual_pressure=None, catalog=catalog, singular_loss_markup_pct=10.0,
+        fluid_temperature_c=20.0,
+    )
+    assert not result.alerts
+    seg_s1 = result.segments[0]
+    assert seg_s1.pressure_class == "PN16"
+    assert seg_s1.material == "PVC"
+    assert seg_s1.dn == 110
+
+
 def test_solve_refoulement_troncon_forced_dn_upgrades_class_to_cover_pressure():
     # DN force dont la classe la moins chere (PN6) est insuffisante face a la pression resultante —
     # une classe superieure existe (PN16, meme DN/materiau) et doit etre retenue automatiquement

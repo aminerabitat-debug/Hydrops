@@ -266,6 +266,28 @@ class SegmentDetail(BaseModel):
     head_loss_cumulative: Optional[float] = None
 
 
+class SegmentConstraint(BaseModel):
+    """Contrainte matériau/DN/classe sur une PLAGE DE PK d'un tronçon (consigne utilisateur —
+    remplace l'ancien forçage unique `Segment.forced_material`/`forced_dn`, qui reste lu pour
+    compatibilité ascendante mais n'est plus proposé à la saisie). `pk_start`/`pk_end` à `None` =
+    depuis le début/jusqu'à la fin du tronçon. Chaque champ (matériau/DN/classe) est optionnel
+    indépendamment : "FD sur tout le tronçon" + "DN500 seulement entre 1550 et 5664" sont deux
+    contraintes distinctes qui se combinent, la plus étroite l'emportant champ par champ à un PK
+    donné (cf. routers/network.py, résolution par piquet). `is_existing`/`phase_id` : cf. le volet
+    "Éléments existants"/"Phasage" de la fenêtre Tronçon — une contrainte `is_existing=True` est
+    éditable uniquement depuis ce volet, jamais depuis le tableau "Contraintes" générique."""
+
+    id: str
+    material: Optional[str] = None
+    dn: Optional[int] = None
+    pressure_class: Optional[str] = None
+    pk_start: Optional[float] = None
+    pk_end: Optional[float] = None
+    is_existing: bool = False
+    phase_id: Optional[str] = None
+    source: Literal["manual", "homogenization", "existing"] = "manual"
+
+
 class Segment(BaseModel):
     id: UUID
     upstream_node_id: UUID
@@ -318,6 +340,12 @@ class Segment(BaseModel):
     # ensemble : aucun sens a forcer l'un sans l'autre.
     forced_material: Optional[str] = None
     forced_dn: Optional[int] = None
+    # Contraintes matériau/DN/classe PAR PLAGE DE PK (consigne utilisateur — cf. SegmentConstraint
+    # ci-dessus). Comme les autres paramètres de tronçon (head_flow, min_pressure, etc.), seul le
+    # PREMIER Segment réel du tronçon (first_seg, cf. routers/network.py) porte une liste
+    # effectivement consultée par le calcul — un tronçon à plusieurs Segments réels (piquages
+    # transparents) n'en a qu'une, valable sur toute sa longueur en PK absolu.
+    constraints: list[SegmentConstraint] = Field(default_factory=list)
     # Sorties du calcul hydraulique (bouton Calculer) pour ce segment — cf.
     # packages/hydrops-engine/hydrops_engine/hydraulics.py. `flow`/`roughness` (deja existants
     # ci-dessus) sont aussi ecrases par le calcul : `flow` devient le debit reellement transite

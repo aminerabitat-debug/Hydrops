@@ -55,6 +55,20 @@ const DEFAULT_MATERIAL_BAND_COLORS: [string, string] = ['#33415c', '#455a7c']
 // il revient a droite des que la place suffit de nouveau (recalcule a chaque survol, jamais figé).
 const HOVER_INFO_FLIP_MARGIN_PX = 260
 
+// Une bande "guitare" selectionnee (consigne utilisateur : cliquer une bande de caracteristiques
+// de conduite pour la selectionner, Ctrl/Shift pour la multi-selection, en vue d'une
+// homogeneisation de classe) — assez d'info pour que le PARENT (ProfileTableView, qui porte le
+// bouton "Homogénéisation des classes") puisse agir sans avoir a recalculer pipeSpans lui-meme.
+export interface SelectedPipeSpan {
+  segmentId: string
+  pkStart: number
+  pkEnd: number
+  material: string
+  dn: number
+  pressureClass: string
+  pms?: number
+}
+
 interface ProfileChartProps {
   showTerrain: boolean
   showPiezo: boolean
@@ -73,6 +87,11 @@ interface ProfileChartProps {
   // zoom manuel, la plage affichee reste celle deduite de tableScope (trace entiere/troncon).
   zoomRange: { min: number; max: number } | null
   onZoomChange: (range: { min: number; max: number } | null) => void
+  // Selection des bandes de caracteristiques de conduite (consigne utilisateur, en vue d'une
+  // homogeneisation de classe) — controlee par le parent (meme pattern que zoomRange), qui porte
+  // le bouton "Homogénéisation des classes" a cote de "Réinitialiser le zoom".
+  selectedSpans: SelectedPipeSpan[]
+  onSelectedSpansChange: (spans: SelectedPipeSpan[]) => void
   onAddNode: (pk: number) => void
   onEditNode: (node: Node) => void
   onAssignNode: (node: Node) => void
@@ -159,6 +178,8 @@ export function ProfileChart({
   infoMode,
   zoomRange,
   onZoomChange,
+  selectedSpans,
+  onSelectedSpansChange,
   onAddNode,
   onEditNode,
   onAssignNode,
@@ -202,6 +223,8 @@ export function ProfileChart({
   const tableScope = useAppStore((s) => s.selection.tableScope)
   const hoveredPk = useAppStore((s) => s.selection.hoveredPk)
   const setHoveredPk = useAppStore((s) => s.setHoveredPk)
+  const pkPickResolver = useAppStore((s) => s.pkPickResolver)
+  const resolvePkPick = useAppStore((s) => s.resolvePkPick)
 
   const trace = traces.find((t) => t.id === selectedTraceId) ?? traces[0]
   const profile = trace?.elevation_profile
@@ -281,7 +304,7 @@ export function ProfileChart({
     const traceNodeIds = new Set(traceNodes.map((n) => n.id))
     const pms = (material: string, dn: number, pressureClass: string) =>
       pipeCatalog.find((r) => r.material === material && r.dn === dn && r.pressure_class === pressureClass)?.pms
-    const spans: { pkStart: number; pkEnd: number; material: string; dn: number; pressureClass: string; pms?: number }[] = []
+    const spans: SelectedPipeSpan[] = []
     for (const s of segments
       .filter((s) => traceNodeIds.has(s.upstream_node_id) && s.velocity != null)
       .slice()
@@ -289,7 +312,7 @@ export function ProfileChart({
       const details = s.segment_details
       if (!details || details.length === 0) {
         spans.push({
-          pkStart: s.pk_start, pkEnd: s.pk_end, material: s.material, dn: s.dn, pressureClass: s.pressure_class,
+          segmentId: s.id, pkStart: s.pk_start, pkEnd: s.pk_end, material: s.material, dn: s.dn, pressureClass: s.pressure_class,
           pms: pms(s.material, s.dn, s.pressure_class),
         })
         continue
@@ -305,8 +328,8 @@ export function ProfileChart({
           next && next.material === detail.material && next.dn === detail.dn && next.pressure_class === detail.pressure_class
         if (!sameAsNext) {
           spans.push({
-            pkStart: runStart, pkEnd: detail.pk, material: detail.material, dn: detail.dn, pressureClass: detail.pressure_class,
-            pms: pms(detail.material, detail.dn, detail.pressure_class),
+            segmentId: s.id, pkStart: runStart, pkEnd: detail.pk, material: detail.material, dn: detail.dn,
+            pressureClass: detail.pressure_class, pms: pms(detail.material, detail.dn, detail.pressure_class),
           })
           runStart = detail.pk
         }
@@ -314,6 +337,54 @@ export function ProfileChart({
     }
     return spans
   }, [segments, traceNodes, pipeCatalog])
+
+  // Plages homogeneisees (consigne utilisateur : petit trait sous la/les bande(s) concernee(s) tant
+  // que la contrainte source="homogenization" existe) — deduites directement des contraintes du
+  // tronçon, pas d'etat local a synchroniser.
+  const homogenizedRanges = useMemo(() => {
+    const ranges: { pkStart: number; pkEnd: number }[] = []
+    for (const s of segments) {
+      for (const c of s.constraints ?? []) {
+        if (c.source !== 'homogenization') continue
+        ranges.push({ pkStart: c.pk_start ?? s.pk_start, pkEnd: c.pk_end ?? s.pk_end })
+      }
+    }
+    return ranges
+  }, [segments])
+
+  // Selection des bandes "guitare" (consigne utilisateur : clic simple = remplace, Ctrl/Cmd+clic =
+  // ajoute/retire, Shift+clic = plage depuis la derniere ancree, Echap = vide). L'ancre (dernier
+  // index cliqué hors Ctrl) vit dans un ref : ne doit pas re-render, seulement servir de reference
+  // au prochain Shift+clic.
+  const shiftAnchorRef = useRef<number | null>(null)
+  const handleGuitarSegmentClick = (index: number, event: React.MouseEvent) => {
+    const span = pipeSpans[index]
+    if (event.shiftKey && shiftAnchorRef.current != null) {
+      const [from, to] = [shiftAnchorRef.current, index].sort((a, b) => a - b)
+      onSelectedSpansChange(pipeSpans.slice(from, to + 1))
+      return
+    }
+    if (event.ctrlKey || event.metaKey) {
+      const already = selectedSpans.some((s) => s.pkStart === span.pkStart && s.segmentId === span.segmentId)
+      onSelectedSpansChange(
+        already
+          ? selectedSpans.filter((s) => !(s.pkStart === span.pkStart && s.segmentId === span.segmentId))
+          : [...selectedSpans, span],
+      )
+      shiftAnchorRef.current = index
+      return
+    }
+    onSelectedSpansChange([span])
+    shiftAnchorRef.current = index
+  }
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onSelectedSpansChange([])
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [onSelectedSpansChange])
 
   const pmsEnvelope = useMemo(() => {
     if (pipeSpans.length === 0) return []
@@ -499,6 +570,16 @@ export function ProfileChart({
     const xScale = (pk: number) => PADDING.left + ((pk - pkMin) / pkSpan) * plotWidth
     const yScale = (z: number) => PADDING.top + plotHeight - ((z - zAxisMin) / (zAxisMax - zAxisMin)) * plotHeight
 
+    // ---- Selection des bandes "guitare" (consigne utilisateur) : rectangle translucide, dessine
+    // AVANT tout le reste pour ne jamais cacher les courbes (terrain/piezo/PMS/hydrostatiques). ----
+    for (const span of selectedSpans) {
+      const spanStart = Math.max(span.pkStart, pkMin)
+      const spanEnd = Math.min(span.pkEnd, pkMax)
+      if (spanEnd <= spanStart) continue
+      ctx.fillStyle = 'rgba(110, 168, 254, 0.18)'
+      ctx.fillRect(xScale(spanStart), PADDING.top, xScale(spanEnd) - xScale(spanStart), plotHeight)
+    }
+
     // ---- Grille + graduations ----
     const xStep = niceStep(pkSpan, 8)
     const yStep = niceStep(zAxisMax - zAxisMin, 5)
@@ -677,6 +758,7 @@ export function ProfileChart({
     traceNodes,
     pkMin,
     pkMax,
+    selectedSpans,
   ])
 
   // Positions en pixels des tronçons pour la bande de caracteristiques ("guitare", en dessous du
@@ -756,6 +838,13 @@ export function ProfileChart({
     const pk = pkMin + ((x - PADDING.left) / plotWidth) * (pkMax - pkMin)
     if (pk < pkMin || pk > pkMax) return
 
+    // Selection de PK en cours (consigne utilisateur : bouton "…" du panneau Contraintes de la
+    // fenetre Tronçon) — un clic resout le PK vise au lieu du comportement habituel du clic.
+    if (pkPickResolver) {
+      resolvePkPick(pk)
+      return
+    }
+
     const hitToleranceInPk = (8 / plotWidth) * (pkMax - pkMin)
     const hitNode = traceNodes.find((n) => Math.abs(n.pk - pk) <= hitToleranceInPk)
     // Un placeholder d'extremite n'affiche aucun badge (ci-dessus) : il ne reagit donc au clic que
@@ -792,12 +881,17 @@ export function ProfileChart({
             const lengthKm = (span.pkEnd - span.pkStart) / 1000
             const label = `${span.material} DN${span.dn} ${span.pressureClass} · L=${lengthKm.toFixed(1)} km`
             const shades = MATERIAL_BAND_COLORS[span.material] ?? DEFAULT_MATERIAL_BAND_COLORS
+            const isSelected = selectedSpans.some((s) => s.pkStart === span.pkStart && s.segmentId === span.segmentId)
+            const isHomogenized = homogenizedRanges.some(
+              (r) => span.pkStart >= r.pkStart - 1e-6 && span.pkEnd <= r.pkEnd + 1e-6,
+            )
             return (
               <div
                 key={span.pkStart}
-                className="profile-guitar-segment"
+                className={`profile-guitar-segment ${isSelected ? 'selected' : ''} ${isHomogenized ? 'homogenized' : ''}`}
                 style={{ left, width, background: shades[index % 2] }}
                 title={label}
+                onClick={(event) => handleGuitarSegmentClick(index, event)}
               >
                 {label}
               </div>
@@ -809,7 +903,7 @@ export function ProfileChart({
         <canvas
           ref={canvasCallbackRef}
           className="profile-chart"
-          style={{ cursor: addNodeMode ? 'crosshair' : 'default' }}
+          style={{ cursor: pkPickResolver || addNodeMode ? 'crosshair' : 'default' }}
           onMouseMove={handleMouseMove}
           onMouseLeave={() => {
             // Annule toute frame en attente (cf. handleMouseMove) : sans ça, une mise a jour

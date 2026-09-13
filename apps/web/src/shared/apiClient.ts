@@ -16,6 +16,7 @@ import type {
   PipeCatalogRow,
   ProjectStateResponse,
   Segment,
+  SegmentConstraint,
   TraceGeometry,
   TronconGroup,
   Variant,
@@ -340,6 +341,26 @@ export const api = {
     const response = await fetch(
       `${API_BASE}/projects/${sessionId}/variants/${variantId}/segments/${segmentId}/reset`,
       { method: 'POST' },
+    )
+    return handleJson(response)
+  },
+
+  // Panneau "Contraintes" de la fenetre Tronçon (consigne utilisateur : materiau/DN/classe par
+  // plage de PK) — remplacement complet de la liste, meme convention que Préférences. 422 si le
+  // serveur detecte une contradiction (cf. hydrops_api.routers.network:_find_contradictory_constraints).
+  async putSegmentConstraints(
+    sessionId: string,
+    variantId: string,
+    segmentId: string,
+    constraints: (Omit<SegmentConstraint, 'id'> & { id?: string })[],
+  ): Promise<Segment> {
+    const response = await fetch(
+      `${API_BASE}/projects/${sessionId}/variants/${variantId}/segments/${segmentId}/constraints`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ constraints }),
+      },
     )
     return handleJson(response)
   },

@@ -60,6 +60,26 @@
           "head_loss_cumulative": { "type": ["number", "null"] }
         }
       }
+    },
+    "constraints": {
+      "type": "array",
+      "description": "Contraintes materiau/DN/classe par plage de PK (consigne utilisateur) — remplace le forcage unique forced_material/forced_dn pour la saisie, ceux-ci restant lus pour compatibilite ascendante.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id"],
+        "properties": {
+          "id": { "type": "string" },
+          "material": { "type": ["string", "null"] },
+          "dn": { "type": ["integer", "null"] },
+          "pressure_class": { "type": ["string", "null"] },
+          "pk_start": { "type": ["number", "null"], "description": "null = depuis le debut du troncon" },
+          "pk_end": { "type": ["number", "null"], "description": "null = jusqu'a la fin du troncon" },
+          "is_existing": { "type": "boolean", "default": false },
+          "phase_id": { "type": ["string", "null"] },
+          "source": { "type": "string", "enum": ["manual", "homogenization", "existing"], "default": "manual" }
+        }
+      }
     }
   }
 }

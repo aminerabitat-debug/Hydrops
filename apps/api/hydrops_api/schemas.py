@@ -142,6 +142,29 @@ class PatchSegmentRequest(BaseModel):
     forced_dn: Optional[int] = None
 
 
+class SegmentConstraintRequest(BaseModel):
+    """Une ligne du tableau "Contraintes" de la fenêtre Tronçon (consigne utilisateur) — cf.
+    hydropack.models.SegmentConstraint. `id` absent/vide = nouvelle contrainte (un id est généré
+    serveur)."""
+
+    id: Optional[str] = None
+    material: Optional[str] = None
+    dn: Optional[int] = None
+    pressure_class: Optional[str] = None
+    pk_start: Optional[float] = None
+    pk_end: Optional[float] = None
+    is_existing: bool = False
+    phase_id: Optional[str] = None
+    source: Literal["manual", "homogenization", "existing"] = "manual"
+
+
+class PutSegmentConstraintsRequest(BaseModel):
+    """Remplacement complet de la liste des contraintes d'un tronçon (même convention que
+    "Préférences" — le formulaire renvoie toujours l'état complet, pas un patch champ-par-champ)."""
+
+    constraints: list[SegmentConstraintRequest] = []
+
+
 class PatchNodePositionRequest(BaseModel):
     """Deplace un noeud existant le long de sa trace (consigne utilisateur : proposer de decaler
     le reservoir sur une alerte de terrain incompatible) — refuse sur une extremite structurelle

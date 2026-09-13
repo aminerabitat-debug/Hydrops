@@ -94,6 +94,8 @@ export function MapView() {
   const setShowCrossings = useAppStore((s) => s.setShowCrossings)
   const updateTrace = useAppStore((s) => s.updateTrace)
   const setStatusMessage = useAppStore((s) => s.setStatusMessage)
+  const pkPickResolver = useAppStore((s) => s.pkPickResolver)
+  const resolvePkPick = useAppStore((s) => s.resolvePkPick)
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return
@@ -431,6 +433,25 @@ export function MapView() {
     }
   }, [addCrossingMode, hoveredTrace, hoveredTraceVertices])
 
+  // Selection de PK depuis la carte (consigne utilisateur : bouton "…" du panneau Contraintes de
+  // la fenetre Tronçon) — meme principe que l'ajout de traversee ci-dessus : un clic sur la trace
+  // SURVOLEE, pendant qu'une selection est demandee (store, partage avec ProfileChart/DataTable),
+  // resout le PK le plus proche au lieu du comportement habituel du clic.
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map || !pkPickResolver || !hoveredTrace || !hoveredTraceVertices) return
+    const handleClick = (event: maplibregl.MapLayerMouseEvent) => {
+      const id = event.features?.[0]?.properties?.id as string | undefined
+      if (id !== hoveredTrace.id) return
+      const pk = nearestPkForPoint(hoveredTraceVertices, event.lngLat.lng, event.lngLat.lat)
+      resolvePkPick(pk)
+    }
+    map.on('click', 'traces-line', handleClick)
+    return () => {
+      map.off('click', 'traces-line', handleClick)
+    }
+  }, [pkPickResolver, hoveredTrace, hoveredTraceVertices, resolvePkPick])
+
   // Halo le long du trace pour une traversee de ZONE (urbain/forestier, consigne utilisateur :
   // "une sorte de shadow autour du tracé dans cette zone") — un sous-segment de geometrie par paire
   // Entree/Sortie consecutive de MEME nature, regroupees par kind avant appariement (une trace peut
@@ -508,7 +529,7 @@ export function MapView() {
 
   return (
     <div className="map-view-wrap">
-      <div ref={containerRef} className="map-view" />
+      <div ref={containerRef} className={`map-view ${pkPickResolver ? 'map-view--picking' : ''}`} />
       <button
         type="button"
         className={`map-info-toggle ${infoMode ? 'active' : ''}`}

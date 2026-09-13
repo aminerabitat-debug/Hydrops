@@ -14,7 +14,7 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
 
-from hydropack.models import MaterialCriterionRule, Node, Segment, SegmentDetail
+from hydropack.models import MaterialCriterionRule, Node, Segment, SegmentConstraint, SegmentDetail
 from hydropack.serializer import ProjectPackage
 
 from hydrops_engine.hydraulics import (
@@ -36,7 +36,13 @@ from hydrops_engine.topology import (
 from ..core.deps import get_session_store, require_package
 from ..data.material_criteria_seed import DEFAULT_MATERIAL_CRITERIA
 from ..data.pipe_catalog_seed import DEFAULT_ROUGHNESS_MM
-from ..schemas import NewNodeRequest, PatchNodePositionRequest, PatchNodeRequest, PatchSegmentRequest
+from ..schemas import (
+    NewNodeRequest,
+    PatchNodePositionRequest,
+    PatchNodeRequest,
+    PatchSegmentRequest,
+    PutSegmentConstraintsRequest,
+)
 from ..services import catalog
 
 # Regime hydraulique d'un troncon (miroir exact de apps/web/src/shared/troncons.ts:tronconRegime —
@@ -101,6 +107,94 @@ def _hydraulic_subdivision_points(
         coarser_stride = -(-len(interior) // _MAX_FINE_SEGMENTS_PER_SEGMENT)  # arrondi au superieur
         sampled = interior[::coarser_stride]
     return sampled
+
+
+def _effective_constraints(first_seg: Segment) -> list[SegmentConstraint]:
+    """Contraintes matériau/DN/classe par plage de PK d'un tronçon (consigne utilisateur) — celles
+    de `first_seg.constraints`, precedees (compatibilite ascendante) d'une contrainte implicite
+    SANS BORNES derivee de l'ancien forçage unique `forced_material`/`forced_dn` s'il est encore
+    renseigne sur un projet existant (aucune migration de donnees necessaire : les deux mecanismes
+    se combinent via la resolution "plage la plus etroite gagne", cf. _resolve_constraints_at_pk)."""
+    constraints = list(first_seg.constraints)
+    if first_seg.forced_material is not None or first_seg.forced_dn is not None:
+        constraints = [
+            SegmentConstraint(id="__legacy_forced__", material=first_seg.forced_material, dn=first_seg.forced_dn)
+        ] + constraints
+    return constraints
+
+
+def _constraint_span(constraint: SegmentConstraint, troncon_pk_start: float, troncon_pk_end: float) -> tuple[float, float]:
+    start = constraint.pk_start if constraint.pk_start is not None else troncon_pk_start
+    end = constraint.pk_end if constraint.pk_end is not None else troncon_pk_end
+    return start, end
+
+
+def _resolve_constraints_at_pk(
+    constraints: list[SegmentConstraint], pk: float, troncon_pk_start: float, troncon_pk_end: float
+) -> tuple[Optional[str], Optional[int], Optional[str]]:
+    """Materiau/DN/classe effectifs a CE piquet (consigne utilisateur, contraintes par plage de
+    PK) : pour chaque champ independamment, retient la valeur de la contrainte dont la plage est
+    la plus ETROITE qui le renseigne et qui contient ce PK — une contrainte plus specifique ecrase
+    une contrainte plus large, champ par champ (permet "FD partout" + "DN500 seulement entre 1550
+    et 5664" : deux contraintes distinctes, chacune ne renseignant qu'un champ)."""
+    best: dict[str, tuple[float, object]] = {}
+    for constraint in constraints:
+        start, end = _constraint_span(constraint, troncon_pk_start, troncon_pk_end)
+        if not (start - 1e-6 <= pk <= end + 1e-6):
+            continue
+        width = end - start
+        for field, value in (
+            ("material", constraint.material), ("dn", constraint.dn), ("pressure_class", constraint.pressure_class),
+        ):
+            if value is None:
+                continue
+            current = best.get(field)
+            # A largeur EGALE, la contrainte la plus RECENTE (derniere de la liste) l'emporte — la
+            # contrainte implicite issue de l'ancien forced_material/forced_dn (compatibilite
+            # ascendante, toujours en tete de liste, cf. _effective_constraints) a la meme largeur
+            # "tout le tronçon" qu'une nouvelle contrainte non bornee ajoutee depuis le panneau
+            # Contraintes — celle-ci doit pouvoir la remplacer, pas rester bloquee derriere elle.
+            if current is None or width < current[0] + 1e-9:
+                best[field] = (width, value)
+    return (
+        best["material"][1] if "material" in best else None,
+        best["dn"][1] if "dn" in best else None,
+        best["pressure_class"][1] if "pressure_class" in best else None,
+    )
+
+
+def _find_contradictory_constraints(
+    constraints: list[SegmentConstraint], troncon_pk_start: float, troncon_pk_end: float
+) -> Optional[str]:
+    """Rejette toute paire de contraintes dont les plages se CROISENT partiellement (ni l'une ni
+    l'autre entierement contenue dans l'autre) et qui renseignent toutes les deux le MEME champ
+    avec des valeurs differentes (consigne utilisateur : "s'assurer que les contraintes ne sont
+    pas contradictoires"). Deux plages strictement imbriquees restent autorisees — c'est le
+    mecanisme de specificite de _resolve_constraints_at_pk. Retourne un message d'erreur explicite,
+    ou None si tout va bien."""
+    for i, a in enumerate(constraints):
+        a_start, a_end = _constraint_span(a, troncon_pk_start, troncon_pk_end)
+        for b in constraints[i + 1 :]:
+            b_start, b_end = _constraint_span(b, troncon_pk_start, troncon_pk_end)
+            overlap_start, overlap_end = max(a_start, b_start), min(a_end, b_end)
+            if overlap_end <= overlap_start + 1e-6:
+                continue
+            a_contains_b = a_start <= b_start + 1e-6 and b_end <= a_end + 1e-6
+            b_contains_a = b_start <= a_start + 1e-6 and a_end <= b_end + 1e-6
+            if a_contains_b or b_contains_a:
+                continue
+            for field_label, va, vb in (
+                ("matériau", a.material, b.material),
+                ("DN", a.dn, b.dn),
+                ("classe de pression", a.pressure_class, b.pressure_class),
+            ):
+                if va is not None and vb is not None and va != vb:
+                    return (
+                        f"Contraintes contradictoires sur le {field_label} entre PK {a_start:.0f}-{a_end:.0f} "
+                        f"({va}) et PK {b_start:.0f}-{b_end:.0f} ({vb}) — leurs plages se croisent sans que "
+                        f"l'une ne soit entièrement contenue dans l'autre."
+                    )
+    return None
 
 
 _ENDPOINT_PK_TOLERANCE_M = 1e-6
@@ -810,10 +904,13 @@ def run_calculation(
             # Piquet/Segment/Troncon : "le DN d'un tronçon [...] sera un tableau de DN, un par
             # piquet") — le moteur recoit ainsi une liste plus fine que les seuls ouvrages reels,
             # ce qui lui permet de choisir un DN different par piquet (optimisation telescopique
-            # deja implementee dans hydrops_engine, jusqu'ici inoperante sur un Segment sans noeud
-            # reel intermediaire). Un pipe a materiau/DN force reste homogene (pas de subdivision,
-            # comportement inchange). `fine_parent_ids`/`fine_downstream_pk` permettent de regrouper
-            # les resultats fins par Segment reel une fois le calcul termine (cf. plus bas).
+            # deja implementee dans hydrops_engine). Toujours subdivise, meme sous contrainte
+            # matériau/DN/classe (consigne utilisateur : contraintes par PLAGE DE PK, cf.
+            # _resolve_constraints_at_pk) — une contrainte SANS bornes (ex. l'ancien forçage unique)
+            # resout alors simplement a la meme valeur sur tous les piquets, sans cas particulier.
+            # `fine_parent_ids`/`fine_downstream_pk` permettent de regrouper les resultats fins par
+            # Segment reel une fois le calcul termine (cf. plus bas).
+            effective_constraints = _effective_constraints(first_seg)
             first_real_id = str(troncon_segments[0].upstream_node_id)
             fine_node_ids: list[str] = [first_real_id]
             fine_node_ground_z: dict[str, float] = {first_real_id: nodes_by_id[first_real_id].z}
@@ -826,12 +923,8 @@ def run_calculation(
                 upstream_id = str(seg.upstream_node_id)
                 downstream_id = str(seg.downstream_node_id)
                 seg_flow_m3s = flow_by_node_id.get(upstream_id, 0.0) / 3600.0
-                subdivision = (
-                    []
-                    if seg.forced_material is not None and seg.forced_dn is not None
-                    else _hydraulic_subdivision_points(
-                        seg.pk_start, seg.pk_end, profile_points, prefs.hydraulic_segment_step_m
-                    )
+                subdivision = _hydraulic_subdivision_points(
+                    seg.pk_start, seg.pk_end, profile_points, prefs.hydraulic_segment_step_m
                 )
 
                 prev_pk = seg.pk_start
@@ -840,10 +933,15 @@ def run_calculation(
                     fine_node_ids.append(virtual_id)
                     fine_node_ground_z[virtual_id] = z
                     fine_node_pk[virtual_id] = pk
+                    forced_material, forced_dn, forced_pressure_class = _resolve_constraints_at_pk(
+                        effective_constraints, pk, group.pk_start, group.pk_end
+                    )
                     fine_specs.append(
                         HSegmentSpec(
                             id=f"{seg.id}::{len(fine_specs)}", length_m=pk - prev_pk, flow_m3s=seg_flow_m3s,
                             max_velocity_ms=first_seg.max_velocity, min_velocity_ms=first_seg.min_velocity,
+                            forced_material=forced_material, forced_dn=forced_dn,
+                            forced_pressure_class=forced_pressure_class,
                         )
                     )
                     fine_parent_ids.append(str(seg.id))
@@ -853,23 +951,25 @@ def run_calculation(
                 fine_node_ids.append(downstream_id)
                 fine_node_ground_z[downstream_id] = nodes_by_id[downstream_id].z
                 fine_node_pk[downstream_id] = seg.pk_end
+                forced_material, forced_dn, forced_pressure_class = _resolve_constraints_at_pk(
+                    effective_constraints, seg.pk_end, group.pk_start, group.pk_end
+                )
                 fine_specs.append(
                     HSegmentSpec(
                         id=f"{seg.id}::{len(fine_specs)}", length_m=seg.pk_end - prev_pk, flow_m3s=seg_flow_m3s,
                         max_velocity_ms=first_seg.max_velocity, min_velocity_ms=first_seg.min_velocity,
-                        forced_material=seg.forced_material, forced_dn=seg.forced_dn,
+                        forced_material=forced_material, forced_dn=forced_dn,
+                        forced_pressure_class=forced_pressure_class,
                     )
                 )
                 fine_parent_ids.append(str(seg.id))
                 fine_downstream_pk.append(seg.pk_end)
 
-            # Materiau/DN force (fenetre "Modifier le tronçon", consigne utilisateur) : le calcul
-            # doit s'appliquer meme si une contrainte de pression/vitesse est violee — cf. plus bas,
-            # la reinitialisation-sur-alerte est alors sautee pour ce tronçon (sauf absence totale
-            # de resultats exploitables, ex. alerte hydrostatique).
-            troncon_has_forced_pipe = any(
-                seg.forced_material is not None and seg.forced_dn is not None for seg in troncon_segments
-            )
+            # Contrainte(s) matériau/DN/classe (fenetre "Modifier le tronçon", consigne
+            # utilisateur) : le calcul doit s'appliquer meme si une contrainte de pression/vitesse
+            # est violee — cf. plus bas, la reinitialisation-sur-alerte est alors sautee pour ce
+            # tronçon (sauf absence totale de resultats exploitables, ex. alerte hydrostatique).
+            troncon_has_forced_pipe = bool(effective_constraints)
 
             if regime == "gravitaire":
                 result = solve_gravitaire_troncon(
@@ -1080,6 +1180,7 @@ def _reset_segment_to_default(package: ProjectPackage, segment_id: str) -> Optio
             "min_velocity": None,
             "forced_material": None,
             "forced_dn": None,
+            "constraints": [],
             "flow": 0.0,
             "velocity": None,
             "head_loss_unit": None,
@@ -1172,4 +1273,47 @@ def reset_segment(session_id: str, variant_id: str, segment_id: str, request: Re
 
     updated = _reset_segment_to_default(package, segment_id)
     assert updated is not None
+    return updated.model_dump(mode="json", exclude_none=True)
+
+
+@router.put("/segments/{segment_id}/constraints")
+def put_segment_constraints(
+    session_id: str, variant_id: str, segment_id: str, payload: PutSegmentConstraintsRequest, request: Request
+):
+    """Panneau "Contraintes" de la fenêtre Tronçon (consigne utilisateur : matériau/DN/classe par
+    PLAGE DE PK) — remplacement complet de la liste, comme "Préférences". Rejette (422) toute paire
+    de contraintes dont les plages se croisent partiellement (ni imbrication ni disjonction) en
+    renseignant différemment le même champ (cf. _find_contradictory_constraints). Invalide les
+    sorties de calcul du tronçon (comme toute édition de "Modifier le tronçon") — un nouveau calcul
+    est nécessaire pour que les contraintes s'appliquent."""
+    package = require_package(get_session_store(request), session_id)
+    variant = _require_variant(package, variant_id)
+    nodes = _nodes_for_variant(package, variant)
+    segments = _segments_for_variant(package, nodes)
+    segment = next((s for s in segments if str(s.id) == segment_id), None)
+    if segment is None:
+        raise HTTPException(status_code=404, detail="segment inconnu")
+
+    constraints = [
+        SegmentConstraint(
+            id=c.id or str(uuid.uuid4()), material=c.material, dn=c.dn, pressure_class=c.pressure_class,
+            pk_start=c.pk_start, pk_end=c.pk_end, is_existing=c.is_existing, phase_id=c.phase_id, source=c.source,
+        )
+        for c in payload.constraints
+    ]
+    error = _find_contradictory_constraints(constraints, segment.pk_start, segment.pk_end)
+    if error is not None:
+        raise HTTPException(status_code=422, detail=error)
+
+    updated = segment.model_copy(
+        update={
+            "constraints": constraints,
+            "velocity": None,
+            "head_loss_unit": None,
+            "head_loss_segment": None,
+            "head_loss_cumulative": None,
+            "segment_details": None,
+        }
+    )
+    package.segments[segment_id] = updated
     return updated.model_dump(mode="json", exclude_none=True)

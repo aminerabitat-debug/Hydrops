@@ -173,6 +173,8 @@ export function DataTable({ onAddNode, onEditNode, onAssignNode, onDeleteNode, a
   const tableScope = useAppStore((s) => s.selection.tableScope)
   const hoveredPk = useAppStore((s) => s.selection.hoveredPk)
   const setHoveredPk = useAppStore((s) => s.setHoveredPk)
+  const pkPickResolver = useAppStore((s) => s.pkPickResolver)
+  const resolvePkPick = useAppStore((s) => s.resolvePkPick)
 
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>(DEFAULT_COLUMN_WIDTHS)
   const resizingRef = useRef<{ key: string; startX: number; startWidth: number } | null>(null)
@@ -420,21 +422,31 @@ export function DataTable({ onAddNode, onEditNode, onAssignNode, onDeleteNode, a
             // participe au clic-de-ligne du mode "+ Nœud" — consigne utilisateur.
             const hasRealNode = row.node != null && !isPlaceholderNode(row.node)
             const addableByRowClick = addNodeMode && !hasRealNode
+            // Selection de PK en cours (consigne utilisateur : bouton "…" du panneau Contraintes
+            // de la fenetre Tronçon) — n'importe quelle ligne resout alors le PK vise, prioritaire
+            // sur le mode "+ Nœud".
+            const pickableByRowClick = pkPickResolver != null
             const rowClasses = [
               hoveredPk != null && Math.abs(row.pk - hoveredPk) < 1 ? 'row-hovered' : '',
               addableByRowClick ? 'row-addable' : '',
+              pickableByRowClick ? 'row-pickable' : '',
             ]
               .filter(Boolean)
               .join(' ')
             const handleRowAdd = () => (row.node ? onAssignNode(row.node) : onAddNode(row.pk))
+            const handleRowClick = pickableByRowClick
+              ? () => resolvePkPick(row.pk)
+              : addableByRowClick
+                ? handleRowAdd
+                : undefined
             return (
               <tr
                 key={row.piquetNumber}
                 className={rowClasses}
                 onMouseEnter={() => setHoveredPk(row.pk)}
                 onMouseLeave={() => setHoveredPk(null)}
-                onClick={addableByRowClick ? handleRowAdd : undefined}
-                title={addableByRowClick ? 'Cliquer pour ajouter un nœud à ce piquet' : undefined}
+                onClick={handleRowClick}
+                title={pickableByRowClick ? 'Cliquer pour choisir ce PK' : addableByRowClick ? 'Cliquer pour ajouter un nœud à ce piquet' : undefined}
               >
                 <td>{row.piquetNumber}</td>
                 <td>{hasRealNode ? nodeDisplayLabel(row.node!) + (row.isBis ? ' (bis)' : '') : ''}</td>

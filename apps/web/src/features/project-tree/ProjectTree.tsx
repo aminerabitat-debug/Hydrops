@@ -649,6 +649,11 @@ export function ProjectTree({ onOpenProjectSettings, onNewVariant, onDuplicateVa
                 forcedDn: firstSegment?.forced_dn ?? undefined,
               }}
               pipeCatalog={pipeCatalog}
+              sessionId={sessionId ?? ''}
+              variantId={selectedVariantId ?? ''}
+              segmentIds={editingTroncon.troncon.segment_ids}
+              initialConstraints={firstSegment?.constraints ?? []}
+              onConstraintsSaved={refreshNetwork}
               onClose={() => setEditingTroncon(null)}
               onSubmit={handleSaveTroncon}
             />

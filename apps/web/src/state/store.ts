@@ -55,6 +55,13 @@ interface AppState {
   // Affichage/masquage des traversees (consigne utilisateur) — partage entre le profil et la
   // carte, d'ou sa place ici plutot que localement dans ProfileTableView.
   showCrossings: boolean
+  // Mode "selection de PK" (consigne utilisateur : bouton "…" a cote des champs PK debut/PK fin
+  // du panneau Contraintes de la fenetre Tronçon) — non-null pendant que l'utilisateur doit
+  // cliquer sur la carte, le profil graphique ou le profil Data pour choisir un piquet. Partage au
+  // niveau du store (pas local a TronconDialog) car la carte/le profil/la table sont des freres,
+  // pas des enfants de la fenetre Tronçon. La fenetre appelante se cache (garde son etat React,
+  // juste masquee via CSS) plutot que de demonter — cf. TronconDialog.tsx.
+  pkPickResolver: ((pk: number) => void) | null
 
   setSessionId: (sessionId: string) => void
   setProjectState: (state: ProjectStateResponse) => void
@@ -72,6 +79,9 @@ interface AppState {
   setStatusMessage: (message: string) => void
   requestMapFocus: (target: MapFocusTarget) => void
   setShowCrossings: (show: boolean) => void
+  beginPkPick: (resolve: (pk: number) => void) => void
+  resolvePkPick: (pk: number) => void
+  cancelPkPick: () => void
 }
 
 const DEFAULT_SELECTION: SelectionState = {
@@ -94,6 +104,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   statusMessage: 'Pret',
   mapFocusRequest: null,
   showCrossings: true,
+  pkPickResolver: null,
 
   setSessionId: (sessionId) => set({ sessionId }),
 
@@ -171,4 +182,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   requestMapFocus: (target) => set((s) => ({ mapFocusRequest: { target, nonce: (s.mapFocusRequest?.nonce ?? 0) + 1 } })),
 
   setShowCrossings: (show) => set({ showCrossings: show }),
+
+  beginPkPick: (resolve) => set({ pkPickResolver: resolve }),
+  resolvePkPick: (pk) => {
+    const resolver = get().pkPickResolver
+    set({ pkPickResolver: null })
+    resolver?.(pk)
+  },
+  cancelPkPick: () => set({ pkPickResolver: null }),
 }))

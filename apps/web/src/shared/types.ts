@@ -262,6 +262,23 @@ export interface Segment {
   // scalaires ci-dessus. `null`/absent = pas encore calcule, ou pipe a materiau/DN force (toujours
   // homogene, une seule entree).
   segment_details?: SegmentDetail[] | null
+  // Contraintes materiau/DN/classe PAR PLAGE DE PK (consigne utilisateur — remplace le forcage
+  // unique forced_material/forced_dn ci-dessus pour la saisie, qui restent lus pour compatibilite
+  // ascendante). Panneau "Contraintes" de la fenetre Tronçon.
+  constraints?: SegmentConstraint[]
+}
+
+export interface SegmentConstraint {
+  id: string
+  material?: string | null
+  dn?: number | null
+  pressure_class?: string | null
+  // null = depuis le debut/jusqu'a la fin du tronçon.
+  pk_start?: number | null
+  pk_end?: number | null
+  is_existing: boolean
+  phase_id?: string | null
+  source: 'manual' | 'homogenization' | 'existing'
 }
 
 export interface SegmentDetail {

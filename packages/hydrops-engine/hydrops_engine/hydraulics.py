@@ -175,6 +175,14 @@ class SegmentSpec:
     # automatique). Toujours ensemble : aucun sens a l'un sans l'autre.
     forced_material: Optional[str] = None
     forced_dn: Optional[int] = None
+    # Contrainte PARTIELLE par plage de PK (consigne utilisateur, glossaire Piquet/Segment/Troncon —
+    # ex. "FD partout, DN500 seulement entre pk 1550 et 5664") : contrairement a forced_material/
+    # forced_dn ci-dessus (les DEUX ensemble, cf. docstring), seuls les champs effectivement
+    # renseignes ici sont fixes — les autres restent choisis automatiquement (le moins cher
+    # respectant vitesse/PMS/materiaux autorises parmi ce qui reste). Peut coexister avec un seul
+    # des deux champs ci-dessus (ex. forced_dn seul, sans forced_material) — resolu par
+    # routers/network.py a partir de Segment.constraints avant construction du SegmentSpec.
+    forced_pressure_class: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -216,6 +224,7 @@ def _candidates(
     allowed_materials_fn: Optional[AllowedMaterialsFn],
     min_pms_m: float = 0.0,
     max_di_mm: float = math.inf,
+    exact_pressure_class: Optional[str] = None,
 ) -> list[CatalogPipe]:
     def material_ok(p: CatalogPipe) -> bool:
         if allowed_materials_fn is None:
@@ -233,10 +242,21 @@ def _candidates(
             and p.pms_m >= min_pms_m - 1e-9
             and (dn_min is None or p.dn >= dn_min)
             and (dn_max is None or p.dn <= dn_max)
+            and (exact_pressure_class is None or p.pressure_class == exact_pressure_class)
             and material_ok(p)
         ),
         key=lambda p: (p.price, p.dn, p.di_mm),
     )
+
+
+def _partial_forced_material_fn(
+    forced_material: Optional[str], allowed_materials_fn: Optional[AllowedMaterialsFn]
+) -> Optional[AllowedMaterialsFn]:
+    """Restreint au materiau force (contrainte partielle par plage de PK, consigne utilisateur) s'il
+    y en a un ; sinon retombe sur la fonction "materiaux autorises" habituelle (Preferences)."""
+    if forced_material is None:
+        return allowed_materials_fn
+    return lambda dn: frozenset({forced_material})
 
 
 def _resolve_forced_pipe(catalog: list[CatalogPipe], material: str, dn: int, min_pms_m: float) -> tuple[Optional[CatalogPipe], bool]:
@@ -527,6 +547,35 @@ def _gravitaire_pass(
                     f"le PMS requis ({max_pms_needed:.1f} m, classe {cand.pressure_class} = {cand.pms_m:.1f} m) "
                     f"— calcul effectué malgré la contrainte matériau/DN forcée."
                 )
+        elif seg.forced_material is not None or seg.forced_dn is not None or seg.forced_pressure_class is not None:
+            # Contrainte PARTIELLE (materiau et/ou DN et/ou classe — consigne utilisateur,
+            # contraintes par plage de PK) : seuls les champs renseignes sont fixes, le reste est
+            # choisi automatiquement (le moins cher respectant vitesse/PMS/materiaux autorises
+            # parmi ce qui reste) — une seule resolution, pas d'ajustement iteratif (cf. plus bas,
+            # ce segment est exclu de l'augmentation de DN et de l'optimisation telescopique,
+            # comme un segment entierement force).
+            material_fn = _partial_forced_material_fn(seg.forced_material, allowed_materials_fn)
+            candidates = _candidates(
+                catalog, min_di, seg.forced_dn, seg.forced_dn, material_fn, max_pms_needed, max_di,
+                exact_pressure_class=seg.forced_pressure_class,
+            )
+            if not candidates:
+                candidates = _candidates(
+                    catalog, 0.0, seg.forced_dn, seg.forced_dn, material_fn, 0.0, math.inf,
+                    exact_pressure_class=seg.forced_pressure_class,
+                )
+                if candidates:
+                    alerts.append(
+                        f"{seg_label} : la contrainte partielle imposée ne permet de respecter ni la "
+                        f"vitesse ni le PMS requis — conduite retenue malgré tout, alerte informative."
+                    )
+                else:
+                    alerts.append(
+                        f"{seg_label} : aucune conduite active ne correspond à la contrainte partielle "
+                        f"imposée — vérifier la fenêtre Conduites."
+                    )
+                    candidates = _candidates(catalog, 0.0, None, None, None) or list(catalog)
+            cand = candidates[0]
         elif forced_dn_by_segment is not None and seg.id in forced_dn_by_segment:
             # DN exact impose pour l'optimisation telescopique (consigne utilisateur) — materiau/
             # classe restent choisis automatiquement (le moins cher respectant PMS/materiaux
@@ -709,10 +758,10 @@ def solve_gravitaire_troncon(
             if idx == 0:
                 continue
             seg = segments_ordered[idx - 1]
-            if seg.forced_dn is not None:
-                # Materiau/DN force (consigne utilisateur) : jamais touche par l'augmentation
-                # iterative, meme si le noeud aval viole la pression — l'alerte de pression
-                # persiste (le segment force garde son DN quoi qu'il arrive).
+            if seg.forced_material is not None or seg.forced_dn is not None or seg.forced_pressure_class is not None:
+                # Contrainte (totale ou partielle, consigne utilisateur) : jamais touche par
+                # l'augmentation iterative, meme si le noeud aval viole la pression — l'alerte de
+                # pression persiste (le segment contraint garde sa resolution quoi qu'il arrive).
                 continue
             current_dn = dn_by_segment_id.get(seg.id)
             if current_dn is None:
@@ -750,7 +799,7 @@ def solve_gravitaire_troncon(
         downstream_floor = 0
         for i in range(len(segments_ordered) - 1, -1, -1):
             seg = segments_ordered[i]
-            if seg.forced_dn is not None:
+            if seg.forced_material is not None or seg.forced_dn is not None or seg.forced_pressure_class is not None:
                 downstream_floor = forced_dn_by_segment[seg.id]
                 continue
             current_dn = forced_dn_by_segment[seg.id]
@@ -859,6 +908,39 @@ def solve_refoulement_troncon(
                         f"{cand.pressure_class} = {cand.pms_m:.1f} m) — calcul effectué malgré la "
                         f"contrainte matériau/DN forcée."
                     )
+            elif seg.forced_material is not None or seg.forced_dn is not None or seg.forced_pressure_class is not None:
+                # Contrainte PARTIELLE (materiau et/ou DN et/ou classe — consigne utilisateur,
+                # contraintes par plage de PK) : seuls les champs renseignes sont fixes ; le DN,
+                # s'il n'est pas force, reste plafonne par `dn_ceiling` (continuite vers l'aval,
+                # comme le dimensionnement automatique ci-dessous).
+                min_di = min_di_mm_for_velocity(seg.flow_m3s, seg.max_velocity_ms)
+                max_di = max_di_mm_for_velocity(seg.flow_m3s, seg.min_velocity_ms)
+                material_fn = _partial_forced_material_fn(seg.forced_material, allowed_materials_fn)
+                effective_dn_max = seg.forced_dn if seg.forced_dn is not None else dn_ceiling
+                candidates = _candidates(
+                    catalog, min_di, seg.forced_dn, effective_dn_max, material_fn, min_pms_needed, max_di,
+                    exact_pressure_class=seg.forced_pressure_class,
+                )
+                if not candidates:
+                    candidates = _candidates(
+                        catalog, 0.0, seg.forced_dn, effective_dn_max, material_fn, 0.0, math.inf,
+                        exact_pressure_class=seg.forced_pressure_class,
+                    )
+                    if candidates:
+                        if attempt == _MAX_REFOULEMENT_PMS_ITERATIONS:
+                            alerts.append(
+                                f"{seg_label} : la contrainte partielle imposée ne permet de respecter "
+                                f"ni la vitesse ni le PMS requis — conduite retenue malgré tout, alerte "
+                                f"informative."
+                            )
+                    else:
+                        if attempt == _MAX_REFOULEMENT_PMS_ITERATIONS:
+                            alerts.append(
+                                f"{seg_label} : aucune conduite active ne correspond à la contrainte "
+                                f"partielle imposée — vérifier la fenêtre Conduites."
+                            )
+                        candidates = _candidates(catalog, 0.0, None, None, None) or list(catalog)
+                cand = candidates[0]
             else:
                 min_di = min_di_mm_for_velocity(seg.flow_m3s, seg.max_velocity_ms)
                 max_di = max_di_mm_for_velocity(seg.flow_m3s, seg.min_velocity_ms)

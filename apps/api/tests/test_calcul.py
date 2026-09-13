@@ -268,11 +268,12 @@ def test_calcul_forced_material_dn_applies_despite_violated_constraints(
     assert updated_segment["material"] == "PEHD"
     assert updated_segment["dn"] == 110
     assert updated_segment["velocity"] is not None  # calcul reellement applique, pas reinitialise
-    # Un pipe force reste volontairement homogene sur toute sa longueur (pas de subdivision en
-    # piquets fins) — une seule entree dans le tableau, cf. glossaire Piquet/Segment/Troncon.
+    # Un pipe force reste homogene sur toute sa longueur — meme subdivise en plusieurs piquets fins
+    # (consigne utilisateur : contraintes par plage de PK, toujours subdivise desormais), chaque
+    # entree du tableau resout a la MEME valeur puisque la contrainte n'a pas de bornes de PK.
     assert updated_segment["segment_details"] is not None
-    assert len(updated_segment["segment_details"]) == 1
-    assert updated_segment["segment_details"][0]["dn"] == 110
+    assert len(updated_segment["segment_details"]) >= 1
+    assert all(d["material"] == "PEHD" and d["dn"] == 110 for d in updated_segment["segment_details"])
 
 
 def test_calcul_gravitaire_single_segment_troncon_gets_per_piquet_segment_details(
@@ -336,6 +337,114 @@ def test_calcul_gravitaire_single_segment_troncon_gets_per_piquet_segment_detail
     assert all(dns[i] >= dns[i + 1] for i in range(len(dns) - 1))
     assert details[-1]["pk"] == pytest.approx(seg["pk_end"])
     assert details[-1]["dn"] == seg["dn"]
+
+
+def test_calcul_new_unbounded_constraint_overrides_legacy_forced_material(
+    client, session_id, project_state, sample_kml_bytes, import_trace
+):
+    # Compatibilite ascendante (consigne utilisateur) : l'ancien forced_material/forced_dn reste lu
+    # (contrainte implicite sans bornes), mais une NOUVELLE contrainte non bornee ajoutee depuis le
+    # panneau Contraintes sur le MEME champ doit pouvoir le remplacer — sinon un projet existant
+    # serait bloque avec son ancien materiau sans aucun moyen de le changer depuis la nouvelle UI.
+    variant_id, trace = _import_sample(client, session_id, project_state, sample_kml_bytes, import_trace)
+    nodes = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes").json()
+    upstream_id, downstream_id = nodes[0]["id"], nodes[1]["id"]
+
+    client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes/{upstream_id}",
+        json={"type": "storage_reservoir", "name": "Res1", "data": {"fluid": "Eau potable"}},
+    )
+    client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes/{downstream_id}",
+        json={"type": "pressure_break", "name": "BC1"},
+    )
+    max_z = max(n["z"] for n in nodes)
+    segment_id = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments").json()[0]["id"]
+    client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/segments/{segment_id}",
+        json={
+            "head_flow": 100.0,
+            "upstream_water_level_max": max_z + 60.0,
+            "upstream_water_level_min": max_z + 55.0,
+            "max_velocity": 2.0,
+            "forced_material": "PEHD",
+            "forced_dn": 110,
+        },
+    )
+    # Nouvelle contrainte non bornee sur LES DEUX champs (materiau ET DN) — evite de melanger un
+    # materiau neuf avec le DN de l'ancien forçage si cette combinaison n'existe pas au catalogue
+    # (FD/100 existe bien, cf. test_calcul_forced_material_dn_applies_despite_violated_constraints
+    # pour PEHD/110).
+    constraints_response = client.put(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/segments/{segment_id}/constraints",
+        json={"constraints": [{"material": "FD", "dn": 100}]},
+    )
+    assert constraints_response.status_code == 200, constraints_response.text
+
+    response = client.post(f"/api/v1/projects/{session_id}/variants/{variant_id}/calcul")
+    assert response.status_code == 200, response.text
+
+    seg = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments").json()[0]
+    assert seg["material"] == "FD"
+    assert seg["dn"] == 100
+    assert all(d["material"] == "FD" and d["dn"] == 100 for d in seg["segment_details"])
+
+
+def test_calcul_applies_per_pk_range_constraint_over_wider_material_constraint(
+    client, session_id, project_state, sample_kml_bytes, import_trace
+):
+    # Reproduit l'exemple donne par l'utilisateur : "fixer le materiau a FD sur tout le tronçon et
+    # DN500 [ici DN60, present au catalogue par defaut] entre pk 500 et pk 700" — deux contraintes
+    # distinctes, chacune ne renseignant qu'un champ, qui se combinent (glossaire Piquet/Segment/
+    # Troncon : le DN d'un tronçon est un tableau, une valeur par piquet).
+    variant_id, trace = _import_sample(client, session_id, project_state, sample_kml_bytes, import_trace)
+    nodes = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes").json()
+    upstream_id, downstream_id = nodes[0]["id"], nodes[1]["id"]
+
+    prefs = client.get(f"/api/v1/projects/{session_id}/preferences").json()
+    prefs["hydraulic_segment_step_m"] = 50.0
+    assert client.put(f"/api/v1/projects/{session_id}/preferences", json=prefs).status_code == 200
+
+    client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes/{upstream_id}",
+        json={"type": "storage_reservoir", "name": "Res1", "data": {"fluid": "Eau potable"}},
+    )
+    client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes/{downstream_id}",
+        json={"type": "pressure_break", "name": "BC1"},
+    )
+
+    max_z = max(n["z"] for n in nodes)
+    segment_id = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments").json()[0]["id"]
+    client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/segments/{segment_id}",
+        json={
+            "head_flow": 100.0,
+            "upstream_water_level_max": max_z + 60.0,
+            "upstream_water_level_min": max_z + 55.0,
+            "max_velocity": 2.0,
+        },
+    )
+    constraints_response = client.put(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/segments/{segment_id}/constraints",
+        json={"constraints": [{"material": "FD"}, {"dn": 60, "pk_start": 500.0, "pk_end": 700.0}]},
+    )
+    assert constraints_response.status_code == 200, constraints_response.text
+
+    response = client.post(f"/api/v1/projects/{session_id}/variants/{variant_id}/calcul")
+    assert response.status_code == 200, response.text
+    assert response.json()["segments_updated"] == 1
+
+    details = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments").json()[0]["segment_details"]
+    assert details, "aucun detail par piquet retourne"
+    assert all(d["material"] == "FD" for d in details), "le materiau doit rester FD sur tout le tronçon"
+    inside_window = [d for d in details if 500.0 - 1e-6 <= d["pk"] <= 700.0 + 1e-6]
+    outside_window = [d for d in details if d["pk"] < 500.0 - 1e-6 or d["pk"] > 700.0 + 1e-6]
+    assert inside_window, "aucun piquet dans la fenetre 500-700 — pas hydraulique trop grossier ?"
+    assert all(d["dn"] == 60 for d in inside_window)
+    assert outside_window and any(d["dn"] != 60 for d in outside_window), (
+        "hors de la fenetre 500-700, le DN doit rester choisi automatiquement (pas fige a 60)"
+    )
 
 
 def test_calcul_min_pressure_exclusion_zone_is_informative_not_blocking(

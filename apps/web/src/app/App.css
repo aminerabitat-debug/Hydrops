@@ -185,6 +185,16 @@ body,
   gap: 4px;
 }
 
+/* Logo HYPR Modeling (consigne utilisateur : a droite de la barre d'outils) — margin-left: auto
+   le pousse en butee droite dans le flex .quick-bar, quelle que soit la largeur des boutons a
+   gauche ; hauteur calee sur .icon-btn (40px) pour rester visuellement a la meme echelle. */
+.quick-bar-logo {
+  height: 40px;
+  width: auto;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
 /* Bouton unique "Disposition" (consigne utilisateur : les 3 boutons Carte/Profil/Vue combinée
    consolides en un seul, qui se deroule verticalement au clic). */
 .layout-mode-menu {

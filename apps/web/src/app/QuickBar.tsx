@@ -8,6 +8,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 
+import hyprLogo from '../assets/hypr-logo.png'
 import type { LayoutMode } from './Workspace'
 
 const LAYOUT_MODE_LABELS: Record<LayoutMode, string> = {
@@ -200,6 +201,10 @@ export function QuickBar({
       <button type="button" className="icon-btn" title="À propos" aria-label="À propos" onClick={onAbout}>
         ❓
       </button>
+
+      {/* Logo (consigne utilisateur : a droite de la barre d'outils) — pousse a l'extremite droite
+          via margin-left: auto, sans perturber l'alignement a gauche des boutons ci-dessus. */}
+      <img src={hyprLogo} alt="HYPR Modeling" className="quick-bar-logo" />
     </div>
   )
 }

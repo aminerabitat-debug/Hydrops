@@ -12,6 +12,7 @@ import { ProgressBar } from '../../app/ProgressBar'
 import { api } from '../../shared/apiClient'
 import { crossingColor, crossingDisplayText, crossingZoneFillColor, isZoneKind } from '../../shared/crossingColors'
 import { buildVertices, coordinatesForPkRange, interpolateLonLatAtPk, nearestPkForPoint } from '../../shared/geo'
+import { fetchApproximateLocationFromIp } from '../../shared/ipGeolocation'
 import { isPlaceholderNode, nodeColor, nodeDisplayLabel, nodeInitials } from '../../shared/nodeLabels'
 import { useAppStore } from '../../state/store'
 import type { Crossing, TraceGeometry } from '../../shared/types'
@@ -108,6 +109,17 @@ export function MapView() {
     map.addControl(new maplibregl.NavigationControl(), 'top-right')
     mapRef.current = map
 
+    // Centrage au demarrage selon l'adresse IP de connexion (consigne utilisateur) — le centre
+    // Paris ci-dessus n'est qu'un repli le temps de la resolution (reseau, service de
+    // geolocalisation indisponible) ; `jumpTo` (pas `flyTo`) pour un repositionnement instantane,
+    // avant que l'utilisateur n'ait eu le temps d'interagir avec la carte. Ne concerne que la vue
+    // INITIALE : un projet/trace deja ouvert reprend la main via l'effet mapFocusRequest ci-dessous.
+    let cancelled = false
+    fetchApproximateLocationFromIp().then((location) => {
+      if (cancelled || !location) return
+      map.jumpTo({ center: [location.lon, location.lat], zoom: 11 })
+    })
+
     // Bascule vers un fond standard si le fond satellite echoue de facon repetee (reseau,
     // service indisponible) — jamais de carte figee sur des tuiles en erreur.
     map.on('error', (event) => {
@@ -125,6 +137,7 @@ export function MapView() {
     resizeObserver.observe(containerRef.current)
 
     return () => {
+      cancelled = true
       resizeObserver.disconnect()
       map.remove()
       mapRef.current = null

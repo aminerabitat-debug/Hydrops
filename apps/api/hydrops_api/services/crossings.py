@@ -30,11 +30,18 @@ from hydrops_engine.topology.geometry import Vertex, cumulative_pk
 
 # Miroirs publics Overpass, essayes dans l'ordre (consigne utilisateur : le premier a deja renvoye
 # un 504 Gateway Timeout sur une trace dense/longue) — meme principe de cascade que le DEM
-# (services/dem.py), une seule source publique n'etant pas fiable a elle seule.
+# (services/dem.py), une seule source publique n'etant pas fiable a elle seule. osm.ch et
+# maps.mail.ru ajoutes (constate en usage reel : "service indisponible" alors que overpass-api.de
+# repond normalement la plupart du temps mais peut ponctuellement depasser OVERPASS_TIMEOUT_S sur
+# une zone dense — building/landuse compris dans la requete — pendant que les deux autres miroirs
+# historiques sont, eux, injoignables depuis certains reseaux) — plus de candidats independants
+# augmente les chances qu'au moins un reponde a temps.
 OVERPASS_URLS = [
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
     "https://overpass.openstreetmap.ru/api/interpreter",
+    "https://overpass.osm.ch/api/interpreter",
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
 ]
 OVERPASS_TIMEOUT_S = 40.0
 # Delai de CONNEXION distinct, plus court que le delai global ci-dessus : un miroir injoignable

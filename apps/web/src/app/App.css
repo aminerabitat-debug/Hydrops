@@ -829,7 +829,12 @@ body,
 
 .panel--profile {
   display: grid;
-  grid-template-rows: auto auto auto minmax(0, 1fr);
+  /* header, subheader, contenu (flexible), legende (auto) — la legende a ete deplacee sous
+     .profile-content (consigne utilisateur) mais cette piste ne portait pas encore sa propre
+     ligne : le contenu (canvas/tableau) heritait de "auto" (se dimensionnait a son intrinseque, pas
+     au panneau) et la legende heritait de la ligne flexible, ce qui la poussait hors du panneau
+     (rognee par .panel { overflow: hidden }). */
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   min-width: 0;
 }
 

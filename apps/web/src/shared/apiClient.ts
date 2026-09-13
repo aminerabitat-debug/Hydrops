@@ -8,6 +8,7 @@ import type {
   CatalogDiameter,
   CatalogMaterial,
   CreatableNodeType,
+  CrossingKind,
   ImportJobStarted,
   ImportJobStatus,
   NetworkViolation,
@@ -129,6 +130,42 @@ export const api = {
   async detectCrossings(sessionId: string, traceId: string): Promise<TraceGeometry> {
     const response = await fetch(`${API_BASE}/projects/${sessionId}/traces/${traceId}/crossings/detect`, {
       method: 'POST',
+    })
+    return handleJson(response)
+  },
+
+  // Ajout/edition/suppression manuelle d'une traversee depuis la carte (consigne utilisateur) —
+  // chacune renvoie la TraceGeometry a jour (meme convention que detectCrossings ci-dessus).
+  async addCrossing(
+    sessionId: string,
+    traceId: string,
+    payload: { kind: CrossingKind; pk: number; label?: string },
+  ): Promise<TraceGeometry> {
+    const response = await fetch(`${API_BASE}/projects/${sessionId}/traces/${traceId}/crossings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    return handleJson(response)
+  },
+
+  async updateCrossing(
+    sessionId: string,
+    traceId: string,
+    crossingId: string,
+    payload: { kind?: CrossingKind; pk?: number; label?: string | null },
+  ): Promise<TraceGeometry> {
+    const response = await fetch(`${API_BASE}/projects/${sessionId}/traces/${traceId}/crossings/${crossingId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    return handleJson(response)
+  },
+
+  async deleteCrossing(sessionId: string, traceId: string, crossingId: string): Promise<TraceGeometry> {
+    const response = await fetch(`${API_BASE}/projects/${sessionId}/traces/${traceId}/crossings/${crossingId}`, {
+      method: 'DELETE',
     })
     return handleJson(response)
   },

@@ -11,11 +11,11 @@ import httpx
 from hydropack.models import Crossing, ElevationProfile, LineStringGeometry, Node, Segment, TraceGeometry
 from hydropack.serializer import ProjectPackage, TraceEntry
 
-from hydrops_engine.topology import sample_at_step, total_length_m
+from hydrops_engine.topology import interpolate_lonlat_at_pk, sample_at_step, total_length_m
 
 from ..core.deps import get_session_store, require_package
 from ..core.import_job_store import ImportJobNotFoundError, ImportJobStore
-from ..schemas import PatchTraceRequest
+from ..schemas import AddCrossingRequest, PatchCrossingRequest, PatchTraceRequest
 from ..services import catalog
 from ..services import crossings as crossings_service
 from ..services.dem import DEFAULT_CHUNK_SIZE, DemProvider, DemProviderError
@@ -199,6 +199,61 @@ def patch_trace(session_id: str, trace_id: str, payload: PatchTraceRequest, requ
     return entry.geometry.model_dump(mode="json", exclude_none=True)
 
 
+@router.post("/traces/{trace_id}/crossings")
+def add_crossing(session_id: str, trace_id: str, payload: AddCrossingRequest, request: Request):
+    """Ajout manuel d'une traversee depuis la carte (consigne utilisateur) — lon/lat projetes sur
+    la geometrie de la trace au PK donne, jamais saisis directement. `source="manual"` : ne sera
+    jamais ecrasee par une redetection Overpass ulterieure (cf. detect_crossings)."""
+    package = require_package(get_session_store(request), session_id)
+    entry = package.traces.get(trace_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="trace inconnue")
+    coordinates = [(c[0], c[1]) for c in entry.geometry.geometry.coordinates]
+    lon, lat = interpolate_lonlat_at_pk(coordinates, payload.pk)
+    new_crossing = Crossing(
+        id=str(uuid.uuid4()), kind=payload.kind, label=payload.label, pk=payload.pk, lon=lon, lat=lat, source="manual"
+    )
+    entry.geometry = entry.geometry.model_copy(
+        update={"crossings": [*(entry.geometry.crossings or []), new_crossing]}
+    )
+    return entry.geometry.model_dump(mode="json", exclude_none=True)
+
+
+@router.patch("/traces/{trace_id}/crossings/{crossing_id}")
+def patch_crossing(session_id: str, trace_id: str, crossing_id: str, payload: PatchCrossingRequest, request: Request):
+    package = require_package(get_session_store(request), session_id)
+    entry = package.traces.get(trace_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="trace inconnue")
+    existing = entry.geometry.crossings or []
+    crossing = next((c for c in existing if c.id == crossing_id), None)
+    if crossing is None:
+        raise HTTPException(status_code=404, detail="traversée inconnue")
+    updates = payload.model_dump(exclude_none=True)
+    if "pk" in updates:
+        coordinates = [(c[0], c[1]) for c in entry.geometry.geometry.coordinates]
+        lon, lat = interpolate_lonlat_at_pk(coordinates, updates["pk"])
+        updates["lon"], updates["lat"] = lon, lat
+    updated_crossing = crossing.model_copy(update=updates)
+    entry.geometry = entry.geometry.model_copy(
+        update={"crossings": [updated_crossing if c.id == crossing_id else c for c in existing]}
+    )
+    return entry.geometry.model_dump(mode="json", exclude_none=True)
+
+
+@router.delete("/traces/{trace_id}/crossings/{crossing_id}")
+def delete_crossing(session_id: str, trace_id: str, crossing_id: str, request: Request):
+    package = require_package(get_session_store(request), session_id)
+    entry = package.traces.get(trace_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="trace inconnue")
+    existing = entry.geometry.crossings or []
+    if not any(c.id == crossing_id for c in existing):
+        raise HTTPException(status_code=404, detail="traversée inconnue")
+    entry.geometry = entry.geometry.model_copy(update={"crossings": [c for c in existing if c.id != crossing_id]})
+    return entry.geometry.model_dump(mode="json", exclude_none=True)
+
+
 @router.post("/traces/{trace_id}/crossings/detect")
 async def detect_crossings(session_id: str, trace_id: str, request: Request):
     """Detection des traversees (routes/rail/pistes, canaux/rivieres, bâtiments) — consigne
@@ -217,11 +272,17 @@ async def detect_crossings(session_id: str, trace_id: str, request: Request):
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"Service de traversées (Overpass/OSM) indisponible : {e}") from e
     found = crossings_service.compute_crossings(coordinates, features)
+    # Les traversees ajoutees/modifiees manuellement depuis la carte (consigne utilisateur) ne
+    # sont jamais ecrasees par une redetection — conservees telles quelles, la detection ne
+    # remplace que celles qu'elle a elle-meme produites ("source" == "detected").
+    manual = [c for c in (entry.geometry.crossings or []) if c.source == "manual"]
     entry.geometry = entry.geometry.model_copy(
         update={
             "crossings": [
-                Crossing(id=c.id, kind=c.kind, label=c.label, pk=c.pk, lon=c.lon, lat=c.lat) for c in found
+                Crossing(id=c.id, kind=c.kind, label=c.label, subtype=c.subtype, pk=c.pk, lon=c.lon, lat=c.lat)
+                for c in found
             ]
+            + manual
         }
     )
     return entry.geometry.model_dump(mode="json", exclude_none=True)

@@ -77,6 +77,8 @@
           "id": { "type": "string" },
           "kind": { "type": "string", "enum": ["highway", "railway", "waterway", "building", "urban", "forest"] },
           "label": { "type": ["string", "null"] },
+          "subtype": { "type": ["string", "null"], "description": "Valeur brute du tag OSM (highway=primary, waterway=river...), independante de label" },
+          "source": { "type": "string", "enum": ["detected", "manual"], "default": "detected" },
           "pk": { "type": "number" },
           "lon": { "type": "number" },
           "lat": { "type": "number" }

@@ -8,11 +8,14 @@ import maplibregl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { useEffect, useMemo, useRef, useState } from 'react'
 
+import { ProgressBar } from '../../app/ProgressBar'
 import { api } from '../../shared/apiClient'
+import { crossingColor, crossingDisplayText, crossingZoneFillColor, isZoneKind } from '../../shared/crossingColors'
 import { buildVertices, coordinatesForPkRange, interpolateLonLatAtPk, nearestPkForPoint } from '../../shared/geo'
 import { isPlaceholderNode, nodeColor, nodeDisplayLabel, nodeInitials } from '../../shared/nodeLabels'
 import { useAppStore } from '../../state/store'
-import type { TraceGeometry } from '../../shared/types'
+import type { Crossing, TraceGeometry } from '../../shared/types'
+import { CrossingDialog, type CrossingSubmitPayload } from './CrossingDialog'
 
 type TraceFeatureCollection = {
   type: 'FeatureCollection'
@@ -71,6 +74,14 @@ export function MapView() {
   // trace SELECTIONNEE — appel EXPLICITE, jamais automatique, a un service externe (Overpass/OSM)
   // potentiellement lent ou indisponible).
   const [detectingCrossings, setDetectingCrossings] = useState(false)
+  // Ajout manuel d'une traversee (consigne utilisateur) — meme paradigme que "+ Nœud" (bascule +
+  // clic sur la trace), mais local a la carte (pas d'etat partage avec le profil, aucun besoin ici).
+  const [addCrossingMode, setAddCrossingMode] = useState(false)
+  const [crossingDialog, setCrossingDialog] = useState<
+    | { mode: 'create'; traceId: string; pk: number }
+    | { mode: 'edit'; traceId: string; crossing: Crossing }
+    | null
+  >(null)
 
   const sessionId = useAppStore((s) => s.sessionId)
   const traces = useAppStore((s) => s.traces)
@@ -312,6 +323,9 @@ export function MapView() {
   // Traversées détectées (consigne utilisateur : afficher/masquer sur la carte ET le profil) —
   // même principe que les marqueurs de nœuds ci-dessus, sur toutes les traces (pas seulement la
   // sélectionnée), affiché/masqué via le même bouton que ProfileChart (état partagé, store.ts).
+  // Couleur par sous-catégorie (palette gris/bleu, consigne utilisateur) et clic pour modifier/
+  // supprimer — réassignés à CHAQUE rendu (pas seulement à la création du marqueur) pour ne jamais
+  // capturer une version périmée de `crossing`/`trace.id` dans la closure du gestionnaire de clic.
   useEffect(() => {
     const map = mapRef.current
     if (!map) return
@@ -328,7 +342,13 @@ export function MapView() {
             marker = new maplibregl.Marker({ element: el }).setLngLat([crossing.lon, crossing.lat]).addTo(map)
             markers.set(crossing.id, marker)
           }
-          marker.getElement().title = crossing.label ? `${crossing.kind} · ${crossing.label}` : crossing.kind
+          const el = marker.getElement()
+          el.style.backgroundColor = crossingColor(crossing.kind, crossing.subtype)
+          el.title = crossingDisplayText(crossing)
+          el.onclick = (event) => {
+            event.stopPropagation()
+            setCrossingDialog({ mode: 'edit', traceId: trace.id, crossing })
+          }
         }
       }
     }
@@ -392,6 +412,100 @@ export function MapView() {
     }
   }, [hoveredPk, hoveredTraceVertices])
 
+  // Ajout manuel d'une traversee (consigne utilisateur) : en mode actif, un clic sur la trace
+  // SELECTIONNEE (meme portee que le bouton de detection ci-dessus) ouvre le dialogue de creation
+  // au PK clique — jamais sur une autre trace, pour rester coherent avec le reste de la toolbar
+  // carte qui n'agit que sur `hoveredTrace`.
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map || !addCrossingMode || !hoveredTrace || !hoveredTraceVertices) return
+    const handleClick = (event: maplibregl.MapLayerMouseEvent) => {
+      const id = event.features?.[0]?.properties?.id as string | undefined
+      if (id !== hoveredTrace.id) return
+      const pk = nearestPkForPoint(hoveredTraceVertices, event.lngLat.lng, event.lngLat.lat)
+      setCrossingDialog({ mode: 'create', traceId: hoveredTrace.id, pk })
+    }
+    map.on('click', 'traces-line', handleClick)
+    return () => {
+      map.off('click', 'traces-line', handleClick)
+    }
+  }, [addCrossingMode, hoveredTrace, hoveredTraceVertices])
+
+  // Halo le long du trace pour une traversee de ZONE (urbain/forestier, consigne utilisateur :
+  // "une sorte de shadow autour du tracé dans cette zone") — un sous-segment de geometrie par paire
+  // Entree/Sortie consecutive de MEME nature, regroupees par kind avant appariement (une trace peut
+  // traverser des zones de natures differentes qui se chevauchent/s'entrelacent). Les reperes
+  // Entree/Sortie existants restent affiches par-dessus (marqueurs DOM, independants de ce calque).
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map) return
+    const applyHalo = () => {
+      if (!map.isStyleLoaded()) return
+      const features: GeoJSON.Feature[] = []
+      if (showCrossings) {
+        for (const trace of traces) {
+          const allCrossings = trace.crossings ?? []
+          for (const kind of ['urban', 'forest'] as const) {
+            const ofKind = allCrossings.filter((c) => c.kind === kind).sort((a, b) => a.pk - b.pk)
+            for (let i = 0; i < ofKind.length - 1; i++) {
+              const entry = ofKind[i]
+              const exit = ofKind[i + 1]
+              if (!entry.label?.startsWith('Entrée') || !exit.label?.startsWith('Sortie')) continue
+              const coords = coordinatesForPkRange(trace.geometry.coordinates as [number, number][], entry.pk, exit.pk)
+              if (coords.length < 2) continue
+              features.push({ type: 'Feature', properties: { kind }, geometry: { type: 'LineString', coordinates: coords } })
+            }
+          }
+        }
+      }
+      const data: GeoJSON.FeatureCollection = { type: 'FeatureCollection', features }
+      const source = map.getSource('crossing-zones') as maplibregl.GeoJSONSource | undefined
+      if (source) {
+        source.setData(data)
+      } else {
+        map.addSource('crossing-zones', { type: 'geojson', data })
+        map.addLayer(
+          {
+            id: 'crossing-zones-halo',
+            type: 'line',
+            source: 'crossing-zones',
+            layout: { 'line-cap': 'round', 'line-join': 'round' },
+            paint: {
+              'line-color': ['match', ['get', 'kind'], 'urban', crossingColor('urban'), 'forest', crossingColor('forest'), '#888888'],
+              'line-width': 16,
+              'line-opacity': 0.3,
+            },
+          },
+          map.getLayer('traces-line') ? 'traces-line' : undefined,
+        )
+      }
+    }
+    if (map.isStyleLoaded()) applyHalo()
+    else map.once('load', applyHalo)
+    map.on('styledata', applyHalo)
+    return () => {
+      map.off('styledata', applyHalo)
+    }
+  }, [traces, showCrossings])
+
+  const handleCrossingSubmit = async (payload: CrossingSubmitPayload) => {
+    if (!sessionId || !crossingDialog) return
+    const updated =
+      crossingDialog.mode === 'create'
+        ? await api.addCrossing(sessionId, crossingDialog.traceId, payload)
+        : await api.updateCrossing(sessionId, crossingDialog.traceId, crossingDialog.crossing.id, payload)
+    updateTrace(updated)
+    setShowCrossings(true)
+    setStatusMessage(crossingDialog.mode === 'create' ? 'Traversée ajoutée' : 'Traversée modifiée')
+  }
+
+  const handleCrossingDelete = async () => {
+    if (!sessionId || !crossingDialog || crossingDialog.mode !== 'edit') return
+    const updated = await api.deleteCrossing(sessionId, crossingDialog.traceId, crossingDialog.crossing.id)
+    updateTrace(updated)
+    setStatusMessage('Traversée supprimée')
+  }
+
   return (
     <div className="map-view-wrap">
       <div ref={containerRef} className="map-view" />
@@ -420,10 +534,36 @@ export function MapView() {
       >
         {detectingCrossings ? '⏳' : '🛣️'}
       </button>
+      <button
+        type="button"
+        className={`map-info-toggle map-add-crossing-toggle ${addCrossingMode ? 'active' : ''}`}
+        disabled={!hoveredTrace}
+        onClick={() => setAddCrossingMode((v) => !v)}
+        title="Ajouter une traversée (cliquer ensuite sur la trace)"
+        aria-label="Ajouter une traversée"
+      >
+        📍
+      </button>
+      {detectingCrossings && (
+        <div className="map-progress">
+          <ProgressBar label="Détection des traversées…" />
+        </div>
+      )}
       {hoverInfo && (
         <div className="map-hover-tooltip" style={{ left: hoverInfo.x + 12, top: hoverInfo.y + 12 }}>
           {hoverInfo.text}
         </div>
+      )}
+      {crossingDialog && (
+        <CrossingDialog
+          mode={crossingDialog.mode}
+          initialPk={crossingDialog.mode === 'create' ? crossingDialog.pk : crossingDialog.crossing.pk}
+          initialKind={crossingDialog.mode === 'edit' ? crossingDialog.crossing.kind : undefined}
+          initialLabel={crossingDialog.mode === 'edit' ? crossingDialog.crossing.label : undefined}
+          onClose={() => setCrossingDialog(null)}
+          onSubmit={handleCrossingSubmit}
+          onDelete={crossingDialog.mode === 'edit' ? handleCrossingDelete : undefined}
+        />
       )}
     </div>
   )

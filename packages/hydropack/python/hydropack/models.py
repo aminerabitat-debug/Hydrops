@@ -144,6 +144,16 @@ class Crossing(BaseModel):
     id: str
     kind: Literal["highway", "railway", "waterway", "building", "urban", "forest"]
     label: Optional[str] = None
+    # Valeur BRUTE du tag OSM (ex. "primary"/"track" pour highway, "river"/"stream" pour waterway)
+    # — capturee independamment de `label` (qui privilegie le nom OSM quand il existe, et perdrait
+    # alors la classe) — consigne utilisateur : palette de couleurs par sous-categorie (nuances de
+    # gris par classe de route, de bleu par classe de cours d'eau). `None` pour railway/building
+    # (une seule couleur fixe, pas de sous-classement demande) et pour les zones urbaines/
+    # forestieres (cf. hydrops_api.services.crossings._zone_crossing, pas de tag source unique).
+    subtype: Optional[str] = None
+    # "manual" = ajoutee/modifiee depuis la carte (consigne utilisateur) — jamais ecrasee par une
+    # redetection ulterieure, contrairement a "detected" (Overpass).
+    source: Literal["detected", "manual"] = "detected"
     pk: float
     lon: float
     lat: float

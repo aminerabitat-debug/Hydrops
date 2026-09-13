@@ -79,6 +79,10 @@ class OsmFeature:
     kind: CrossingKind
     label: Optional[str]
     coordinates: list[tuple[float, float]]  # (lon, lat)
+    # Valeur brute du tag OSM (ex. "primary", "river") — capturee independamment de `label`
+    # (consigne utilisateur : palette de couleurs par sous-categorie, cf. shared/crossingColors.ts
+    # cote frontend). `None` pour une zone (urbain/foret), pas de tag source unique.
+    subtype: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -89,6 +93,8 @@ class Crossing:
     pk: float
     lon: float
     lat: float
+    subtype: Optional[str] = None
+    source: Literal["detected", "manual"] = "detected"
 
 
 def _overpass_query(south: float, west: float, north: float, east: float) -> str:
@@ -129,10 +135,13 @@ def _feature_from_element(element: dict) -> Optional[OsmFeature]:
     if kind is None:
         return None
     label = tags.get("name") or tags.get(kind) or tags.get("landuse") or tags.get("natural")
+    # Valeur BRUTE du tag kind (ex. "primary", "river") — lue AVANT tout repli sur `name`, pour ne
+    # jamais dependre de si l'element est nomme (consigne utilisateur : palette par sous-categorie).
+    subtype = tags.get(kind)
     coordinates = [(pt["lon"], pt["lat"]) for pt in geometry if "lon" in pt and "lat" in pt]
     if len(coordinates) < 2:
         return None
-    return OsmFeature(kind=kind, label=label, coordinates=coordinates)
+    return OsmFeature(kind=kind, label=label, subtype=subtype, coordinates=coordinates)
 
 
 async def fetch_osm_features(
@@ -300,6 +309,7 @@ def compute_crossings(trace_coordinates: list[tuple[float, float]], features: li
                     id=str(uuid.uuid4()),
                     kind=feature.kind,
                     label=feature.label,
+                    subtype=feature.subtype,
                     pk=pk,
                     lon=point.x,
                     lat=point.y,

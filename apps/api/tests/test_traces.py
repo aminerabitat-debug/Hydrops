@@ -1,3 +1,6 @@
+import pytest
+
+
 def _default_variant_id(project_state) -> str:
     return project_state["variants"][0]["id"]
 
@@ -87,6 +90,87 @@ def test_get_trace_returns_stored_geometry(client, session_id, project_state, sa
     response = client.get(f"/api/v1/projects/{session_id}/traces/{imported['id']}")
     assert response.status_code == 200
     assert response.json()["id"] == imported["id"]
+
+
+def test_add_crossing_manual_projects_position_from_pk(client, session_id, project_state, sample_kml_bytes, import_trace):
+    trace = import_trace(session_id, "sample_trace.kml", sample_kml_bytes, "application/vnd.google-earth.kml+xml")
+    response = client.post(
+        f"/api/v1/projects/{session_id}/traces/{trace['id']}/crossings",
+        json={"kind": "highway", "pk": 100.0, "label": "Piste locale"},
+    )
+    assert response.status_code == 200, response.text
+    crossings = response.json()["crossings"]
+    assert len(crossings) == 1
+    added = crossings[0]
+    assert added["kind"] == "highway"
+    assert added["label"] == "Piste locale"
+    assert added["source"] == "manual"
+    assert added["pk"] == pytest.approx(100.0)
+    # lon/lat projetes sur la geometrie de la trace, jamais (0, 0) ou une valeur arbitraire.
+    assert added["lon"] != 0.0 or added["lat"] != 0.0
+
+
+def test_patch_crossing_updates_fields_and_recomputes_position_on_pk_change(
+    client, session_id, project_state, sample_kml_bytes, import_trace
+):
+    trace = import_trace(session_id, "sample_trace.kml", sample_kml_bytes, "application/vnd.google-earth.kml+xml")
+    added = client.post(
+        f"/api/v1/projects/{session_id}/traces/{trace['id']}/crossings",
+        json={"kind": "highway", "pk": 100.0},
+    ).json()["crossings"][0]
+
+    response = client.patch(
+        f"/api/v1/projects/{session_id}/traces/{trace['id']}/crossings/{added['id']}",
+        json={"kind": "waterway", "pk": 200.0, "label": "Oued"},
+    )
+    assert response.status_code == 200, response.text
+    updated = next(c for c in response.json()["crossings"] if c["id"] == added["id"])
+    assert updated["kind"] == "waterway"
+    assert updated["label"] == "Oued"
+    assert updated["pk"] == pytest.approx(200.0)
+    assert (updated["lon"], updated["lat"]) != (added["lon"], added["lat"])
+
+
+def test_delete_crossing_removes_it(client, session_id, project_state, sample_kml_bytes, import_trace):
+    trace = import_trace(session_id, "sample_trace.kml", sample_kml_bytes, "application/vnd.google-earth.kml+xml")
+    added = client.post(
+        f"/api/v1/projects/{session_id}/traces/{trace['id']}/crossings",
+        json={"kind": "building", "pk": 50.0},
+    ).json()["crossings"][0]
+
+    response = client.delete(f"/api/v1/projects/{session_id}/traces/{trace['id']}/crossings/{added['id']}")
+    assert response.status_code == 200, response.text
+    assert response.json()["crossings"] == []
+
+
+def test_delete_crossing_unknown_id_returns_404(client, session_id, project_state, sample_kml_bytes, import_trace):
+    trace = import_trace(session_id, "sample_trace.kml", sample_kml_bytes, "application/vnd.google-earth.kml+xml")
+    response = client.delete(f"/api/v1/projects/{session_id}/traces/{trace['id']}/crossings/does-not-exist")
+    assert response.status_code == 404
+
+
+def test_detect_crossings_preserves_manual_ones(client, session_id, project_state, sample_kml_bytes, import_trace, monkeypatch):
+    # Consigne utilisateur : une traversee ajoutee manuellement ne doit jamais etre ecrasee par une
+    # redetection Overpass ulterieure.
+    trace = import_trace(session_id, "sample_trace.kml", sample_kml_bytes, "application/vnd.google-earth.kml+xml")
+    client.post(
+        f"/api/v1/projects/{session_id}/traces/{trace['id']}/crossings",
+        json={"kind": "building", "pk": 10.0, "label": "Repère manuel"},
+    )
+
+    import hydrops_api.routers.traces as traces_router
+
+    async def _fake_fetch_osm_features(bbox):
+        return []
+
+    monkeypatch.setattr(traces_router.crossings_service, "fetch_osm_features", _fake_fetch_osm_features)
+
+    response = client.post(f"/api/v1/projects/{session_id}/traces/{trace['id']}/crossings/detect")
+    assert response.status_code == 200, response.text
+    crossings = response.json()["crossings"]
+    assert len(crossings) == 1
+    assert crossings[0]["source"] == "manual"
+    assert crossings[0]["label"] == "Repère manuel"
 
 
 def test_list_traces_returns_project_level_traces(client, session_id, project_state, sample_kml_bytes, import_trace):

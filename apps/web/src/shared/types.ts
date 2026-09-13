@@ -24,10 +24,19 @@ export interface LineStringGeometry {
 // Traversee detectee (route/piste/voie ferree, canal/riviere/cours d'eau, bâtiment) — consigne
 // utilisateur : couche affichable/masquable sur la carte et le profil. Indicative (base OSM), cf.
 // apps/api/hydrops_api/services/crossings.py.
+export type CrossingKind = 'highway' | 'railway' | 'waterway' | 'building' | 'urban' | 'forest'
+
 export interface Crossing {
   id: string
-  kind: 'highway' | 'railway' | 'waterway' | 'building' | 'urban' | 'forest'
+  kind: CrossingKind
   label?: string | null
+  // Valeur brute du tag OSM (ex. "primary", "river") — independante de `label`, utilisee pour la
+  // palette de couleurs par sous-categorie (consigne utilisateur, cf. shared/crossingColors.ts).
+  // `null`/absent pour railway/building/urban/forest (pas de sous-classement) ou pour une
+  // traversee manuelle.
+  subtype?: string | null
+  // "manual" = ajoutee/modifiee depuis la carte — jamais ecrasee par une redetection Overpass.
+  source?: 'detected' | 'manual'
   pk: number
   lon: number
   lat: number

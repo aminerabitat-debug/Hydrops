@@ -11,6 +11,7 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { MenuBar } from './MenuBar'
 import { NewVariantDialog } from './NewVariantDialog'
 import { PreferencesWindow } from './PreferencesWindow'
+import { ProgressBar } from './ProgressBar'
 import { ProjectDialog } from './ProjectDialog'
 import { QuickBar } from './QuickBar'
 import { Workspace, type LayoutMode } from './Workspace'
@@ -49,6 +50,7 @@ export function App() {
   const [backendUnreachable, setBackendUnreachable] = useState(false)
   const [pendingDeleteVariantId, setPendingDeleteVariantId] = useState<string | null>(null)
   const [calcResult, setCalcResult] = useState<CalcRunResult | null>(null)
+  const [calculating, setCalculating] = useState(false)
   const openInputRef = useRef<HTMLInputElement>(null)
 
   // Cree une session a la demande si aucune n'existe encore (mount initial rate, ou serveur
@@ -195,6 +197,7 @@ export function App() {
     if (!sessionId || !selectedVariantId) return null
     const scope =
       !forceFull && tableScope.kind === 'troncon' ? { traceId: tableScope.traceId, startNodeId: tableScope.startNodeId } : undefined
+    setCalculating(true)
     try {
       setStatusMessage('Calcul en cours...')
       const result = await api.runCalculation(sessionId, selectedVariantId, scope)
@@ -210,6 +213,8 @@ export function App() {
     } catch (error) {
       setStatusMessage(`Calcul impossible : ${(error as Error).message}`)
       return null
+    } finally {
+      setCalculating(false)
     }
   }
   const handleRunCalcul = () => runCalcul(false)
@@ -262,9 +267,16 @@ export function App() {
 
       <QuickBar
         projectOpen={Boolean(project)}
+        variantSelected={Boolean(selectedVariantId)}
         onNewProject={() => setDialog('newProject')}
         onOpenProject={() => openInputRef.current?.click()}
         onSaveProject={handleSaveProject}
+        onRunCalcul={handleRunCalcul}
+        onOpenPreferences={() => setDialog('preferences')}
+        onOpenConduites={() => setDialog('conduites')}
+        layoutMode={layoutMode}
+        onLayoutModeChange={setLayoutMode}
+        onAbout={() => setStatusMessage('HydroPS v0.1.0 — Lot 1 (socle, SIG/DEM, carte/profil/table)')}
       />
       <input ref={openInputRef} type="file" accept=".hydrops" hidden onChange={handleOpenFile} />
 
@@ -287,6 +299,7 @@ export function App() {
             ⚠ Serveur API inaccessible — vérifiez qu'il tourne, puis réessayez l'action.
           </span>
         )}
+        {calculating && <ProgressBar />}
         <span className="status-bar-text">{statusMessage}</span>
       </footer>
 

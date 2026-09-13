@@ -1,6 +1,6 @@
 import pytest
 
-from hydrops_api.services.crossings import OsmFeature, compute_crossings, trace_bbox
+from hydrops_api.services.crossings import OsmFeature, _feature_from_element, compute_crossings, trace_bbox
 
 
 def test_compute_crossings_detects_perpendicular_road():
@@ -12,6 +12,43 @@ def test_compute_crossings_detects_perpendicular_road():
     assert result[0].kind == "highway"
     assert result[0].label == "N7"
     assert result[0].pk >= 0.0
+
+
+def test_compute_crossings_propagates_subtype_from_feature():
+    # Consigne utilisateur : palette de couleurs par sous-categorie (classe de route/cours d'eau) —
+    # le subtype de l'OsmFeature doit se retrouver tel quel sur le Crossing produit.
+    trace = [(2.0, 48.0), (2.01, 48.0)]
+    road = OsmFeature(kind="highway", label="N7", subtype="primary", coordinates=[(2.005, 47.99), (2.005, 48.01)])
+    result = compute_crossings(trace, [road])
+    assert result[0].subtype == "primary"
+    assert result[0].source == "detected"
+
+
+def test_feature_from_element_captures_subtype_even_when_named():
+    # `label` privilegie le nom OSM quand il existe (name) — mais `subtype` doit rester la valeur
+    # BRUTE du tag kind (ex. "primary"), independamment de la presence d'un nom, sinon la classe de
+    # route/cours d'eau serait perdue pour toute voie nommee (consigne utilisateur).
+    element = {
+        "tags": {"highway": "primary", "name": "Route Nationale 7"},
+        "geometry": [{"lon": 2.0, "lat": 48.0}, {"lon": 2.01, "lat": 48.0}],
+    }
+    feature = _feature_from_element(element)
+    assert feature is not None
+    assert feature.label == "Route Nationale 7"
+    assert feature.subtype == "primary"
+
+
+def test_feature_from_element_subtype_none_for_unnamed_zone():
+    element = {
+        "tags": {"landuse": "forest"},
+        "geometry": [
+            {"lon": 2.0, "lat": 48.0}, {"lon": 2.01, "lat": 48.0}, {"lon": 2.01, "lat": 48.01}, {"lon": 2.0, "lat": 48.0}
+        ],
+    }
+    feature = _feature_from_element(element)
+    assert feature is not None
+    assert feature.kind == "forest"
+    assert feature.subtype is None
 
 
 def test_compute_crossings_ignores_non_intersecting_feature():

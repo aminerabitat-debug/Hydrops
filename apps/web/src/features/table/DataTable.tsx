@@ -19,19 +19,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { api } from '../../shared/apiClient'
+import { crossingDisplayText } from '../../shared/crossingColors'
 import { buildVertices, interpolateLonLatAtPk } from '../../shared/geo'
 import { isPlaceholderNode, nodeDisplayLabel } from '../../shared/nodeLabels'
 import { useAppStore } from '../../state/store'
 import type { CatalogMaterial, Crossing, Node, Segment, SegmentDetail } from '../../shared/types'
 
 const SNAP_TOLERANCE_M = 0.5
-
-// Meme repere court que le profil graphique (ProfileChart.tsx:CROSSING_LABELS) — duplique ici
-// plutot que partage, ce ne sont que 6 lettres fixes et ca evite un couplage entre les deux vues
-// pour un detail purement cosmetique.
-const CROSSING_KIND_LABELS: Record<string, string> = {
-  highway: 'R', railway: 'F', waterway: 'E', building: 'B', urban: 'U', forest: 'V',
-}
 
 interface Row {
   piquetNumber: number
@@ -66,7 +60,7 @@ const ACTION_COLUMN = ''
 
 const DEFAULT_COLUMN_WIDTHS: Record<string, number> = {
   'N° Piquet': 80, Type: 120, 'Distance partielle (m)': 150, 'PK cumulé (m)': 120,
-  X: 110, Y: 110, 'Z (m)': 90, 'Traversée': 90,
+  X: 110, Y: 110, 'Z (m)': 90, 'Traversée': 170,
   Matériau: 140, DN: 70, Classe: 80, 'DI (mm)': 80, 'Rugosité (mm)': 100,
   'Débit (m³/h)': 110, 'Vitesse (m/s)': 100, 'PDC unitaire (m/km)': 130, 'PDC linéaire (m)': 120,
   'PDC totale (m)': 110, 'Cote piézo (m)': 110, 'Pression dyn. (m)': 120,
@@ -450,9 +444,9 @@ export function DataTable({ onAddNode, onEditNode, onAssignNode, onDeleteNode, a
                 <td>{row.y.toFixed(6)}</td>
                 <td>{row.z.toFixed(2)}</td>
                 <td
-                  title={(crossingsByRowPk.get(row.pk) ?? []).map((c) => c.label ?? c.kind).join(', ') || undefined}
+                  title={(crossingsByRowPk.get(row.pk) ?? []).map((c) => crossingDisplayText(c)).join(', ') || undefined}
                 >
-                  {(crossingsByRowPk.get(row.pk) ?? []).map((c) => CROSSING_KIND_LABELS[c.kind] ?? '?').join(' ')}
+                  {(crossingsByRowPk.get(row.pk) ?? []).map((c) => crossingDisplayText(c)).join(', ')}
                 </td>
                 {tableScope.kind === 'troncon' && (
                   <>

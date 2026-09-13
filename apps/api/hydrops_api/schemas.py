@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class AnnualVolumePointRequest(BaseModel):
@@ -61,6 +61,21 @@ class PatchVariantRequest(BaseModel):
 
 class PatchTraceRequest(BaseModel):
     hydraulic_direction: Optional[Literal["as_drawn", "reversed"]] = None
+
+
+# Ajout/edition manuelle d'une traversee depuis la carte (consigne utilisateur) — `pk` suffit a la
+# positionner, lon/lat sont recalcules serveur (projection sur la geometrie de la trace), jamais
+# saisis par l'utilisateur.
+class AddCrossingRequest(BaseModel):
+    kind: Literal["highway", "railway", "waterway", "building", "urban", "forest"]
+    pk: float = Field(ge=0)
+    label: Optional[str] = None
+
+
+class PatchCrossingRequest(BaseModel):
+    kind: Optional[Literal["highway", "railway", "waterway", "building", "urban", "forest"]] = None
+    pk: Optional[float] = Field(default=None, ge=0)
+    label: Optional[str] = None
 
 
 # Types de noeud creables depuis l'UI a ce stade (Lot 3 etape 1b) — high_point/low_point/

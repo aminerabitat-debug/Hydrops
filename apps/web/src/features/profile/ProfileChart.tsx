@@ -5,6 +5,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
+import { crossingColor, crossingKindGlyph, crossingZoneFillColor } from '../../shared/crossingColors'
 import { isPlaceholderNode, nodeColor, nodeInitials } from '../../shared/nodeLabels'
 import { useAppStore } from '../../state/store'
 import type { Node, PipeCatalogRow, Segment } from '../../shared/types'
@@ -16,23 +17,11 @@ const PIEZO_LINE_COLOR = '#f472b6'
 const PMS_LINE_COLOR = '#f59e0b'
 const HYDROSTATIC_MAX_COLOR = '#22d3ee'
 const HYDROSTATIC_MIN_COLOR = '#0e7490'
-const CROSSING_COLOR = '#eab308'
 // Vitesse (panneau d'info, bouton i) — pas de courbe associee sur le graphique, une couleur propre
 // suffit (evite de la confondre avec la pression hydrodynamique, meme si les deux viennent du
 // meme calcul).
 const VELOCITY_COLOR = '#4ade80'
 const GUITAR_BAND_HEIGHT = 28
-
-// Repere court par nature de traversee (consigne utilisateur : routes/pistes, voies ferrees,
-// canaux/rivieres/chaabas, bâtiments) — affiche au sommet du repere vertical sur le profil.
-const CROSSING_LABELS: Record<string, string> = {
-  highway: 'R',
-  railway: 'F',
-  waterway: 'E',
-  building: 'B',
-  urban: 'U',
-  forest: 'V',
-}
 
 // Couleurs des courbes, exportees pour que la legende (ProfileTableView, cases a cocher) affiche
 // une pastille de la meme couleur que le trait qu'elle controle (consigne utilisateur) — une
@@ -43,7 +32,10 @@ export const CURVE_COLORS = {
   pms: PMS_LINE_COLOR,
   hydrostaticMax: HYDROSTATIC_MAX_COLOR,
   hydrostaticMin: HYDROSTATIC_MIN_COLOR,
-  crossing: CROSSING_COLOR,
+  // Pastille de la case a cocher "Traversées" (ProfileTableView) — un seul reglage qui montre/
+  // masque TOUTES les natures a la fois, chacune ayant desormais sa propre couleur (palette par
+  // sous-categorie, cf. shared/crossingColors.ts) : neutre, ne represente aucune nature en particulier.
+  crossing: '#eab308',
 } as const
 // Petite palette fixe pour distinguer les materiaux dans la bande de caracteristiques ("guitare",
 // consigne utilisateur) — couleurs volontairement sourdes pour ne pas rivaliser avec les courbes.
@@ -578,6 +570,25 @@ export function ProfileChart({
       ctx.setLineDash([])
     }
 
+    // ---- Halo de zone (urbain/forestier, consigne utilisateur : "une sorte de shadow autour du
+    // tracé dans cette zone") — dessine EN PREMIER pour rester en arriere-plan, sous toutes les
+    // courbes. Meme appariement Entree/Sortie par kind que la carte (cf. MapView.tsx). ----
+    if (showCrossings && trace?.crossings) {
+      for (const kind of ['urban', 'forest'] as const) {
+        const ofKind = trace.crossings.filter((c) => c.kind === kind).sort((a, b) => a.pk - b.pk)
+        for (let i = 0; i < ofKind.length - 1; i++) {
+          const entry = ofKind[i]
+          const exit = ofKind[i + 1]
+          if (!entry.label?.startsWith('Entrée') || !exit.label?.startsWith('Sortie')) continue
+          const start = Math.max(entry.pk, pkMin)
+          const end = Math.min(exit.pk, pkMax)
+          if (end <= start) continue
+          ctx.fillStyle = crossingZoneFillColor(kind)
+          ctx.fillRect(xScale(start), PADDING.top, xScale(end) - xScale(start), height - PADDING.top - PADDING.bottom)
+        }
+      }
+    }
+
     if (showTerrain) drawLine(smoothed, TERRAIN_LINE_COLOR, 2.5)
     if (showPiezo) {
       for (const segment of piezoSegments) drawLine(segment, PIEZO_LINE_COLOR, 2)
@@ -602,7 +613,8 @@ export function ProfileChart({
       for (const crossing of trace.crossings) {
         if (crossing.pk < pkMin - 1e-6 || crossing.pk > pkMax + 1e-6) continue
         const x = xScale(crossing.pk)
-        ctx.strokeStyle = CROSSING_COLOR
+        const color = crossingColor(crossing.kind, crossing.subtype)
+        ctx.strokeStyle = color
         ctx.lineWidth = 1
         ctx.setLineDash([3, 3])
         ctx.beginPath()
@@ -610,8 +622,8 @@ export function ProfileChart({
         ctx.lineTo(x, height - PADDING.bottom)
         ctx.stroke()
         ctx.setLineDash([])
-        ctx.fillStyle = CROSSING_COLOR
-        ctx.fillText(CROSSING_LABELS[crossing.kind] ?? '?', x, PADDING.top + 12)
+        ctx.fillStyle = color
+        ctx.fillText(crossingKindGlyph(crossing.kind), x, PADDING.top + 12)
       }
     }
 

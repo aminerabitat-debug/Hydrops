@@ -160,8 +160,17 @@ async def fetch_osm_features(
     traversées ne marche toujours pas") — une cascade sequentielle pouvait attendre jusqu'a
     5×OVERPASS_TIMEOUT_S (200s) avant d'echouer si le PREMIER miroir tente est simplement
     injoignable depuis le reseau de l'utilisateur (firewall, miroir en panne...), ce qui ressemblait
-    a un blocage pur et simple plutot qu'a une detection lente. Tous les miroirs partent en meme
-    temps ; la premiere reponse exploitable gagne, les requetes encore en vol sont annulees."""
+    a un blocage pur et simple plutot qu'a une detection lente.
+
+    Un miroir peut repondre 200 OK avec `elements: []` alors que la zone contient reellement des
+    voies/bâtiments (constate en usage reel : overpass.osm.ch renvoie 0 element sur une requete ou
+    maps.mail.ru en renvoie plusieurs milliers, pour la MEME bbox — pas une erreur HTTP, un miroir
+    dont la replication est simplement incomplete pour cette zone) — accepter ce genre de reponse
+    des qu'elle arrive ferait croire a tort "aucune traversee" a chaque fois qu'un tel miroir
+    repond avant les autres. Un resultat NON VIDE est donc accepte immediatement (la reponse
+    utile la plus rapide gagne, les autres requetes en vol sont annulees) ; un resultat VIDE est
+    garde en reserve, sans conclure, tant qu'un miroir plus complet n'a pas eu sa chance de
+    repondre — seulement retenu comme reponse finale si AUCUN miroir n'a produit mieux."""
     south, west, north, east = bbox
     query = _overpass_query(
         south - BBOX_MARGIN_DEG, west - BBOX_MARGIN_DEG, north + BBOX_MARGIN_DEG, east + BBOX_MARGIN_DEG
@@ -177,6 +186,7 @@ async def fetch_osm_features(
         return response.json()
 
     payload = None
+    empty_payload = None
     last_error: Optional[Exception] = None
     try:
         pending = {asyncio.ensure_future(_query_mirror(url)) for url in OVERPASS_URLS}
@@ -184,14 +194,21 @@ async def fetch_osm_features(
             done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
             for task in done:
                 try:
-                    payload = task.result()
-                    break
+                    result = task.result()
                 except (httpx.HTTPStatusError, httpx.TransportError) as e:
                     last_error = e
+                    continue
+                if result.get("elements"):
+                    payload = result
+                    break
+                if empty_payload is None:
+                    empty_payload = result
         for task in pending:
             task.cancel()
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
+        if payload is None:
+            payload = empty_payload
         if payload is None and last_error is not None:
             raise last_error
     finally:

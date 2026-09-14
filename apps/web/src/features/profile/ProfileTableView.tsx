@@ -286,6 +286,23 @@ export function ProfileTableView() {
         )
         return
       }
+      // Consigne utilisateur : "les segments de tronçons qui n'ont pas subi l'homogénéisation"
+      // changeaient quand meme — la contrainte posee couvre l'UNION [min(pkStart), max(pkEnd)] de
+      // la selection ; avec un Ctrl+clic sur deux bandes NON adjacentes, cette union "pontait" une
+      // bande intermediaire jamais selectionnee (ex. une zone materiau different posee
+      // manuellement, ou simplement un choix auto-dimensionne different) et l'ecrasait quand meme.
+      // On exige donc une selection CONTIGUE (triee par PK, chaque bande enchainant exactement sur
+      // la suivante) — l'union coincide alors exactement avec les bandes reellement selectionnees,
+      // rien d'autre ne peut se trouver "a l'interieur" par surprise.
+      const sortedSpans = [...selectedSpans].sort((a, b) => a.pkStart - b.pkStart)
+      const hasGap = sortedSpans.some((s, i) => i > 0 && Math.abs(s.pkStart - sortedSpans[i - 1].pkEnd) > 1e-6)
+      if (hasGap) {
+        setStatusMessage(
+          "Homogénéisation impossible : la sélection doit être une plage continue (pas de bande non sélectionnée entre deux bandes choisies).",
+          'error',
+        )
+        return
+      }
       const segment = segments.find((s) => s.id === segmentId)
       if (!segment) return
       const pkStart = Math.min(...selectedSpans.map((s) => s.pkStart))

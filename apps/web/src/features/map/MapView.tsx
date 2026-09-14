@@ -396,10 +396,14 @@ export function MapView() {
   // Consigne utilisateur : le 1er clic DETECTE (appel Overpass) ET affiche ; les clics suivants ne
   // font plus qu'afficher/masquer les traversées déjà connues, sans reinterroger Overpass a
   // chaque fois — `hoveredTrace.crossings == null` distingue "jamais détectées" de "détectées,
-  // liste vide" (cf. shared/types.ts).
+  // liste vide" (cf. shared/types.ts). Un resultat VIDE (rien detecte) est traite comme "jamais
+  // detectees" pour le comportement du bouton (consigne utilisateur : "si rien n'est detecte, ne
+  // pas changer la fonction du bouton a afficher/masquer") — afficher/masquer n'aurait de toute
+  // facon rien a montrer, et l'utilisateur doit pouvoir reessayer (ex. apres correction cote OSM)
+  // sans que le bouton reste bloque en mode bascule.
   const handleCrossingsButtonClick = async () => {
     if (!hoveredTrace) return
-    if (hoveredTrace.crossings != null) {
+    if (hoveredTrace.crossings != null && hoveredTrace.crossings.length > 0) {
       setShowCrossings(!showCrossings)
       return
     }
@@ -676,11 +680,11 @@ export function MapView() {
       </button>
       <button
         type="button"
-        className={`map-info-toggle map-crossings-toggle ${hoveredTrace?.crossings != null && showCrossings ? 'active' : ''}`}
+        className={`map-info-toggle map-crossings-toggle ${(hoveredTrace?.crossings?.length ?? 0) > 0 && showCrossings ? 'active' : ''}`}
         disabled={!hoveredTrace || detectingCrossings}
         onClick={handleCrossingsButtonClick}
         title={
-          hoveredTrace?.crossings == null
+          !hoveredTrace?.crossings || hoveredTrace.crossings.length === 0
             ? "Détecter les traversées (routes, voies ferrées, cours d'eau, zones urbaines/forestières, bâtiments) sur la trace sélectionnée"
             : showCrossings
               ? 'Masquer les traversées'

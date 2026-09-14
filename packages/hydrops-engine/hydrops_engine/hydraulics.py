@@ -575,17 +575,39 @@ def _gravitaire_pass(
             # Contrainte PARTIELLE (materiau et/ou DN et/ou classe — consigne utilisateur,
             # contraintes par plage de PK) : seuls les champs renseignes sont fixes, le reste est
             # choisi automatiquement (le moins cher respectant vitesse/PMS/materiaux autorises
-            # parmi ce qui reste) — une seule resolution, pas d'ajustement iteratif (cf. plus bas,
-            # ce segment est exclu de l'augmentation de DN et de l'optimisation telescopique,
-            # comme un segment entierement force).
+            # parmi ce qui reste) — une seule resolution, pas d'ajustement iteratif. Si le DN
+            # LUI-MEME n'est pas force (ex. materiau seul, comme une contrainte Matériau posee
+            # depuis la bande de caracteristiques), il reste soumis au plancher de telescopage
+            # `dn_floor` — consigne utilisateur : "le choix des DN ne respecte pas le
+            # téléscopage" ; un materiau force seul ne doit pas devenir un etranglement local
+            # (DN qui retrecit puis se rouvre juste apres) alors que l'utilisateur n'a jamais
+            # demande a changer le DN, seulement le materiau. Seul un DN EXPLICITEMENT force par
+            # l'utilisateur reste exempt du plancher (son choix delibere prime).
             material_fn = _partial_forced_material_fn(seg.forced_material, allowed_materials_fn)
+            dn_min = seg.forced_dn if seg.forced_dn is not None else dn_floor
             candidates = _candidates(
-                catalog, min_di, seg.forced_dn, seg.forced_dn, material_fn, max_pms_needed, max_di,
+                catalog, min_di, dn_min, seg.forced_dn, material_fn, max_pms_needed, max_di,
                 exact_pressure_class=seg.forced_pressure_class,
             )
+            if not candidates and dn_min is not None and seg.forced_dn is None:
+                # Le plancher de telescopage n'est pas atteignable avec ce materiau/cette classe
+                # (ex. un materiau dont le plus gros DN au catalogue est sous le plancher etabli en
+                # aval) — on relache le plancher plutot que d'aller directement au repli suivant
+                # (qui, lui, ignore aussi vitesse/PMS) : mieux vaut un etranglement local que de
+                # sacrifier vitesse/PMS pour rien, alors que le seul probleme est le plancher.
+                candidates = _candidates(
+                    catalog, min_di, None, seg.forced_dn, material_fn, max_pms_needed, max_di,
+                    exact_pressure_class=seg.forced_pressure_class,
+                )
+                if candidates:
+                    alerts.append(
+                        f"{seg_label} : le plancher de télescopage (DN {dn_min}) n'est pas atteignable "
+                        f"avec la contrainte matériau/classe imposée — DN choisi librement pour cette "
+                        f"contrainte, télescopage non respecté ici."
+                    )
             if not candidates:
                 candidates = _candidates(
-                    catalog, 0.0, seg.forced_dn, seg.forced_dn, material_fn, 0.0, math.inf,
+                    catalog, 0.0, None, seg.forced_dn, material_fn, 0.0, math.inf,
                     exact_pressure_class=seg.forced_pressure_class,
                 )
                 if candidates:
@@ -655,7 +677,17 @@ def _gravitaire_pass(
             )
         )
         nodes[upstream_node] = replace(nodes[upstream_node], piezo_head=cote_upstream, pressure_dynamic=pressure_upstream)
-        dn_floor = cand.dn
+        # Ne JAMAIS laisser le plancher DIMINUER (consigne utilisateur : "le choix des DN ne
+        # respecte pas le téléscopage") — une contrainte forcee/partielle (branches ci-dessus,
+        # explicitement exemptees du plancher pour respecter le choix de l'utilisateur) peut
+        # retenir un DN plus PETIT que ce que l'auto-dimensionnement aval avait deja etabli comme
+        # plancher ; le laisser ecraser `dn_floor` faisait "retrecir" le plancher pour le segment
+        # encore plus amont (libre, lui, non exempte), creant un etranglement local qui se rouvre
+        # juste apres (DN grand -> DN petit force -> DN grand a nouveau), au lieu du telescopage
+        # attendu. Pour la branche libre (else ci-dessus), `cand.dn` est deja >= `dn_floor` par
+        # construction (passe en `dn_min` a `_candidates`) : ce max est donc un no-op pour elle,
+        # et ne resserre le plancher QUE si la contrainte forcee a elle-meme choisi plus grand.
+        dn_floor = cand.dn if dn_floor is None else max(dn_floor, cand.dn)
 
     # Cote "necessaire" reconstruite en tete vs. cote REELLEMENT disponible (le reservoir ne se
     # "dimensionne" pas comme une pompe) — translation de tout le profil si marge positive, alerte
@@ -950,9 +982,26 @@ def solve_refoulement_troncon(
                     catalog, min_di, seg.forced_dn, effective_dn_max, material_fn, min_pms_needed, max_di,
                     exact_pressure_class=seg.forced_pressure_class,
                 )
+                if not candidates and effective_dn_max is not None and seg.forced_dn is None:
+                    # Le plafond de telescopage n'est pas atteignable avec ce materiau/cette classe
+                    # (ex. un materiau dont le plus petit DN au catalogue depasse le plafond etabli
+                    # en amont) — on relache le plafond plutot que d'aller directement au repli
+                    # suivant (qui, lui, ignore aussi vitesse/PMS) : cf. le meme raisonnement cote
+                    # gravitaire (solve_gravitaire_troncon, consigne utilisateur : "le choix des DN
+                    # ne respecte pas le téléscopage").
+                    candidates = _candidates(
+                        catalog, min_di, seg.forced_dn, None, material_fn, min_pms_needed, max_di,
+                        exact_pressure_class=seg.forced_pressure_class,
+                    )
+                    if candidates and attempt == _MAX_REFOULEMENT_PMS_ITERATIONS:
+                        alerts.append(
+                            f"{seg_label} : le plafond de télescopage (DN {effective_dn_max}) n'est pas "
+                            f"atteignable avec la contrainte matériau/classe imposée — DN choisi "
+                            f"librement pour cette contrainte, télescopage non respecté ici."
+                        )
                 if not candidates:
                     candidates = _candidates(
-                        catalog, 0.0, seg.forced_dn, effective_dn_max, material_fn, 0.0, math.inf,
+                        catalog, 0.0, seg.forced_dn, None, material_fn, 0.0, math.inf,
                         exact_pressure_class=seg.forced_pressure_class,
                     )
                     if candidates:
@@ -999,7 +1048,16 @@ def solve_refoulement_troncon(
                         f"effectué malgré la contrainte matériau/DN forcée."
                     )
             prelim.append((seg, cand, velocity, j))
-            dn_ceiling = cand.dn
+            # Ne JAMAIS laisser le plafond AUGMENTER (meme raisonnement que dn_floor cote
+            # gravitaire, cf. solve_gravitaire_troncon — consigne utilisateur : "le choix des DN
+            # ne respecte pas le téléscopage") — une contrainte forcee/partielle peut retenir un DN
+            # plus GRAND que le plafond deja etabli en amont ; le laisser ecraser `dn_ceiling`
+            # laisserait les segments libres ENCORE plus en aval regonfler au-dela de ce que le
+            # telescopage avait deja resserre. Pour la branche libre, `cand.dn` est deja <=
+            # `dn_ceiling` par construction (passe en `dn_max` a `_candidates`) : ce min est donc
+            # un no-op pour elle, et ne resserre le plafond QUE si la contrainte forcee a
+            # elle-meme choisi plus petit (telescopage qui continue normalement apres elle).
+            dn_ceiling = cand.dn if dn_ceiling is None else min(dn_ceiling, cand.dn)
 
         # Perte cumulee depuis le DEBUT du troncon (amont), noeud par noeud — la cote de depart H0
         # n'est pas encore fixee, seule cette perte l'est (elle ne depend que des DN choisis ci-dessus).

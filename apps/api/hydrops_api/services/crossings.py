@@ -15,6 +15,7 @@ Decoupe en deux etapes independantes (consigne testabilite) :
 
 from __future__ import annotations
 
+import asyncio
 import math
 import uuid
 from dataclasses import dataclass
@@ -154,10 +155,13 @@ def _feature_from_element(element: dict) -> Optional[OsmFeature]:
 async def fetch_osm_features(
     bbox: tuple[float, float, float, float], client: Optional[httpx.AsyncClient] = None
 ) -> list[OsmFeature]:
-    """bbox = (south, west, north, east), en degres WGS84. Cascade de miroirs Overpass publics
-    (OVERPASS_URLS) — un timeout/une erreur serveur sur l'un fait tenter le suivant, plutot que de
-    remonter un echec des le premier miroir indisponible (constate en usage reel : 504 Gateway
-    Timeout sur une trace dense/longue)."""
+    """bbox = (south, west, north, east), en degres WGS84. Miroirs Overpass publics (OVERPASS_URLS)
+    interroges EN PARALLELE, pas en cascade sequentielle (consigne utilisateur : "la détection des
+    traversées ne marche toujours pas") — une cascade sequentielle pouvait attendre jusqu'a
+    5×OVERPASS_TIMEOUT_S (200s) avant d'echouer si le PREMIER miroir tente est simplement
+    injoignable depuis le reseau de l'utilisateur (firewall, miroir en panne...), ce qui ressemblait
+    a un blocage pur et simple plutot qu'a une detection lente. Tous les miroirs partent en meme
+    temps ; la premiere reponse exploitable gagne, les requetes encore en vol sont annulees."""
     south, west, north, east = bbox
     query = _overpass_query(
         south - BBOX_MARGIN_DEG, west - BBOX_MARGIN_DEG, north + BBOX_MARGIN_DEG, east + BBOX_MARGIN_DEG
@@ -166,19 +170,28 @@ async def fetch_osm_features(
     client = client or httpx.AsyncClient(
         timeout=httpx.Timeout(OVERPASS_TIMEOUT_S, connect=_CONNECT_TIMEOUT_S)
     )
+
+    async def _query_mirror(url: str) -> dict:
+        response = await client.post(url, data={"data": query}, headers=_REQUEST_HEADERS)
+        response.raise_for_status()
+        return response.json()
+
     payload = None
     last_error: Optional[Exception] = None
     try:
-        for url in OVERPASS_URLS:
-            try:
-                response = await client.post(url, data={"data": query}, headers=_REQUEST_HEADERS)
-                response.raise_for_status()
-                payload = response.json()
-                last_error = None
-                break
-            except (httpx.HTTPStatusError, httpx.TransportError) as e:
-                last_error = e
-                continue
+        pending = {asyncio.ensure_future(_query_mirror(url)) for url in OVERPASS_URLS}
+        while pending and payload is None:
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                try:
+                    payload = task.result()
+                    break
+                except (httpx.HTTPStatusError, httpx.TransportError) as e:
+                    last_error = e
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
         if payload is None and last_error is not None:
             raise last_error
     finally:

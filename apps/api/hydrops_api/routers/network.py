@@ -89,24 +89,59 @@ _MAX_FINE_SEGMENTS_PER_SEGMENT = 300
 
 
 def _hydraulic_subdivision_points(
-    pk_start: float, pk_end: float, profile_points: list, step_m: float
+    pk_start: float, pk_end: float, profile_points: list, step_m: float, boundary_pks: list[float] = ()
 ) -> list[tuple[float, float]]:
     """Points DEM (pk, z) strictement entre pk_start et pk_end, sous-echantillonnes au pas
     hydraulique configure (Preferences.hydraulic_segment_step_m) — reutilise les altitudes DEM
     telles quelles (deja echantillonnees tous les ~20 m par profile_builder.py), sans interpolation.
     Chaque point retenu devient un piquet virtuel supplementaire pour le moteur de calcul (cf.
     run_calculation), lui permettant de choisir un DN different par piquet (glossaire Piquet/
-    Segment/Troncon, consigne utilisateur) — au lieu d'un DN unique pour tout le Segment reel."""
+    Segment/Troncon, consigne utilisateur) — au lieu d'un DN unique pour tout le Segment reel.
+
+    `boundary_pks` (consigne utilisateur : "il faut créer un piquet bis lors des changements de
+    Matériau, DN et classe [...] éphémère") : les PK de frontiere materiau/DN/classe (cf.
+    _constraint_boundary_pks) qui tombent dans [pk_start, pk_end] sont EN PLUS inseres tels quels
+    (altitude interpolee, jamais persistes — recalcules a chaque appel), pour que la resolution
+    par plage de PK (_resolve_constraints_at_pk) applique chaque contrainte exactement a sa
+    frontiere plutot qu'au piquet regulier le plus proche, qui pouvait legerement deplacer la
+    limite affichee et faire resoudre un DN different juste avant/apres la vraie frontiere."""
     interior = [(p.pk, p.z) for p in profile_points if pk_start + 1e-6 < p.pk < pk_end - 1e-6]
     if len(interior) < 2:
-        return interior
-    dem_step = interior[1][0] - interior[0][0]
-    stride = max(1, round(step_m / dem_step)) if dem_step > 0 else 1
-    sampled = interior[::stride]
-    if len(sampled) > _MAX_FINE_SEGMENTS_PER_SEGMENT:
-        coarser_stride = -(-len(interior) // _MAX_FINE_SEGMENTS_PER_SEGMENT)  # arrondi au superieur
-        sampled = interior[::coarser_stride]
-    return sampled
+        sampled = interior
+    else:
+        dem_step = interior[1][0] - interior[0][0]
+        stride = max(1, round(step_m / dem_step)) if dem_step > 0 else 1
+        sampled = interior[::stride]
+        if len(sampled) > _MAX_FINE_SEGMENTS_PER_SEGMENT:
+            coarser_stride = -(-len(interior) // _MAX_FINE_SEGMENTS_PER_SEGMENT)  # arrondi au superieur
+            sampled = interior[::coarser_stride]
+    relevant_boundaries = [pk for pk in boundary_pks if pk_start + 1e-6 < pk < pk_end - 1e-6]
+    if not relevant_boundaries:
+        return sampled
+    merged = list(sampled)
+    existing_pks = {pk for pk, _ in merged}
+    for pk in relevant_boundaries:
+        if any(abs(pk - existing) < 1e-6 for existing in existing_pks):
+            continue
+        merged.append((pk, interpolate_value_at_pk([(p.pk, p.z) for p in profile_points], pk)))
+        existing_pks.add(pk)
+    merged.sort(key=lambda t: t[0])
+    return merged
+
+
+def _constraint_boundary_pks(
+    constraints: list[SegmentConstraint], troncon_pk_start: float, troncon_pk_end: float
+) -> list[float]:
+    """PK de chaque frontiere materiau/DN/classe (debut ET fin de plage) parmi `constraints`, hors
+    des deux extremites du tronçon (deja des piquets reels, rien a dupliquer la) — consigne
+    utilisateur : "il faut créer un piquet bis lors des changements de Matériau, DN et classe"."""
+    pks: set[float] = set()
+    for c in constraints:
+        start, end = _constraint_span(c, troncon_pk_start, troncon_pk_end)
+        for pk in (start, end):
+            if troncon_pk_start + 1e-6 < pk < troncon_pk_end - 1e-6:
+                pks.add(pk)
+    return sorted(pks)
 
 
 def _effective_constraints(first_seg: Segment) -> list[SegmentConstraint]:
@@ -923,6 +958,10 @@ def run_calculation(
             # `fine_parent_ids`/`fine_downstream_pk` permettent de regrouper les resultats fins par
             # Segment reel une fois le calcul termine (cf. plus bas).
             effective_constraints = _effective_constraints(first_seg)
+            # Piquets "bis" ephemeres (consigne utilisateur, cf. _constraint_boundary_pks) — calcules
+            # une seule fois pour tout le tronçon, chaque Segment reel n'en retient que ceux qui
+            # tombent dans son propre [pk_start, pk_end] (cf. _hydraulic_subdivision_points).
+            constraint_boundary_pks = _constraint_boundary_pks(effective_constraints, group.pk_start, group.pk_end)
             first_real_id = str(troncon_segments[0].upstream_node_id)
             fine_node_ids: list[str] = [first_real_id]
             fine_node_ground_z: dict[str, float] = {first_real_id: nodes_by_id[first_real_id].z}
@@ -936,7 +975,8 @@ def run_calculation(
                 downstream_id = str(seg.downstream_node_id)
                 seg_flow_m3s = flow_by_node_id.get(upstream_id, 0.0) / 3600.0
                 subdivision = _hydraulic_subdivision_points(
-                    seg.pk_start, seg.pk_end, profile_points, prefs.hydraulic_segment_step_m
+                    seg.pk_start, seg.pk_end, profile_points, prefs.hydraulic_segment_step_m,
+                    constraint_boundary_pks,
                 )
 
                 prev_pk = seg.pk_start

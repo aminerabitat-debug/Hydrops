@@ -79,6 +79,7 @@ export function ProfileTableView() {
   const refreshNetwork = useAppStore((s) => s.refreshNetwork)
   const setStatusMessage = useAppStore((s) => s.setStatusMessage)
   const traces = useAppStore((s) => s.traces)
+  const troncons = useAppStore((s) => s.troncons)
   const showCrossings = useAppStore((s) => s.showCrossings)
   const setShowCrossings = useAppStore((s) => s.setShowCrossings)
   const selectedTraceId = useAppStore((s) => s.selection.selectedTraceId)
@@ -226,9 +227,12 @@ export function ProfileTableView() {
     return constraint ? { segment, pkStart, pkEnd, constraintId: constraint.id } : null
   }, [selectedSpans, segments])
 
-  const runScopedCalcul = async () => {
+  // `explicitScope`, quand fourni, prime sur `tableScope` (consigne utilisateur : l'homogénéisation
+  // ne doit recalculer QUE le tronçon qu'elle modifie, jamais tout le reseau juste parce que la vue
+  // affichee au moment du clic n'etait pas scopee a un tronçon — cf. handleHomogenize).
+  const runScopedCalcul = async (explicitScope?: { traceId: string; startNodeId: string }) => {
     if (!sessionId || !selectedVariantId) return
-    const scope = tableScope.kind === 'troncon' ? { traceId: tableScope.traceId, startNodeId: tableScope.startNodeId } : undefined
+    const scope = explicitScope ?? (tableScope.kind === 'troncon' ? { traceId: tableScope.traceId, startNodeId: tableScope.startNodeId } : undefined)
     const result = await api.runCalculation(sessionId, selectedVariantId, scope)
     await refreshNetwork()
     setStatusMessage(
@@ -244,6 +248,15 @@ export function ProfileTableView() {
   // plus elevee parmi la selection sur toute son etendue (union des PK), sous forme d'une
   // contrainte dediee (source="homogenization", cf. panneau "Contraintes" de la fenetre Tronçon) —
   // rejouable/annulable en revenant sur EXACTEMENT la meme selection (cf. activeHomogenization).
+  // Le tronçon REELLEMENT concerne par ce segment (consigne utilisateur : l'homogénéisation ne
+  // doit jamais recalculer un tronçon qui n'y a pas participe) — independant de ce que la vue
+  // affiche au moment du clic (`tableScope`), qui peut etre "trace entiere"/"tout" et declencherait
+  // sinon un recalcul complet du reseau via `runScopedCalcul`'s repli sur `tableScope`.
+  const tronconScopeForSegment = (segmentId: string) => {
+    const troncon = troncons.find((t) => t.segment_ids.includes(segmentId))
+    return troncon ? { traceId: troncon.trace_id, startNodeId: troncon.start_node_id } : undefined
+  }
+
   const handleHomogenize = async () => {
     if (!sessionId || !selectedVariantId) return
     setHomogenizing(true)
@@ -253,7 +266,7 @@ export function ProfileTableView() {
           (c) => c.id !== activeHomogenization.constraintId,
         )
         await api.putSegmentConstraints(sessionId, selectedVariantId, activeHomogenization.segment.id, remaining)
-        await runScopedCalcul()
+        await runScopedCalcul(tronconScopeForSegment(activeHomogenization.segment.id))
         return
       }
       if (selectedSpans.length < 2) return
@@ -308,7 +321,7 @@ export function ProfileTableView() {
           is_existing: false, phase_id: null, source: 'homogenization',
         },
       ])
-      await runScopedCalcul()
+      await runScopedCalcul(tronconScopeForSegment(segmentId))
     } catch (error) {
       setStatusMessage(`Homogénéisation impossible : ${(error as Error).message}`, 'error')
     } finally {

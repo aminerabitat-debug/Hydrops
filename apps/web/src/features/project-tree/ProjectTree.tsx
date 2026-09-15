@@ -20,6 +20,7 @@ import type {
   Variant,
 } from '../../shared/types'
 import { TRONCON_REGIME_COLOR, TRONCON_REGIME_GLYPH, tronconIsForced, tronconRegime } from '../../shared/troncons'
+import { ProgressBar } from '../../app/ProgressBar'
 import { NodeDialog, type NodeSubmitPayload } from '../profile/NodeDialog'
 import { TronconDialog, type TronconHydraulicValues } from './TronconDialog'
 
@@ -346,16 +347,14 @@ export function ProjectTree({ onOpenProjectSettings, onNewVariant, onDuplicateVa
       </div>
 
       {isImporting && (
-        <div className="import-progress">
-          <div className="progress-bar" role="progressbar" aria-valuenow={percent} aria-valuemin={0} aria-valuemax={100}>
-            <div className="progress-bar-fill" style={{ width: `${percent}%` }} />
-          </div>
-          <span className="progress-bar-label">
-            {importProgress && importProgress.total > 0
-              ? `${importProgress.completed} / ${importProgress.total} lots (${percent}%)`
-              : 'Démarrage...'}
-          </span>
-        </div>
+        <ProgressBar
+          percent={percent}
+          label={
+            importProgress && importProgress.total > 0
+              ? `${importProgress.completed} / ${importProgress.total} lots`
+              : 'Démarrage...'
+          }
+        />
       )}
 
       <ul className="tree-traces">

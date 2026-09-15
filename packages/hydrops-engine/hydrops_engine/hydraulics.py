@@ -407,22 +407,22 @@ def _check_excluded_nodes_pressure(
     ]
 
 
-def _check_terrain_pressure(
+def _terrain_violations(
     node_ids_ordered: list[str],
     node_pk: Optional[dict[str, float]],
     node_cotes: dict[str, float],
     min_pressure: Optional[float],
     terrain_samples: Optional[list[tuple[float, float]]],
     exclusion_end_pk: Optional[float] = None,
-) -> list[str]:
-    """Verifie la pression sur CHAQUE point echantillonne du profil de terrain (pas seulement aux
-    noeuds reels, cf. docstring du module) une fois la ligne piezometrique finale connue. Une seule
-    alerte agregee (jamais une par point — un terrain accidente en produirait des centaines) : PK de
-    debut/fin de la zone en defaut et pire cas rencontre. Les points dans la zone d'exclusion
-    (Preferences, consigne utilisateur) sont rapportes a part, dans une alerte informative jamais
-    bloquante (cf. EXCLUSION_ZONE_ALERT_MARKER)."""
+) -> tuple[list[tuple[float, float, float]], list[tuple[float, float, float]]]:
+    """Coeur du controle terrain (cf. `_check_terrain_pressure`, qui en derive les alertes) :
+    calcule, pour CHAQUE point echantillonne du profil, la pression obtenue par interpolation
+    lineaire de la cote piezometrique entre les deux piquets encadrants — reutilise par le
+    bouclage AMONT du dimensionnement de base (cf. solve_gravitaire_troncon) pour savoir QUEL
+    segment augmenter quand un point de terrain (pas seulement un noeud reel) manque de pression,
+    en plus de la construction des alertes agregees. Retourne (violations, violations_exclues)."""
     if min_pressure is None or not terrain_samples or not node_pk:
-        return []
+        return [], []
     violations: list[tuple[float, float, float]] = []
     excluded_violations: list[tuple[float, float, float]] = []
     for i in range(len(node_ids_ordered) - 1):
@@ -441,6 +441,26 @@ def _check_terrain_pressure(
             if pressure < min_pressure - 1e-6:
                 target = excluded_violations if exclusion_end_pk is not None and pk <= exclusion_end_pk + _EXCLUSION_ZONE_PK_EPSILON_M else violations
                 target.append((pk, z, pressure))
+    return violations, excluded_violations
+
+
+def _check_terrain_pressure(
+    node_ids_ordered: list[str],
+    node_pk: Optional[dict[str, float]],
+    node_cotes: dict[str, float],
+    min_pressure: Optional[float],
+    terrain_samples: Optional[list[tuple[float, float]]],
+    exclusion_end_pk: Optional[float] = None,
+) -> list[str]:
+    """Verifie la pression sur CHAQUE point echantillonne du profil de terrain (pas seulement aux
+    noeuds reels, cf. docstring du module) une fois la ligne piezometrique finale connue. Une seule
+    alerte agregee (jamais une par point — un terrain accidente en produirait des centaines) : PK de
+    debut/fin de la zone en defaut et pire cas rencontre. Les points dans la zone d'exclusion
+    (Preferences, consigne utilisateur) sont rapportes a part, dans une alerte informative jamais
+    bloquante (cf. EXCLUSION_ZONE_ALERT_MARKER)."""
+    violations, excluded_violations = _terrain_violations(
+        node_ids_ordered, node_pk, node_cotes, min_pressure, terrain_samples, exclusion_end_pk
+    )
     alerts: list[str] = []
     if violations:
         worst = min(violations, key=lambda v: v[2])
@@ -751,6 +771,7 @@ def solve_gravitaire_troncon(
     node_pk: Optional[dict[str, float]] = None,
     terrain_samples: Optional[list[tuple[float, float]]] = None,
     min_pressure_exclusion_m: Optional[float] = None,
+    on_progress: Optional[Callable[[int, int], None]] = None,
 ) -> TronconCalcResult:
     """Gravitaire, sens AVAL -> AMONT (cf. docstring du module) : le niveau du reservoir est une
     donnee fixe, pas un choix de conception — on reconstruit depuis l'exigence de pression aval la
@@ -760,7 +781,12 @@ def solve_gravitaire_troncon(
     desactive, le reste du calcul utilise 0.0 comme avant (comportement inchange pour un appelant
     qui passait deja un float). Si la pression minimale n'est pas tenue a un noeud, une tentative
     iterative augmente le DN du segment AMONT de ce noeud (consigne utilisateur : "ce n'est pas
-    grave, processus iteratif") avant de se resoudre a alerter."""
+    grave, processus iteratif") avant de se resoudre a alerter. `on_progress(done, total)`, si
+    fourni, est appele au fil du calcul (jamais a l'interieur de `_gravitaire_pass` elle-meme, ni
+    par palier de DN candidat lors du telescopage — trop frequent) — toujours appele une derniere
+    fois avec `done == total` avant de rendre la main, quel que soit le chemin emprunte (consigne
+    utilisateur : barre de progression a pourcentage reel, cf. network.py:run_calculation). Callback
+    synchrone, sans effet sur le resultat — le moteur reste pur (aucun I/O/asyncio)."""
     effective_upstream_level_min = upstream_level_min if upstream_level_min is not None else 0.0
 
     hydrostatic_alerts = _check_hydrostatic_feasibility(
@@ -778,8 +804,11 @@ def solve_gravitaire_troncon(
             )
             for nid in node_ids_ordered
         ]
+        if on_progress is not None:
+            on_progress(1, 1)
         return TronconCalcResult(segments=[], nodes=reset_nodes, alerts=hydrostatic_alerts)
 
+    progress_total = 3 + len(segments_ordered)
     viscosity = kinematic_viscosity_m2s(fluid_temperature_c)
     exclusion_end_pk = _exclusion_zone_end_pk(
         node_pk, node_ids_ordered[0], node_ids_ordered[-1], min_pressure_exclusion_m
@@ -802,26 +831,40 @@ def solve_gravitaire_troncon(
             nid for nid, required in required_by_node.items()
             if (nodes[nid].pressure_dynamic or 0.0) < required - 1e-6
         ]
-        if not violating_nodes or attempt == _MAX_GRAVITAIRE_DN_BUMP_ITERATIONS:
+        # Un DN choisi trop juste peut aussi manquer la pression sur un point de TERRAIN
+        # intermediaire (entre deux noeuds reels) sans jamais violer `required_by_node` ci-dessus
+        # (qui ne verifie que les 2 noeuds reels de ce tronçon) — notamment quand le plancher
+        # `dn_floor`/`min_dn_by_segment` herite d'une contrainte forcee en aval (consigne
+        # utilisateur : homogeneisation) rend un DN plus petit "gratuitement" disponible en amont.
+        # On applique donc la MEME logique d'augmentation iterative aux segments responsables d'une
+        # vraie violation terrain (zone d'exclusion exclue, jamais bloquante) — sinon ce cas
+        # n'apparaitrait qu'a la toute derniere verification (`_check_terrain_pressure` en fin de
+        # fonction), bien trop tard pour influencer le choix de DN.
+        terrain_violations, _ = _terrain_violations(
+            node_ids_ordered, node_pk, {nid: nodes[nid].piezo_head for nid in node_ids_ordered},
+            min_pressure, terrain_samples, exclusion_end_pk,
+        )
+        if (not violating_nodes and not terrain_violations) or attempt == _MAX_GRAVITAIRE_DN_BUMP_ITERATIONS:
             break
 
         # Le 1er noeud du troncon n'a pas de segment amont DANS ce troncon (c'est l'ouvrage source
         # lui-meme) — rien a augmenter pour lui, seule l'alerte reservoir peut le concerner.
         bumped_any = False
         dn_by_segment_id = {r.id: r.dn for r in results}
-        for nid in violating_nodes:
-            idx = node_ids_ordered.index(nid)
-            if idx == 0:
-                continue
-            seg = segments_ordered[idx - 1]
-            if seg.forced_material is not None or seg.forced_dn is not None or seg.forced_pressure_class is not None:
+
+        def _is_forced(seg: SegmentSpec) -> bool:
+            return seg.forced_material is not None or seg.forced_dn is not None or seg.forced_pressure_class is not None
+
+        def _bump_segment(seg: SegmentSpec) -> bool:
+            nonlocal bumped_any
+            if _is_forced(seg):
                 # Contrainte (totale ou partielle, consigne utilisateur) : jamais touche par
                 # l'augmentation iterative, meme si le noeud aval viole la pression — l'alerte de
                 # pression persiste (le segment contraint garde sa resolution quoi qu'il arrive).
-                continue
+                return False
             current_dn = dn_by_segment_id.get(seg.id)
             if current_dn is None:
-                continue
+                return False
             # Plafond de vitesse min (Preferences, consigne utilisateur) : ne pas grossir ce
             # segment au point de repasser sous cette vitesse — l'augmentation s'arrete la pour ce
             # segment (l'alerte "pression insuffisante" persiste alors, cf. verification finale de
@@ -829,13 +872,55 @@ def solve_gravitaire_troncon(
             max_di = max_di_mm_for_velocity(seg.flow_m3s, seg.min_velocity_ms)
             bigger = _candidates(catalog, 0.0, current_dn + 1, None, allowed_materials_fn, max_di_mm=max_di)
             if not bigger:
-                continue
+                return False
             new_floor = bigger[0].dn
             if new_floor > min_dn_by_segment.get(seg.id, 0):
                 min_dn_by_segment[seg.id] = new_floor
                 bumped_any = True
+                return True
+            return False
+
+        for nid in violating_nodes:
+            idx = node_ids_ordered.index(nid)
+            if idx == 0:
+                continue
+            _bump_segment(segments_ordered[idx - 1])
+
+        # Meme principe que ci-dessus (noeud violant -> segment amont) mais pour un point de
+        # terrain : on retrouve le segment fin (piquet) qui le contient par encadrement de PK. Ce
+        # segment peut lui-meme etre force (ex. homogeneisation, consigne utilisateur) — dans ce
+        # cas augmenter SON DN est impossible par construction, alors que la violation ne vient pas
+        # forcement de lui : la ligne piezo de tout le tronçon depend d'un seul decalage global
+        # (translation vs. le niveau du reservoir, cf. _gravitaire_pass), donc un segment LIBRE plus
+        # en amont (meme hors de la plage en defaut) peut tout de meme regagner la marge manquante.
+        # On remonte donc vers l'amont jusqu'au premier segment non force et c'est LUI qu'on
+        # augmente.
+        bumped_segment_ids: set[str] = set()
+        for pk, _z, _pressure in terrain_violations:
+            containing_idx: Optional[int] = None
+            for i in range(len(segments_ordered)):
+                pk_a, pk_b = node_pk.get(node_ids_ordered[i]), node_pk.get(node_ids_ordered[i + 1])
+                if pk_a is None or pk_b is None:
+                    continue
+                if pk_a - 1e-6 <= pk <= pk_b + 1e-6:
+                    containing_idx = i
+                    break
+            if containing_idx is None:
+                continue
+            for j in range(containing_idx, -1, -1):
+                seg = segments_ordered[j]
+                if _is_forced(seg):
+                    continue
+                if seg.id in bumped_segment_ids:
+                    break
+                bumped_segment_ids.add(seg.id)
+                _bump_segment(seg)
+                break
         if not bumped_any:
             break
+
+    if on_progress is not None:
+        on_progress(3, progress_total)
 
     # Optimisation telescopique du diametre (consigne utilisateur, procedure validee explicitement) :
     # une fois une solution SANS aucune alerte obtenue (le DN "de base", le moins cher respectant
@@ -870,9 +955,30 @@ def solve_gravitaire_troncon(
                 )
                 if trial_alerts:
                     break
+                # Consigne utilisateur : la reduction ne doit jamais accepter un palier qui casse la
+                # pression sur un point de TERRAIN intermediaire — `_gravitaire_pass` ci-dessus ne
+                # verifie que les noeuds REELS (2 ici : reservoir + extremite), jamais le profil de
+                # terrain entre eux. Sans cette revalidation, un palier plus petit pouvait sembler
+                # "sans alerte" ici puis echouer sur un point haut du terrain entre deux noeuds,
+                # revele seulement par `_check_terrain_pressure` en fin de fonction — trop tard, le DN
+                # etait deja retenu. On rejette donc aussi un palier qui introduit une VRAIE alerte
+                # terrain (le marqueur "zone d'exclusion", lui, reste informatif et n'invalide pas le
+                # palier, coherent avec le reste du module).
+                trial_terrain_alerts = _check_terrain_pressure(
+                    node_ids_ordered, node_pk,
+                    {nid: trial_nodes[nid].piezo_head for nid in node_ids_ordered},
+                    min_pressure, terrain_samples, exclusion_end_pk,
+                )
+                if any(not a.startswith(EXCLUSION_ZONE_ALERT_MARKER) for a in trial_terrain_alerts):
+                    break
                 forced_dn_by_segment = trial_forced
                 nodes, results, pass_alerts = trial_nodes, trial_results, trial_alerts
             downstream_floor = forced_dn_by_segment[seg.id]
+            if on_progress is not None:
+                on_progress(3 + (len(segments_ordered) - i), progress_total)
+
+    if on_progress is not None:
+        on_progress(progress_total, progress_total)
 
     alerts = list(pass_alerts)
     alerts.extend(
@@ -900,6 +1006,7 @@ def solve_refoulement_troncon(
     node_pk: Optional[dict[str, float]] = None,
     terrain_samples: Optional[list[tuple[float, float]]] = None,
     min_pressure_exclusion_m: Optional[float] = None,
+    on_progress: Optional[Callable[[int, int], None]] = None,
 ) -> TronconCalcResult:
     """Refoulement, sens AMONT -> AVAL (cf. docstring du module) : les DN sont choisis sur la seule
     contrainte de vitesse (+ decroissance vers l'aval), puis la plus petite cote de depart (H0, au
@@ -910,7 +1017,10 @@ def solve_refoulement_troncon(
     il faut augmenter la cote piezometrique du 1er piquet jusqu'a ce que ca se regle" — contrairement
     au gravitaire, la cote de depart n'est pas une donnee fixe, une pompe se dimensionne plus fort).
     Seule une alerte de depassement de PMS reste possible (la pression, elle, ne peut pas etre
-    "silencieusement" acceptee au-dela de ce que la conduite supporte)."""
+    "silencieusement" acceptee au-dela de ce que la conduite supporte). `on_progress(done, total)`,
+    si fourni, est appele une fois par tentative (pas de boucle de telescopage ici, cout lineaire) —
+    toujours appele une derniere fois avec `done == total` avant de rendre la main (meme convention
+    que solve_gravitaire_troncon)."""
     viscosity = kinematic_viscosity_m2s(fluid_temperature_c)
 
     exclusion_end_pk = _exclusion_zone_end_pk(
@@ -1119,8 +1229,13 @@ def solve_refoulement_troncon(
             if cand.pms_m < max_pressure_seen - 1e-6 and max_pressure_seen > min_pms_by_segment.get(seg.id, 0.0) + 1e-6:
                 min_pms_by_segment[seg.id] = max_pressure_seen
                 bumped_any = True
+        if on_progress is not None:
+            on_progress(attempt + 1, _MAX_REFOULEMENT_PMS_ITERATIONS + 1)
         if not bumped_any or attempt == _MAX_REFOULEMENT_PMS_ITERATIONS:
             break
+
+    if on_progress is not None:
+        on_progress(_MAX_REFOULEMENT_PMS_ITERATIONS + 1, _MAX_REFOULEMENT_PMS_ITERATIONS + 1)
 
     alerts.extend(_check_excluded_nodes_pressure(node_ids_ordered, node_pk, nodes, min_pressure, excluded_node_ids))
     if min_pressure is not None and excluded_terrain_points:

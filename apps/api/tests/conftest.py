@@ -86,3 +86,38 @@ def import_trace(client):
         return job["trace"]
 
     return _import
+
+
+@pytest.fixture
+def run_calc(client):
+    """Le calcul hydraulique est asynchrone (job + polling, cf. routers/network.py) — meme
+    principe que `import_trace` ci-dessus. POSTe .../calcul puis interroge le job jusqu'a
+    completion et retourne la reponse finale (meme forme que l'ancien retour synchrone : status/
+    segments_updated/nodes_updated/alerts/reposition_suggestions), pour que les tests restent
+    aussi simples a lire qu'avant. Si le serveur repond directement `needs_confirmation` (tronçon
+    au-dela du seuil de sonde sans `confirmed=true`), la reponse brute est renvoyee telle quelle
+    (pas de job a suivre) — a l'appelant de la reconnaitre via sa forme."""
+
+    def _run(session_id: str, variant_id: str, **params) -> dict:
+        response = client.post(
+            f"/api/v1/projects/{session_id}/variants/{variant_id}/calcul", params=params
+        )
+        if response.status_code != 202:
+            return response.json()
+        job_id = response.json()["job_id"]
+
+        for _ in range(500):
+            job = client.get(
+                f"/api/v1/projects/{session_id}/variants/{variant_id}/calcul-jobs/{job_id}"
+            ).json()
+            if job["status"] != "running":
+                break
+            time.sleep(0.02)
+        else:
+            raise AssertionError(f"Job de calcul {job_id} n'a jamais termine (toujours 'running')")
+
+        if job["status"] == "failed":
+            raise AssertionError(f"Job de calcul {job_id} a echoue: {job['error']}")
+        return job["result"]
+
+    return _run

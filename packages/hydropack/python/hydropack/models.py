@@ -460,11 +460,3 @@ class CalculationPreferences(BaseModel):
     # EXCLUSION_ZONE_ALERT_MARKER). Une alerte informative signale quand meme un depassement,
     # sans jamais bloquer le calcul.
     min_pressure_exclusion_pct: Optional[float] = 1.0
-    # Pas d'echantillonnage (m) utilise pour subdiviser un troncon en piquets fins lors du calcul
-    # hydraulique (consigne utilisateur, glossaire Piquet/Segment/Troncon) — chaque piquet peut
-    # recevoir son propre DN (optimisation telescopique), au lieu d'un DN unique pour tout le
-    # troncon. Un point de depart editable, pas une verite figee : plus petit = dimensionnement
-    # plus fin mais calcul plus lent (le moteur reessaie chaque palier de DN par piquet), plus
-    # grand = plus rapide mais moins de granularite pour le télescopage. Un garde-fou interne
-    # (nombre max de piquets par troncon) s'applique quelle que soit la valeur saisie.
-    hydraulic_segment_step_m: float = Field(default=200.0, gt=0)

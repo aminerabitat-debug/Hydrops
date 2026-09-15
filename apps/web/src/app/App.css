@@ -503,14 +503,19 @@ body,
   background: var(--accent-2);
 }
 
-.import-progress {
+/* Barre de progression DETERMINEE (pourcentage reel) — partagee par l'import de trace
+   (ProjectTree.tsx) et le calcul hydraulique (ProgressBar.tsx en mode `percent`, consigne
+   utilisateur : barre a pourcentage reel desormais que /calcul est un job asynchrone). Nommage
+   distinct de la barre INDETERMINEE ci-dessus (.progress-bar-wrap/-track/-fill), qui reste
+   utilisee telle quelle par la detection de traversees (une seule requete non subdivisable). */
+.job-progress {
   margin-top: 8px;
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
 
-.progress-bar {
+.job-progress-track {
   height: 8px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.08);
@@ -518,7 +523,7 @@ body,
   overflow: hidden;
 }
 
-.progress-bar-fill {
+.job-progress-track-fill {
   height: 100%;
   border-radius: 999px;
   background: linear-gradient(90deg, var(--accent), var(--violet));
@@ -526,7 +531,7 @@ body,
   min-width: 2%;
 }
 
-.progress-bar-label {
+.job-progress-label {
   font-size: 11px;
   color: var(--muted);
 }

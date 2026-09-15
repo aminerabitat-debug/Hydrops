@@ -35,7 +35,7 @@ def test_calcul_rejected_when_regime_indetermine_even_if_forced(
 
 
 def test_calcul_gravitaire_happy_path_sizes_segment_and_writes_results(
-    client, session_id, project_state, sample_kml_bytes, import_trace
+    client, session_id, project_state, sample_kml_bytes, import_trace, run_calc
 ):
     variant_id, trace = _import_sample(client, session_id, project_state, sample_kml_bytes, import_trace)
     nodes = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes").json()
@@ -66,9 +66,7 @@ def test_calcul_gravitaire_happy_path_sizes_segment_and_writes_results(
     )
     assert patch_response.status_code == 200, patch_response.text
 
-    response = client.post(f"/api/v1/projects/{session_id}/variants/{variant_id}/calcul")
-    assert response.status_code == 200, response.text
-    body = response.json()
+    body = run_calc(session_id, variant_id)
     assert body["status"] == "calculated"
     assert body["segments_updated"] == 1
     assert body["nodes_updated"] == 2
@@ -158,7 +156,7 @@ def test_patch_segment_manual_pipe_correction_is_not_reset_to_default(
 
 
 def test_calcul_gravitaire_hydrostatic_alert_clears_segment_and_nodes_but_keeps_forced(
-    client, session_id, project_state, sample_kml_bytes, import_trace
+    client, session_id, project_state, sample_kml_bytes, import_trace, run_calc
 ):
     # Consigne utilisateur : un troncon dont le calcul produit une alerte n'a "pas abouti sans
     # erreur" — aucune donnee de dimensionnement/pression periee ne doit rester affichee, mais les
@@ -199,9 +197,7 @@ def test_calcul_gravitaire_hydrostatic_alert_clears_segment_and_nodes_but_keeps_
         },
     )
 
-    response = client.post(f"/api/v1/projects/{session_id}/variants/{variant_id}/calcul")
-    assert response.status_code == 200, response.text
-    body = response.json()
+    body = run_calc(session_id, variant_id)
     assert body["segments_updated"] == 0
     assert body["nodes_updated"] == 0
     assert any("hydrostatique" in a.lower() for a in body["alerts"])
@@ -216,7 +212,7 @@ def test_calcul_gravitaire_hydrostatic_alert_clears_segment_and_nodes_but_keeps_
 
 
 def test_calcul_forced_material_dn_applies_despite_violated_constraints(
-    client, session_id, project_state, sample_kml_bytes, import_trace
+    client, session_id, project_state, sample_kml_bytes, import_trace, run_calc
 ):
     # Consigne utilisateur : "fixer des contraintes Materiau et DN au niveau de la fenetre
     # tronçon [...] le calcul hydraulique doit se faire meme si certaines contraintes de pression
@@ -255,9 +251,7 @@ def test_calcul_forced_material_dn_applies_despite_violated_constraints(
         },
     )
 
-    response = client.post(f"/api/v1/projects/{session_id}/variants/{variant_id}/calcul")
-    assert response.status_code == 200, response.text
-    body = response.json()
+    body = run_calc(session_id, variant_id)
     assert body["segments_updated"] == 1
     assert body["nodes_updated"] == 2
     assert any("vitesse" in a.lower() for a in body["alerts"])
@@ -277,21 +271,17 @@ def test_calcul_forced_material_dn_applies_despite_violated_constraints(
 
 
 def test_calcul_gravitaire_single_segment_troncon_gets_per_piquet_segment_details(
-    client, session_id, project_state, sample_kml_bytes, import_trace
+    client, session_id, project_state, sample_kml_bytes, import_trace, run_calc
 ):
     # Reproduit le constat du cas KMZ fourni par l'utilisateur : un troncon gravitaire SANS noeud
     # reel intermediaire (un seul Segment persiste) doit tout de meme etre dimensionne piquet par
     # piquet (glossaire Piquet/Segment/Troncon) — pas une seule "case" de DN pour tout le troncon.
+    # Pleine resolution DEM par defaut desormais (consigne utilisateur, suppression du pas
+    # hydraulique fixe) : plusieurs piquets fins sur la trace de test (~2 km, ~20 m/piquet) sont
+    # deja garantis sans avoir besoin de reduire un pas d'echantillonnage.
     variant_id, trace = _import_sample(client, session_id, project_state, sample_kml_bytes, import_trace)
     nodes = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes").json()
     upstream_id, downstream_id = nodes[0]["id"], nodes[1]["id"]
-
-    # Pas hydraulique reduit (defaut 200 m) pour garantir plusieurs piquets fins sur la trace de
-    # test (~2 km) — Preferences, consigne utilisateur : point de depart editable.
-    prefs = client.get(f"/api/v1/projects/{session_id}/preferences").json()
-    prefs["hydraulic_segment_step_m"] = 50.0
-    put_response = client.put(f"/api/v1/projects/{session_id}/preferences", json=prefs)
-    assert put_response.status_code == 200, put_response.text
 
     client.patch(
         f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes/{upstream_id}",
@@ -317,9 +307,8 @@ def test_calcul_gravitaire_single_segment_troncon_gets_per_piquet_segment_detail
         },
     )
 
-    response = client.post(f"/api/v1/projects/{session_id}/variants/{variant_id}/calcul")
-    assert response.status_code == 200, response.text
-    assert response.json()["segments_updated"] == 1
+    body = run_calc(session_id, variant_id)
+    assert body["segments_updated"] == 1
 
     seg = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments").json()[0]
     details = seg["segment_details"]
@@ -340,7 +329,7 @@ def test_calcul_gravitaire_single_segment_troncon_gets_per_piquet_segment_detail
 
 
 def test_calcul_new_unbounded_constraint_overrides_legacy_forced_material(
-    client, session_id, project_state, sample_kml_bytes, import_trace
+    client, session_id, project_state, sample_kml_bytes, import_trace, run_calc
 ):
     # Compatibilite ascendante (consigne utilisateur) : l'ancien forced_material/forced_dn reste lu
     # (contrainte implicite sans bornes), mais une NOUVELLE contrainte non bornee ajoutee depuis le
@@ -381,8 +370,7 @@ def test_calcul_new_unbounded_constraint_overrides_legacy_forced_material(
     )
     assert constraints_response.status_code == 200, constraints_response.text
 
-    response = client.post(f"/api/v1/projects/{session_id}/variants/{variant_id}/calcul")
-    assert response.status_code == 200, response.text
+    run_calc(session_id, variant_id)
 
     seg = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments").json()[0]
     assert seg["material"] == "FD"
@@ -391,7 +379,7 @@ def test_calcul_new_unbounded_constraint_overrides_legacy_forced_material(
 
 
 def test_calcul_applies_per_pk_range_constraint_over_wider_material_constraint(
-    client, session_id, project_state, sample_kml_bytes, import_trace
+    client, session_id, project_state, sample_kml_bytes, import_trace, run_calc
 ):
     # Reproduit l'exemple donne par l'utilisateur : "fixer le materiau a FD sur tout le tronçon et
     # DN500 [ici DN60, present au catalogue par defaut] entre pk 500 et pk 700" — deux contraintes
@@ -400,10 +388,6 @@ def test_calcul_applies_per_pk_range_constraint_over_wider_material_constraint(
     variant_id, trace = _import_sample(client, session_id, project_state, sample_kml_bytes, import_trace)
     nodes = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes").json()
     upstream_id, downstream_id = nodes[0]["id"], nodes[1]["id"]
-
-    prefs = client.get(f"/api/v1/projects/{session_id}/preferences").json()
-    prefs["hydraulic_segment_step_m"] = 50.0
-    assert client.put(f"/api/v1/projects/{session_id}/preferences", json=prefs).status_code == 200
 
     client.patch(
         f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes/{upstream_id}",
@@ -431,9 +415,8 @@ def test_calcul_applies_per_pk_range_constraint_over_wider_material_constraint(
     )
     assert constraints_response.status_code == 200, constraints_response.text
 
-    response = client.post(f"/api/v1/projects/{session_id}/variants/{variant_id}/calcul")
-    assert response.status_code == 200, response.text
-    assert response.json()["segments_updated"] == 1
+    body = run_calc(session_id, variant_id)
+    assert body["segments_updated"] == 1
 
     details = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments").json()[0]["segment_details"]
     assert details, "aucun detail par piquet retourne"
@@ -448,7 +431,7 @@ def test_calcul_applies_per_pk_range_constraint_over_wider_material_constraint(
 
 
 def test_calcul_min_pressure_exclusion_zone_is_informative_not_blocking(
-    client, session_id, project_state, sample_kml_bytes, import_trace
+    client, session_id, project_state, sample_kml_bytes, import_trace, run_calc
 ):
     # Consigne utilisateur : "Zone d'exclusion de la contrainte de pression min" — propre au
     # tronçon, en METRES depuis l'ouvrage de depart (Segment.min_pressure_exclusion_m) — ou
@@ -485,9 +468,7 @@ def test_calcul_min_pressure_exclusion_zone_is_informative_not_blocking(
         },
     )
 
-    response = client.post(f"/api/v1/projects/{session_id}/variants/{variant_id}/calcul")
-    assert response.status_code == 200, response.text
-    body = response.json()
+    body = run_calc(session_id, variant_id)
     assert body["segments_updated"] == 1
     assert body["nodes_updated"] == 2
     assert not any("pression insuffisante" in a.lower() for a in body["alerts"])
@@ -498,7 +479,7 @@ def test_calcul_min_pressure_exclusion_zone_is_informative_not_blocking(
 
 
 def test_calcul_min_pressure_shortfall_is_informative_not_blocking(
-    client, session_id, project_state, sample_kml_bytes, import_trace
+    client, session_id, project_state, sample_kml_bytes, import_trace, run_calc
 ):
     # Consigne utilisateur : "ne bloque plus le calcul pour une question de pression minimale,
     # affiche juste une alerte" — un manque de pression residuelle/min (hors alerte hydrostatique,
@@ -534,9 +515,7 @@ def test_calcul_min_pressure_shortfall_is_informative_not_blocking(
         },
     )
 
-    response = client.post(f"/api/v1/projects/{session_id}/variants/{variant_id}/calcul")
-    assert response.status_code == 200, response.text
-    body = response.json()
+    body = run_calc(session_id, variant_id)
     assert not any("hydrostatique" in a.lower() for a in body["alerts"])
     assert any("pression insuffisante" in a.lower() for a in body["alerts"])
     assert body["segments_updated"] == 1
@@ -547,7 +526,7 @@ def test_calcul_min_pressure_shortfall_is_informative_not_blocking(
 
 
 def test_calcul_scoped_to_one_troncon_ignores_other_unvalidated_troncons(
-    client, session_id, project_state, sample_kml_bytes, import_trace
+    client, session_id, project_state, sample_kml_bytes, import_trace, run_calc
 ):
     # Consigne utilisateur : un tronçon deja selectionne et valide se calcule seul, sans exiger que
     # les AUTRES tronçons de la variante soient valides — a l'inverse du calcul non scope (variante
@@ -587,12 +566,7 @@ def test_calcul_scoped_to_one_troncon_ignores_other_unvalidated_troncons(
     unscoped = client.post(f"/api/v1/projects/{session_id}/variants/{variant_id}/calcul")
     assert unscoped.status_code == 409  # Tr2 (BC1 -> BC2) toujours non valide
 
-    scoped = client.post(
-        f"/api/v1/projects/{session_id}/variants/{variant_id}/calcul",
-        params={"scope_trace_id": trace["id"], "scope_start_node_id": start_id},
-    )
-    assert scoped.status_code == 200, scoped.text
-    body = scoped.json()
+    body = run_calc(session_id, variant_id, scope_trace_id=trace["id"], scope_start_node_id=start_id)
     assert body["segments_updated"] == 1
     assert body["nodes_updated"] == 2
 
@@ -617,7 +591,7 @@ def test_calcul_scoped_to_one_troncon_still_requires_that_troncon_valid(
 
 
 def test_calcul_gravitaire_hydrostatic_alert_suggests_reposition_for_non_structural_reservoir(
-    client, session_id, project_state, sample_kml_bytes, import_trace
+    client, session_id, project_state, sample_kml_bytes, import_trace, run_calc
 ):
     # Le reservoir est un noeud INTERIEUR (pas a l'extremite de la trace) — deplacable, une
     # suggestion de repositionnement doit apparaitre (consigne utilisateur : proposer de decaler
@@ -668,9 +642,7 @@ def test_calcul_gravitaire_hydrostatic_alert_suggests_reposition_for_non_structu
         },
     )
 
-    response = client.post(f"/api/v1/projects/{session_id}/variants/{variant_id}/calcul")
-    assert response.status_code == 200, response.text
-    body = response.json()
+    body = run_calc(session_id, variant_id)
     assert any("hydrostatique" in a.lower() for a in body["alerts"])
     assert len(body["reposition_suggestions"]) == 1
     suggestion = body["reposition_suggestions"][0]
@@ -687,7 +659,118 @@ def test_calcul_gravitaire_hydrostatic_alert_suggests_reposition_for_non_structu
         json={"pk": suggestion["candidate_pk"]},
     )
     assert move_response.status_code == 200, move_response.text
-    recalc = client.post(f"/api/v1/projects/{session_id}/variants/{variant_id}/calcul").json()
+    recalc = run_calc(session_id, variant_id)
     assert not any("hydrostatique" in a.lower() for a in recalc["alerts"])
+
+
+def _setup_valid_gravitaire_troncon(client, session_id, project_state, sample_kml_bytes, import_trace):
+    """Prepare un tronçon gravitaire minimal, valide et prêt a calculer — factorise le setup
+    repete par les tests de la nouvelle infrastructure de job/estimation ci-dessous."""
+    variant_id, trace = _import_sample(client, session_id, project_state, sample_kml_bytes, import_trace)
+    nodes = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes").json()
+    upstream_id, downstream_id = nodes[0]["id"], nodes[1]["id"]
+    client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes/{upstream_id}",
+        json={"type": "storage_reservoir", "name": "Res1", "data": {"fluid": "Eau potable"}},
+    )
+    client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/nodes/{downstream_id}",
+        json={"type": "pressure_break", "name": "BC1"},
+    )
+    max_z = max(n["z"] for n in nodes)
+    segments = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments").json()
+    segment_id = segments[0]["id"]
+    client.patch(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/segments/{segment_id}",
+        json={
+            "head_flow": 100.0,
+            "upstream_water_level_max": max_z + 60.0,
+            "upstream_water_level_min": max_z + 55.0,
+            "min_pressure": 5.0,
+            "downstream_residual_pressure": 5.0,
+            "max_velocity": 2.0,
+        },
+    )
+    return variant_id
+
+
+def test_calcul_returns_202_with_job_id(client, session_id, project_state, sample_kml_bytes, import_trace):
+    variant_id = _setup_valid_gravitaire_troncon(client, session_id, project_state, sample_kml_bytes, import_trace)
+    response = client.post(f"/api/v1/projects/{session_id}/variants/{variant_id}/calcul")
+    assert response.status_code == 202, response.text
+    body = response.json()
+    assert "job_id" in body and body["job_id"]
+    assert body["total_units"] > 0
+
+
+def test_calcul_job_not_found_returns_404(client, session_id, project_state, sample_kml_bytes, import_trace):
+    variant_id = _setup_valid_gravitaire_troncon(client, session_id, project_state, sample_kml_bytes, import_trace)
+    response = client.get(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/calcul-jobs/does-not-exist"
+    )
+    assert response.status_code == 404
+
+
+def test_calcul_needs_confirmation_when_estimate_exceeds_threshold(
+    client, session_id, project_state, sample_kml_bytes, import_trace, monkeypatch
+):
+    # Consigne utilisateur : "evaluer le temps de calcul estime au debut, et si ca depasse 30s,
+    # demander a l'utilisateur s'il veut reduire le nombre de piquets" — abaisse les seuils pour
+    # declencher ce chemin de facon deterministe sur la trace de test courte (~2 km), sans dependre
+    # de la vitesse de la machine ni d'une trace reellement longue.
+    import hydrops_api.routers.network as network_router
+
+    monkeypatch.setattr(network_router, "_PROBE_THRESHOLD_FINE_SEGMENTS", 1)
+    monkeypatch.setattr(network_router, "_PROBE_TIME_BUDGET_S", 0.001)
+    monkeypatch.setattr(network_router, "_ESTIMATE_CONFIRMATION_THRESHOLD_S", 0.0)
+
+    variant_id = _setup_valid_gravitaire_troncon(client, session_id, project_state, sample_kml_bytes, import_trace)
+    response = client.post(f"/api/v1/projects/{session_id}/variants/{variant_id}/calcul")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["needs_confirmation"] is True
+    assert body["estimated_seconds"] > 0
+    assert body["total_fine_segments"] > 1
+
+
+def test_calcul_confirmed_true_bypasses_estimation_and_runs_full_resolution(
+    client, session_id, project_state, sample_kml_bytes, import_trace, run_calc, monkeypatch
+):
+    import hydrops_api.routers.network as network_router
+
+    monkeypatch.setattr(network_router, "_PROBE_THRESHOLD_FINE_SEGMENTS", 1)
+    monkeypatch.setattr(network_router, "_PROBE_TIME_BUDGET_S", 0.001)
+    monkeypatch.setattr(network_router, "_ESTIMATE_CONFIRMATION_THRESHOLD_S", 0.0)
+
+    variant_id = _setup_valid_gravitaire_troncon(client, session_id, project_state, sample_kml_bytes, import_trace)
+    body = run_calc(session_id, variant_id, confirmed=True)
+    assert body["status"] == "calculated"
+    assert body["segments_updated"] == 1
+
+
+def test_calcul_reduce_resolution_uses_fewer_fine_segments_than_full(
+    client, session_id, project_state, sample_kml_bytes, import_trace, run_calc, monkeypatch
+):
+    # Consigne utilisateur : repli explicite "reduire la resolution" apres le dialogue
+    # d'estimation — reutilise l'ancien pas fixe (_REDUCED_RESOLUTION_STEP_M) plutot que la pleine
+    # resolution DEM par defaut.
+    import hydrops_api.routers.network as network_router
+
+    monkeypatch.setattr(network_router, "_PROBE_THRESHOLD_FINE_SEGMENTS", 1)
+
+    variant_id = _setup_valid_gravitaire_troncon(client, session_id, project_state, sample_kml_bytes, import_trace)
+    full = run_calc(session_id, variant_id, confirmed=True)
+    assert full["status"] == "calculated"
+    full_details = client.get(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/segments"
+    ).json()[0]["segment_details"]
+
+    reduced = run_calc(session_id, variant_id, confirmed=True, reduce_resolution=True)
+    assert reduced["status"] == "calculated"
+    reduced_details = client.get(
+        f"/api/v1/projects/{session_id}/variants/{variant_id}/segments"
+    ).json()[0]["segment_details"]
+
+    assert len(reduced_details) <= len(full_details)
 
 

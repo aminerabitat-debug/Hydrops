@@ -169,7 +169,6 @@ def _preferences_response(package: ProjectPackage) -> dict:
         "default_max_velocity": prefs.default_max_velocity,
         "default_min_velocity": prefs.default_min_velocity,
         "min_pressure_exclusion_pct": prefs.min_pressure_exclusion_pct,
-        "hydraulic_segment_step_m": prefs.hydraulic_segment_step_m,
     }
 
 
@@ -196,7 +195,6 @@ def put_preferences(session_id: str, payload: CalculationPreferencesRequest, req
         default_max_velocity=payload.default_max_velocity,
         default_min_velocity=payload.default_min_velocity,
         min_pressure_exclusion_pct=payload.min_pressure_exclusion_pct,
-        hydraulic_segment_step_m=payload.hydraulic_segment_step_m,
     )
     return _preferences_response(package)
 

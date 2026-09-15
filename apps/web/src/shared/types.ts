@@ -204,8 +204,8 @@ export interface Node {
   // pour les champs attendus par type. Cle absente/valeur null tant que rien n'a ete saisi. Pour un
   // Piquage (tie_in), le seul champ utilise est `include_withdrawal_in_sizing` (bool, defaut true).
   data?: Record<string, unknown> | null
-  // Sorties du calcul hydraulique (bouton Calculer) — cf. shared/apiClient.ts:runCalculation. null
-  // tant qu'aucun calcul n'a ete lance ou que ce noeud n'appartient pas a un troncon calculable.
+  // Sorties du calcul hydraulique (bouton Calculer) — cf. shared/pollCalcJob.ts:runCalculationJob.
+  // null tant qu'aucun calcul n'a ete lance ou que ce noeud n'appartient pas a un troncon calculable.
   piezo_head?: number | null
   pressure_dynamic?: number | null
   pressure_static_max?: number | null
@@ -267,7 +267,7 @@ export interface Segment {
   // resultante viole une contrainte (alerte informative, jamais bloquante). Toujours ensemble.
   forced_material?: string | null
   forced_dn?: number | null
-  // Sorties du calcul hydraulique (bouton Calculer) — cf. shared/apiClient.ts:runCalculation.
+  // Sorties du calcul hydraulique (bouton Calculer) — cf. shared/pollCalcJob.ts:runCalculationJob.
   // `flow`/`roughness` (ci-dessus) sont aussi ecrases par le calcul.
   velocity?: number | null
   head_loss_unit?: number | null
@@ -383,7 +383,6 @@ export interface CalculationPreferences {
   default_max_velocity?: number | null
   default_min_velocity?: number | null
   min_pressure_exclusion_pct?: number | null
-  hydraulic_segment_step_m: number
 }
 
 export interface RepositionSuggestion {
@@ -399,4 +398,37 @@ export interface CalcRunResult {
   nodes_updated: number
   alerts: string[]
   reposition_suggestions: RepositionSuggestion[]
+}
+
+// Calcul hydraulique asynchrone (cf. docs — pleine resolution DEM par defaut desormais, un
+// tronçon peut compter des milliers de piquets fins) : POST demarre un job, GET .../calcul-jobs/
+// {id} le suit par polling — meme principe que l'import de trace (ImportJobStarted/ImportJobStatus
+// ci-dessus). POST peut aussi repondre directement une estimation (`CalcNeedsConfirmation`, pas de
+// job demarre) si le calcul est susceptible de depasser 30s — a l'appelant de rappeler avec
+// `confirmed: true` (pleine resolution) ou `confirmed: true, reduce_resolution: true` (repli sur
+// un pas fixe ~200 m).
+export interface CalculationJobStarted {
+  job_id: string
+  total_units: number
+}
+
+export interface CalculationJobStatus {
+  job_id: string
+  status: 'running' | 'done' | 'failed'
+  completed_units: number
+  total_units: number
+  result: CalcRunResult | null
+  error: string | null
+}
+
+export interface CalcNeedsConfirmation {
+  needs_confirmation: true
+  estimated_seconds: number
+  total_fine_segments: number
+}
+
+export type StartCalculationResponse = CalculationJobStarted | CalcNeedsConfirmation
+
+export function isCalcNeedsConfirmation(r: StartCalculationResponse): r is CalcNeedsConfirmation {
+  return 'needs_confirmation' in r
 }

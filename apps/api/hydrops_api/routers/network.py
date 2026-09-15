@@ -9,10 +9,13 @@ et vannes restent exclus (consigne utilisateur). Le calcul hydraulique arrive a 
 
 from __future__ import annotations
 
+import asyncio
+import time
 import uuid
+from dataclasses import dataclass, field
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 
 from hydropack.models import MaterialCriterionRule, Node, Segment, SegmentConstraint, SegmentDetail
 from hydropack.serializer import ProjectPackage
@@ -33,6 +36,7 @@ from hydrops_engine.topology import (
     validate_pk_strictly_increasing,
 )
 
+from ..core.calc_job_store import CalcJobNotFoundError, CalcJobStore
 from ..core.deps import get_session_store, require_package
 from ..data.material_criteria_seed import DEFAULT_MATERIAL_CRITERIA
 from ..data.pipe_catalog_seed import DEFAULT_ROUGHNESS_MM
@@ -81,22 +85,35 @@ def _flow_by_node_within_troncon(troncon_node_ids: list[str], nodes_by_id: dict[
     return result
 
 
-# Garde-fou (consigne utilisateur, glossaire Piquet/Segment/Troncon) : nombre max de piquets fins
-# par Segment reel, quel que soit `hydraulic_segment_step_m` configure — l'optimisation
-# telescopique (hydrops_engine) reessaie plusieurs paliers de DN par piquet ajoute, un pas trop fin
-# sur un tres long troncon degraderait sinon la performance du calcul synchrone.
-_MAX_FINE_SEGMENTS_PER_SEGMENT = 300
+# Garde-fou technique (pas user-facing, consigne utilisateur : "evaluer le temps de calcul estime
+# au debut, et si ca depasse 30s, demander a l'utilisateur s'il veut reduire le nombre de piquets"
+# — remplace l'ancien pas d'echantillonnage fixe `hydraulic_segment_step_m`, cf.
+# _estimate_calc_seconds/_PROBE_THRESHOLD_FINE_SEGMENTS) : nombre max de piquets fins par Segment
+# reel, filet de securite silencieux en dernier recours si un tronçon pathologique rendrait meme
+# l'estimation trompeuse — l'optimisation telescopique (hydrops_engine) reessaie plusieurs paliers
+# de DN par piquet ajoute, un nombre de piquets non borne sur un tres long troncon degraderait
+# sinon indefiniment la performance du calcul.
+_MAX_FINE_SEGMENTS_PER_SEGMENT = 2000
+
+# Pas d'echantillonnage (m) de repli quand l'utilisateur choisit "reduire la resolution" apres le
+# dialogue d'estimation (consigne utilisateur) — reprend l'ancienne valeur par defaut de l'ex-
+# Preferences.hydraulic_segment_step_m, desormais supprimee du reglage utilisateur (le comportement
+# par defaut est la pleine resolution DEM, ceci n'est qu'un repli explicite a la demande).
+_REDUCED_RESOLUTION_STEP_M = 200.0
 
 
 def _hydraulic_subdivision_points(
-    pk_start: float, pk_end: float, profile_points: list, step_m: float, boundary_pks: list[float] = ()
+    pk_start: float, pk_end: float, profile_points: list, boundary_pks: list[float] = (), step_m: Optional[float] = None
 ) -> list[tuple[float, float]]:
-    """Points DEM (pk, z) strictement entre pk_start et pk_end, sous-echantillonnes au pas
-    hydraulique configure (Preferences.hydraulic_segment_step_m) — reutilise les altitudes DEM
-    telles quelles (deja echantillonnees tous les ~20 m par profile_builder.py), sans interpolation.
-    Chaque point retenu devient un piquet virtuel supplementaire pour le moteur de calcul (cf.
-    run_calculation), lui permettant de choisir un DN different par piquet (glossaire Piquet/
-    Segment/Troncon, consigne utilisateur) — au lieu d'un DN unique pour tout le Segment reel.
+    """Points DEM (pk, z) strictement entre pk_start et pk_end — par defaut TOUS (pleine resolution
+    DEM, consigne utilisateur), reutilises tels quels (deja echantillonnes tous les ~20 m par
+    profile_builder.py), sans interpolation. Chaque point retenu devient un piquet virtuel
+    supplementaire pour le moteur de calcul (cf. run_calculation), lui permettant de choisir un DN
+    different par piquet (glossaire Piquet/Segment/Troncon, consigne utilisateur) — au lieu d'un DN
+    unique pour tout le Segment reel. Reste borne par `_MAX_FINE_SEGMENTS_PER_SEGMENT` (filet de
+    securite silencieux, jamais le mecanisme principal). `step_m`, si fourni, sous-echantillonne
+    EN PLUS avant ce garde-fou — reserve au repli explicite "reduire la resolution" du dialogue
+    d'estimation (cf. _REDUCED_RESOLUTION_STEP_M), jamais utilise par defaut.
 
     `boundary_pks` (consigne utilisateur : "il faut créer un piquet bis lors des changements de
     Matériau, DN et classe [...] éphémère") : les PK de frontiere materiau/DN/classe (cf.
@@ -108,13 +125,15 @@ def _hydraulic_subdivision_points(
     interior = [(p.pk, p.z) for p in profile_points if pk_start + 1e-6 < p.pk < pk_end - 1e-6]
     if len(interior) < 2:
         sampled = interior
-    else:
+    elif step_m is not None:
         dem_step = interior[1][0] - interior[0][0]
         stride = max(1, round(step_m / dem_step)) if dem_step > 0 else 1
         sampled = interior[::stride]
-        if len(sampled) > _MAX_FINE_SEGMENTS_PER_SEGMENT:
-            coarser_stride = -(-len(interior) // _MAX_FINE_SEGMENTS_PER_SEGMENT)  # arrondi au superieur
-            sampled = interior[::coarser_stride]
+    else:
+        sampled = interior
+    if len(sampled) > _MAX_FINE_SEGMENTS_PER_SEGMENT:
+        coarser_stride = -(-len(interior) // _MAX_FINE_SEGMENTS_PER_SEGMENT)  # arrondi au superieur
+        sampled = interior[::coarser_stride]
     relevant_boundaries = [pk for pk in boundary_pks if pk_start + 1e-6 < pk < pk_end - 1e-6]
     if not relevant_boundaries:
         return sampled
@@ -814,13 +833,519 @@ def patch_segment(session_id: str, variant_id: str, segment_id: str, payload: Pa
     return updated.model_dump(mode="json", exclude_none=True)
 
 
+# --- Calcul hydraulique : job en tache de fond + estimation adaptative (consigne utilisateur :
+# pleine resolution DEM par defaut desormais — cf. suppression de hydraulic_segment_step_m —
+# "meme si ca va prendre plus de temps", avec une estimation du temps de calcul au debut et une
+# confirmation si elle depasse 30s, plutot qu'un plafond fixe arbitraire choisi a l'avance). ---
+
+_PROBE_THRESHOLD_FINE_SEGMENTS = 300  # en dessous : demarrage direct, pas de sonde ni de dialogue
+_PROBE_TIME_BUDGET_S = 2.0
+_ESTIMATE_CONFIRMATION_THRESHOLD_S = 30.0
+
+
+class _ProbeBudgetExceeded(Exception):
+    """Levee par le callback de progression de la sonde d'estimation (cf. _estimate_calc_seconds)
+    des que son budget de temps est depasse — porte le dernier (done, total) vu pour en deduire un
+    debit reel observe (sonde REELLE sur le tronçon dominant, plus fiable qu'une formule a priori)."""
+
+    def __init__(self, done: int, total: int, elapsed_s: float):
+        self.done = done
+        self.total = total
+        self.elapsed_s = elapsed_s
+
+
+@dataclass
+class _PreparedTroncon:
+    """Tout ce qu'il faut pour resoudre et appliquer UN tronçon — construit une seule fois (le
+    poids de progression `weight` en depend) et reutilise tel quel par la sonde d'estimation ET le
+    job de calcul reel, sans jamais reconstruire deux fois la subdivision fine (cf. run_calculation
+    / _prepare_troncon)."""
+
+    trace_id: str
+    group: object
+    troncon_segments: list
+    start_node: Node
+    regime: str
+    first_seg: Segment
+    troncon_node_ids: list[str]
+    fine_node_ids: list[str]
+    fine_node_ground_z: dict[str, float]
+    fine_node_pk: dict[str, float]
+    fine_specs: list
+    fine_parent_ids: list[str]
+    fine_downstream_pk: list[float]
+    terrain_samples: list[tuple[float, float]]
+    flow_by_node_id: dict[str, float]
+    allowed_fn: object
+    troncon_has_forced_pipe: bool
+    weight: float = field(init=False)
+
+    def __post_init__(self) -> None:
+        # Meme convention que solve_gravitaire_troncon (3 unites forfaitaires pour la boucle de
+        # bump + 1 par piquet fin pour le telescopage, cf. hydrops_engine/hydraulics.py) — un
+        # tronçon 10x plus grand contribue 10x plus a la barre globale.
+        self.weight = 3 + len(self.fine_specs)
+
+
+def _prepare_troncon(
+    trace_id: str,
+    group,
+    troncon_segments: list[Segment],
+    nodes_by_id: dict[str, Node],
+    profile_points: list,
+    step_m: Optional[float],
+    make_allowed_materials_fn,
+) -> Optional[_PreparedTroncon]:
+    """Construit la subdivision fine (piquets) et le contexte d'un tronçon SANS lancer le calcul —
+    extrait de l'ancienne boucle de run_calculation pour etre reutilisable telle quelle par la
+    sonde d'estimation ET le job reel (cf. _PreparedTroncon)."""
+    if not troncon_segments:
+        return None
+    start_node = nodes_by_id[group.start_node_id]
+    regime = _troncon_regime(start_node)
+    first_seg = troncon_segments[0]
+
+    troncon_node_ids: list[str] = [str(troncon_segments[0].upstream_node_id)]
+    troncon_node_ids += [str(seg.downstream_node_id) for seg in troncon_segments]
+    # Le profil de terrain (DEM) entre les noeuds reels peut cacher un point haut jamais
+    # materialise par un noeud (consigne utilisateur : la pression minimale doit etre verifiee sur
+    # le terrain, pas seulement aux deux extremites d'un troncon de plusieurs kilometres) — cf.
+    # hydrops_engine.hydraulics:_check_terrain_pressure.
+    terrain_samples = [
+        (p.pk, p.z) for p in profile_points if group.pk_start - 1e-6 <= p.pk <= group.pk_end + 1e-6
+    ]
+
+    flow_by_node_id = _flow_by_node_within_troncon(troncon_node_ids, nodes_by_id, first_seg.head_flow or 0.0)
+
+    fluid = start_node.data.get("fluid") if start_node.data else None
+    allowed_fn = make_allowed_materials_fn(fluid if isinstance(fluid, str) else None)
+
+    # Subdivision de chaque Segment reel en piquets fins (consigne utilisateur, glossaire
+    # Piquet/Segment/Troncon : "le DN d'un tronçon [...] sera un tableau de DN, un par piquet") —
+    # le moteur recoit ainsi une liste plus fine que les seuls ouvrages reels, ce qui lui permet de
+    # choisir un DN different par piquet (optimisation telescopique deja implementee dans
+    # hydrops_engine). Toujours subdivise, meme sous contrainte matériau/DN/classe (consigne
+    # utilisateur : contraintes par PLAGE DE PK, cf. _resolve_constraints_at_pk) — une contrainte
+    # SANS bornes (ex. l'ancien forçage unique) resout alors simplement a la meme valeur sur tous
+    # les piquets, sans cas particulier. `fine_parent_ids`/`fine_downstream_pk` permettent de
+    # regrouper les resultats fins par Segment reel une fois le calcul termine (cf.
+    # _solve_and_apply_troncon).
+    effective_constraints = _effective_constraints(first_seg)
+    # Piquets "bis" ephemeres (consigne utilisateur, cf. _constraint_boundary_pks) — calcules une
+    # seule fois pour tout le tronçon, chaque Segment reel n'en retient que ceux qui tombent dans
+    # son propre [pk_start, pk_end] (cf. _hydraulic_subdivision_points).
+    constraint_boundary_pks = _constraint_boundary_pks(effective_constraints, group.pk_start, group.pk_end)
+    first_real_id = str(troncon_segments[0].upstream_node_id)
+    fine_node_ids: list[str] = [first_real_id]
+    fine_node_ground_z: dict[str, float] = {first_real_id: nodes_by_id[first_real_id].z}
+    fine_node_pk: dict[str, float] = {first_real_id: nodes_by_id[first_real_id].pk}
+    fine_specs: list[HSegmentSpec] = []
+    fine_parent_ids: list[str] = []
+    fine_downstream_pk: list[float] = []
+
+    for seg in troncon_segments:
+        upstream_id = str(seg.upstream_node_id)
+        downstream_id = str(seg.downstream_node_id)
+        seg_flow_m3s = flow_by_node_id.get(upstream_id, 0.0) / 3600.0
+        subdivision = _hydraulic_subdivision_points(
+            seg.pk_start, seg.pk_end, profile_points, constraint_boundary_pks, step_m,
+        )
+
+        prev_pk = seg.pk_start
+        for i, (pk, z) in enumerate(subdivision):
+            virtual_id = f"{seg.id}::piquet::{i}"
+            fine_node_ids.append(virtual_id)
+            fine_node_ground_z[virtual_id] = z
+            fine_node_pk[virtual_id] = pk
+            forced_material, forced_dn, forced_pressure_class = _resolve_constraints_at_pk(
+                effective_constraints, pk, group.pk_start, group.pk_end
+            )
+            fine_specs.append(
+                HSegmentSpec(
+                    id=f"{seg.id}::{len(fine_specs)}", length_m=pk - prev_pk, flow_m3s=seg_flow_m3s,
+                    max_velocity_ms=first_seg.max_velocity, min_velocity_ms=first_seg.min_velocity,
+                    forced_material=forced_material, forced_dn=forced_dn,
+                    forced_pressure_class=forced_pressure_class,
+                )
+            )
+            fine_parent_ids.append(str(seg.id))
+            fine_downstream_pk.append(pk)
+            prev_pk = pk
+
+        fine_node_ids.append(downstream_id)
+        fine_node_ground_z[downstream_id] = nodes_by_id[downstream_id].z
+        fine_node_pk[downstream_id] = seg.pk_end
+        forced_material, forced_dn, forced_pressure_class = _resolve_constraints_at_pk(
+            effective_constraints, seg.pk_end, group.pk_start, group.pk_end
+        )
+        fine_specs.append(
+            HSegmentSpec(
+                id=f"{seg.id}::{len(fine_specs)}", length_m=seg.pk_end - prev_pk, flow_m3s=seg_flow_m3s,
+                max_velocity_ms=first_seg.max_velocity, min_velocity_ms=first_seg.min_velocity,
+                forced_material=forced_material, forced_dn=forced_dn,
+                forced_pressure_class=forced_pressure_class,
+            )
+        )
+        fine_parent_ids.append(str(seg.id))
+        fine_downstream_pk.append(seg.pk_end)
+
+    return _PreparedTroncon(
+        trace_id=trace_id, group=group, troncon_segments=troncon_segments, start_node=start_node,
+        regime=regime, first_seg=first_seg, troncon_node_ids=troncon_node_ids,
+        fine_node_ids=fine_node_ids, fine_node_ground_z=fine_node_ground_z, fine_node_pk=fine_node_pk,
+        fine_specs=fine_specs, fine_parent_ids=fine_parent_ids, fine_downstream_pk=fine_downstream_pk,
+        terrain_samples=terrain_samples, flow_by_node_id=flow_by_node_id, allowed_fn=allowed_fn,
+        troncon_has_forced_pipe=bool(effective_constraints),
+    )
+
+
+def _solve_and_apply_troncon(
+    package: ProjectPackage,
+    prepared: _PreparedTroncon,
+    catalog_rows: list[HCatalogPipe],
+    prefs,
+    nodes_by_id: dict[str, Node],
+    segments_by_id: dict[str, Segment],
+    by_trace: dict[str, list[Node]],
+    trace_entry,
+    profile_points: list,
+    all_alerts: list[str],
+    reposition_suggestions: list[dict],
+    on_progress=None,
+) -> tuple[int, int]:
+    """Resout UN tronçon deja prepare (cf. _prepare_troncon) et applique le resultat au package —
+    coeur de l'ancienne boucle unique de run_calculation, desormais reutilisable par le job de
+    calcul en tache de fond. Retourne (segments_updated, nodes_updated) pour ce tronçon."""
+    group = prepared.group
+    troncon_segments = prepared.troncon_segments
+    start_node = prepared.start_node
+    regime = prepared.regime
+    first_seg = prepared.first_seg
+
+    # Contrainte(s) matériau/DN/classe (fenetre "Modifier le tronçon", consigne utilisateur) : le
+    # calcul doit s'appliquer meme si une contrainte de pression/vitesse est violee — cf. plus bas,
+    # la reinitialisation-sur-alerte est alors sautee pour ce tronçon (sauf absence totale de
+    # resultats exploitables, ex. alerte hydrostatique).
+    if regime == "gravitaire":
+        result = solve_gravitaire_troncon(
+            node_ids_ordered=prepared.fine_node_ids,
+            node_ground_z=prepared.fine_node_ground_z,
+            segments_ordered=prepared.fine_specs,
+            upstream_level_max=first_seg.upstream_water_level_max or 0.0,
+            upstream_level_min=first_seg.upstream_water_level_min,
+            min_pressure=first_seg.min_pressure,
+            downstream_residual_pressure=first_seg.downstream_residual_pressure,
+            catalog=catalog_rows,
+            singular_loss_markup_pct=prefs.singular_loss_markup_pct,
+            fluid_temperature_c=prefs.fluid_temperature_c,
+            allowed_materials_fn=prepared.allowed_fn,
+            node_pk=prepared.fine_node_pk,
+            terrain_samples=prepared.terrain_samples,
+            min_pressure_exclusion_m=first_seg.min_pressure_exclusion_m,
+            on_progress=on_progress,
+        )
+    else:
+        result = solve_refoulement_troncon(
+            node_ids_ordered=prepared.fine_node_ids,
+            node_ground_z=prepared.fine_node_ground_z,
+            segments_ordered=prepared.fine_specs,
+            min_pressure=first_seg.min_pressure,
+            downstream_residual_pressure=first_seg.downstream_residual_pressure,
+            catalog=catalog_rows,
+            singular_loss_markup_pct=prefs.singular_loss_markup_pct,
+            fluid_temperature_c=prefs.fluid_temperature_c,
+            allowed_materials_fn=prepared.allowed_fn,
+            node_pk=prepared.fine_node_pk,
+            terrain_samples=prepared.terrain_samples,
+            min_pressure_exclusion_m=first_seg.min_pressure_exclusion_m,
+            on_progress=on_progress,
+        )
+
+    all_alerts.extend(result.alerts)
+
+    # Alertes "zone d'exclusion" et "pression minimale non garantie" : toujours informatives,
+    # jamais bloquantes, quel que soit le tronçon (force ou non) — consigne utilisateur : "ne
+    # bloque plus le calcul pour une question de pression minimale, affiche juste une alerte". Le
+    # dimensionnement calcule (DN/materiau/vitesse) reste applique tel quel ; seule une alerte
+    # hydrostatique (terrain au-dessus de la cote du reservoir, aucun resultat exploitable — cf.
+    # plus bas, `result.segments` vide) reste bloquante.
+    hard_alerts = [
+        a for a in result.alerts
+        if EXCLUSION_ZONE_ALERT_MARKER not in a and MIN_PRESSURE_ALERT_MARKER not in a
+    ]
+    if hard_alerts:
+        # Alerte hydrostatique gravitaire (terrain incompatible avec la cote du reservoir amont,
+        # cf. hydraulics.py:_check_hydrostatic_feasibility) : proposer de deplacer le reservoir au
+        # pk compatible le plus proche plutot que de se contenter d'alerter (consigne utilisateur)
+        # — y compris quand ce noeud est l'extremite structurelle de la trace (pk 0), le cas le
+        # plus frequent en pratique pour un reservoir amont ; les bornes ci-dessous l'autorisent
+        # deja a se deplacer vers l'aval jusqu'a son voisin suivant, cf. patch_node_position.
+        if regime == "gravitaire" and any("hydrostatique" in a.lower() for a in result.alerts):
+            trace_nodes_sorted = sorted(by_trace[prepared.trace_id], key=lambda n: n.pk)
+            idx = next(
+                (i for i, n in enumerate(trace_nodes_sorted) if str(n.id) == group.start_node_id), None
+            )
+            if idx is not None:
+                lower_bound = trace_nodes_sorted[idx - 1].pk if idx > 0 else 0.0
+                upper_bound = (
+                    trace_nodes_sorted[idx + 1].pk
+                    if idx < len(trace_nodes_sorted) - 1
+                    else (trace_entry.geometry.length if trace_entry else group.pk_end)
+                )
+                candidate_pk = _find_reposition_candidate_pk(
+                    current_pk=start_node.pk,
+                    lower_bound=lower_bound,
+                    upper_bound=upper_bound,
+                    troncon_end_pk=group.pk_end,
+                    offset=first_seg.upstream_water_level_min_offset,
+                    absolute_level=first_seg.upstream_water_level_min,
+                    terrain=[(p.pk, p.z) for p in profile_points],
+                )
+                if candidate_pk is not None:
+                    reposition_suggestions.append(
+                        {
+                            "node_id": group.start_node_id,
+                            "node_label": start_node.name or start_node.type,
+                            "current_pk": start_node.pk,
+                            "candidate_pk": candidate_pk,
+                        }
+                    )
+        # Un troncon dont le calcul produit une alerte n'a "pas abouti sans erreur" (consigne
+        # utilisateur) — aucun resultat partiel/degrade n'est applique : le dimensionnement
+        # retombe au catalogue par defaut et les noeuds sont remis a zero (memes helpers que la
+        # reinitialisation manuelle), pour ne jamais laisser un Materiau/DN ou une ligne piezo
+        # perimee affichee. Les autres troncons continuent normalement (le calcul global ne
+        # s'interrompt pas). EXCEPTION (consigne utilisateur) : un tronçon a Materiau/DN force
+        # n'est jamais reinitialise pour une alerte de pression/vitesse — le calcul s'applique
+        # quand meme (l'alerte reste informative). Seule l'absence totale de resultats
+        # exploitables (`result.segments` vide — alerte hydrostatique, precheck avant tout
+        # dimensionnement) impose encore la reinitialisation, meme force.
+        if not prepared.troncon_has_forced_pipe or not result.segments:
+            for seg in troncon_segments:
+                _reset_segment_calc_outputs(package, str(seg.id))
+                segments_by_id[str(seg.id)] = package.segments[str(seg.id)]
+            for nid in prepared.troncon_node_ids:
+                _reset_node_calc_fields(package, nid)
+                nodes_by_id[nid] = package.nodes[nid]
+            return 0, 0
+
+    # Regroupement des resultats fins (un par piquet) par Segment reel parent — chaque Segment reel
+    # recoit desormais un TABLEAU (`segment_details`, glossaire Piquet/Segment/Troncon), le dernier
+    # piquet (le plus aval) etant aussi reflete dans les champs scalaires existants pour
+    # compatibilite avec le reste de l'app.
+    segment_details_by_real_id: dict[str, list[SegmentDetail]] = {}
+    for parent_id, pk_value, seg_result in zip(prepared.fine_parent_ids, prepared.fine_downstream_pk, result.segments):
+        segment_details_by_real_id.setdefault(parent_id, []).append(
+            SegmentDetail(
+                pk=pk_value,
+                material=seg_result.material,
+                pressure_class=seg_result.pressure_class,
+                dn=seg_result.dn,
+                di=seg_result.di_mm,
+                de=float(seg_result.dn),
+                roughness=seg_result.roughness_mm,
+                velocity=seg_result.velocity_ms,
+                head_loss_unit=seg_result.head_loss_unit,
+                head_loss_segment=seg_result.head_loss_segment,
+                head_loss_cumulative=seg_result.head_loss_cumulative,
+            )
+        )
+
+    updated_segments = 0
+    for real_seg_id, details in segment_details_by_real_id.items():
+        seg = segments_by_id[real_seg_id]
+        last = details[-1]
+        updated_seg = seg.model_copy(
+            update={
+                "material": last.material,
+                "pressure_class": last.pressure_class,
+                "dn": last.dn,
+                "di": last.di,
+                "de": last.de,
+                "roughness": last.roughness,
+                "flow": prepared.flow_by_node_id.get(str(seg.upstream_node_id), 0.0),
+                "velocity": last.velocity,
+                "head_loss_unit": last.head_loss_unit,
+                "head_loss_segment": last.head_loss_segment,
+                "head_loss_cumulative": last.head_loss_cumulative,
+                "segment_details": details,
+            }
+        )
+        package.segments[real_seg_id] = updated_seg
+        segments_by_id[real_seg_id] = updated_seg
+        updated_segments += 1
+
+    updated_nodes = 0
+    for node_result in result.nodes:
+        # Les piquets virtuels (subdivision fine, cf. plus haut) ne sont pas des `Node` persistes —
+        # seuls les ouvrages reels recoivent une mise a jour ici.
+        if node_result.node_id not in nodes_by_id:
+            continue
+        node = nodes_by_id[node_result.node_id]
+        updated_node = node.model_copy(
+            update={
+                "piezo_head": node_result.piezo_head,
+                "pressure_dynamic": node_result.pressure_dynamic,
+                "pressure_static_max": node_result.pressure_static_max,
+                "pressure_static_min": node_result.pressure_static_min,
+            }
+        )
+        package.nodes[node_result.node_id] = updated_node
+        nodes_by_id[node_result.node_id] = updated_node
+        updated_nodes += 1
+
+    return updated_segments, updated_nodes
+
+
+def _estimate_calc_seconds(
+    prepared_troncons: list[_PreparedTroncon], catalog_rows: list[HCatalogPipe], prefs
+) -> float:
+    """Sonde REELLE bornee dans le temps (~2s) sur le tronçon ayant le plus de piquets fins — celui
+    qui dominera le temps total — pour extrapoler un temps de calcul total realiste avant de
+    lancer le (potentiellement long) calcul complet (consigne utilisateur : "evaluer le temps de
+    calcul estime au debut, et si ca depasse 30s, demander a l'utilisateur s'il veut reduire le
+    nombre de piquets"). Le travail de la sonde est ensuite jete (le vrai calcul repart de zero) —
+    cout fixe borne a `_PROBE_TIME_BUDGET_S`, acceptable. Retourne 0.0 si aucune estimation n'est
+    necessaire (tronçon dominant trivial, ou termine avant meme le budget de la sonde)."""
+    if not prepared_troncons:
+        return 0.0
+    dominant = max(prepared_troncons, key=lambda p: len(p.fine_specs))
+    if len(dominant.fine_specs) <= 1:
+        return 0.0
+
+    start = time.monotonic()
+
+    def probe_progress(done: int, total: int) -> None:
+        elapsed = time.monotonic() - start
+        if elapsed > _PROBE_TIME_BUDGET_S:
+            raise _ProbeBudgetExceeded(done, total, elapsed)
+
+    common_kwargs = dict(
+        node_ids_ordered=dominant.fine_node_ids,
+        node_ground_z=dominant.fine_node_ground_z,
+        segments_ordered=dominant.fine_specs,
+        min_pressure=dominant.first_seg.min_pressure,
+        downstream_residual_pressure=dominant.first_seg.downstream_residual_pressure,
+        catalog=catalog_rows,
+        singular_loss_markup_pct=prefs.singular_loss_markup_pct,
+        fluid_temperature_c=prefs.fluid_temperature_c,
+        allowed_materials_fn=dominant.allowed_fn,
+        node_pk=dominant.fine_node_pk,
+        terrain_samples=dominant.terrain_samples,
+        min_pressure_exclusion_m=dominant.first_seg.min_pressure_exclusion_m,
+        on_progress=probe_progress,
+    )
+    try:
+        if dominant.regime == "gravitaire":
+            solve_gravitaire_troncon(
+                upstream_level_max=dominant.first_seg.upstream_water_level_max or 0.0,
+                upstream_level_min=dominant.first_seg.upstream_water_level_min,
+                **common_kwargs,
+            )
+        else:
+            solve_refoulement_troncon(**common_kwargs)
+    except _ProbeBudgetExceeded as e:
+        if e.done <= 0:
+            return 0.0
+        remaining_dominant = max(0, e.total - e.done)
+        throughput = e.done / e.elapsed_s  # unites de progression par seconde, tronçon dominant
+        dominant_total_s = e.elapsed_s + remaining_dominant / throughput
+        seconds_per_weight_unit = dominant_total_s / dominant.weight if dominant.weight > 0 else 0.0
+        other_weight = sum(p.weight for p in prepared_troncons if p is not dominant)
+        return dominant_total_s + other_weight * seconds_per_weight_unit
+    # La sonde a termine le tronçon dominant AVANT son budget de temps : l'ensemble sera rapide,
+    # aucune estimation/confirmation necessaire.
+    return 0.0
+
+
+async def _run_calc_job(
+    job_store: CalcJobStore,
+    job_id: str,
+    package: ProjectPackage,
+    variant,
+    variant_id: str,
+    prepared_troncons: list[_PreparedTroncon],
+    catalog_rows: list[HCatalogPipe],
+    prefs,
+    nodes_by_id: dict[str, Node],
+    segments_by_id: dict[str, Segment],
+    by_trace: dict[str, list[Node]],
+    trace_entries: dict[str, object],
+    profile_points_by_trace: dict[str, list],
+    total_units: float,
+) -> None:
+    """Tache de fond : reprend le corps de l'ancienne boucle unique de run_calculation, tronçon par
+    tronçon, avec la progression du moteur (cf. hydrops_engine on_progress) traduite en unites
+    globales via `weight` (cf. _PreparedTroncon) et rapportee dans job_store au fil de l'eau."""
+    all_alerts: list[str] = []
+    reposition_suggestions: list[dict] = []
+    updated_segments = 0
+    updated_nodes = 0
+    completed_before = 0.0
+
+    try:
+        for prepared in prepared_troncons:
+            weight = prepared.weight
+
+            def on_progress(done: int, total: int, _completed_before=completed_before, _weight=weight) -> None:
+                fraction = done / total if total else 1.0
+                job_store.update_progress(job_id, _completed_before + fraction * _weight, total_units)
+
+            # Un seul tronçon (le cas reel dominant, consigne utilisateur : "meme si ca va prendre
+            # plus de temps") peut a lui seul occuper la boucle asyncio pendant plusieurs secondes a
+            # plusieurs minutes (telescopage O(N^2)) — l'executer directement ici bloquerait le
+            # thread evenementiel entier, empechant meme les requetes de polling GET .../calcul-jobs
+            # /{job_id} d'etre traitees pendant tout ce temps (constate en verification navigateur :
+            # a peine 2 requetes de polling recues sur tout un calcul de plusieurs secondes, la barre
+            # de progression restant figee a 0% jusqu'a la toute fin). `asyncio.to_thread` deporte le
+            # calcul synchrone sur un thread du pool, laissant la boucle libre de repondre au polling
+            # AU FIL DE L'EAU — `job_store.update_progress` (appele depuis `on_progress`, donc depuis
+            # CE thread) reste sans risque (simples affectations d'attributs, atomiques sous le GIL),
+            # et `package`/`all_alerts`/`reposition_suggestions` ne sont jamais mutes par deux
+            # tronçons en meme temps (un seul `await` a la fois, tronçons traites sequentiellement).
+            seg_count, node_count = await asyncio.to_thread(
+                _solve_and_apply_troncon,
+                package, prepared, catalog_rows, prefs, nodes_by_id, segments_by_id, by_trace,
+                trace_entries.get(prepared.trace_id), profile_points_by_trace.get(prepared.trace_id, []),
+                all_alerts, reposition_suggestions, on_progress,
+            )
+            updated_segments += seg_count
+            updated_nodes += node_count
+            completed_before += weight
+            job_store.update_progress(job_id, completed_before, total_units)
+            # Laisse la boucle asyncio respirer entre deux tronçons (le calcul lui-meme reste du
+            # code synchrone bloquant entre deux ticks, comme le fetch DEM par lot aujourd'hui).
+            await asyncio.sleep(0)
+
+        package.variants[variant_id] = variant.model_copy(update={"status": "calculated"})
+        job_store.mark_done(
+            job_id,
+            {
+                "status": "calculated",
+                "segments_updated": updated_segments,
+                "nodes_updated": updated_nodes,
+                "alerts": all_alerts,
+                "reposition_suggestions": reposition_suggestions,
+            },
+        )
+    except Exception as e:  # garde-fou : une tache de fond en echec ne doit jamais rester muette
+        job_store.mark_failed(job_id, f"Erreur inattendue lors du calcul: {e}")
+
+
+def _calc_job_store(request: Request) -> CalcJobStore:
+    return request.app.state.calc_job_store
+
+
 @router.post("/calcul")
-def run_calculation(
+async def run_calculation(
     session_id: str,
     variant_id: str,
     request: Request,
+    response: Response,
     scope_trace_id: Optional[str] = None,
     scope_start_node_id: Optional[str] = None,
+    confirmed: bool = False,
+    reduce_resolution: bool = False,
 ):
     """Bouton Calcul > Calculer (consigne utilisateur). Par defaut (variante selectionnee dans
     l'arborescence, aucun tronçon precis) : precondition inchangee, TOUS les tronçons de la
@@ -829,7 +1354,18 @@ def run_calculation(
     sinon 409 avec la liste de ce qui manque — le calcul ne se lance pas partiellement. Si
     `scope_trace_id`/`scope_start_node_id` identifient un tronçon precis (consigne utilisateur :
     un tronçon deja selectionne et valide se calcule seul, sans exiger les autres) : SEUL ce
-    tronçon est exige valide et (re)calcule, les autres tronçons de la variante restent inchanges."""
+    tronçon est exige valide et (re)calcule, les autres tronçons de la variante restent inchanges.
+
+    Demarre le calcul en tache de fond et retourne (202) un `job_id` a suivre via GET
+    .../calcul-jobs/{job_id} (consigne utilisateur : barre de progression a pourcentage reel,
+    desormais necessaire — pleine resolution DEM par defaut, potentiellement des milliers de
+    piquets fins, cf. suppression de hydraulic_segment_step_m). Si le nombre de piquets fins
+    depasse `_PROBE_THRESHOLD_FINE_SEGMENTS` et que l'appel n'est pas deja `confirmed=true`, une
+    sonde rapide (~2s) estime d'abord le temps de calcul total ; si elle depasse
+    `_ESTIMATE_CONFIRMATION_THRESHOLD_S`, repond (200) `{"needs_confirmation": true,
+    "estimated_seconds", "total_fine_segments"}` SANS demarrer de job — l'appelant doit alors
+    rappeler avec `confirmed=true` (pleine resolution) ou `confirmed=true&reduce_resolution=true`
+    (repli sur l'ancien pas fixe `_REDUCED_RESOLUTION_STEP_M`, cf. _hydraulic_subdivision_points)."""
     package = require_package(get_session_store(request), session_id)
     variant = _require_variant(package, variant_id)
     nodes = _nodes_for_variant(package, variant)
@@ -910,293 +1446,71 @@ def run_calculation(
 
         return fn
 
-    all_alerts: list[str] = []
-    reposition_suggestions: list[dict] = []
-    updated_segments = 0
-    updated_nodes = 0
+    step_m = _REDUCED_RESOLUTION_STEP_M if reduce_resolution else None
 
+    prepared_troncons: list[_PreparedTroncon] = []
+    trace_entries: dict[str, object] = {}
+    profile_points_by_trace: dict[str, list] = {}
     for trace_id, troncon_groups in troncons_by_trace.items():
         trace_entry = package.traces.get(trace_id)
+        trace_entries[trace_id] = trace_entry
         profile_points = (
             trace_entry.geometry.elevation_profile.raw
             if trace_entry and trace_entry.geometry.elevation_profile
             else []
         )
+        profile_points_by_trace[trace_id] = profile_points
         for group in troncon_groups:
             troncon_segments = [segments_by_id[sid] for sid in group.segment_ids]
-            if not troncon_segments:
-                continue
-            start_node = nodes_by_id[group.start_node_id]
-            regime = _troncon_regime(start_node)
-            first_seg = troncon_segments[0]
+            prepared = _prepare_troncon(
+                trace_id, group, troncon_segments, nodes_by_id, profile_points, step_m,
+                make_allowed_materials_fn,
+            )
+            if prepared is not None:
+                prepared_troncons.append(prepared)
 
-            troncon_node_ids: list[str] = [str(troncon_segments[0].upstream_node_id)]
-            troncon_node_ids += [str(seg.downstream_node_id) for seg in troncon_segments]
-            node_ground_z = {nid: nodes_by_id[nid].z for nid in troncon_node_ids}
-            node_pk = {nid: nodes_by_id[nid].pk for nid in troncon_node_ids}
-            # Le profil de terrain (DEM) entre les noeuds reels peut cacher un point haut jamais
-            # materialise par un noeud (consigne utilisateur : la pression minimale doit etre
-            # verifiee sur le terrain, pas seulement aux deux extremites d'un troncon de plusieurs
-            # kilometres) — cf. hydrops_engine.hydraulics:_check_terrain_pressure.
-            terrain_samples = [
-                (p.pk, p.z) for p in profile_points if group.pk_start - 1e-6 <= p.pk <= group.pk_end + 1e-6
-            ]
+    total_units = sum(p.weight for p in prepared_troncons)
+    total_fine_segments = sum(len(p.fine_specs) for p in prepared_troncons)
 
-            flow_by_node_id = _flow_by_node_within_troncon(troncon_node_ids, nodes_by_id, first_seg.head_flow or 0.0)
+    if not confirmed and total_fine_segments > _PROBE_THRESHOLD_FINE_SEGMENTS:
+        estimated_seconds = _estimate_calc_seconds(prepared_troncons, catalog_rows, prefs)
+        if estimated_seconds > _ESTIMATE_CONFIRMATION_THRESHOLD_S:
+            return {
+                "needs_confirmation": True,
+                "estimated_seconds": round(estimated_seconds, 1),
+                "total_fine_segments": total_fine_segments,
+            }
 
-            fluid = start_node.data.get("fluid") if start_node.data else None
-            allowed_fn = make_allowed_materials_fn(fluid if isinstance(fluid, str) else None)
+    job_store = _calc_job_store(request)
+    job = job_store.create(session_id, total_units=total_units)
+    task = asyncio.create_task(
+        _run_calc_job(
+            job_store, job.id, package, variant, variant_id, prepared_troncons, catalog_rows, prefs,
+            nodes_by_id, segments_by_id, by_trace, trace_entries, profile_points_by_trace, total_units,
+        )
+    )
+    job_store.track_task(task)
 
-            # Subdivision de chaque Segment reel en piquets fins (consigne utilisateur, glossaire
-            # Piquet/Segment/Troncon : "le DN d'un tronçon [...] sera un tableau de DN, un par
-            # piquet") — le moteur recoit ainsi une liste plus fine que les seuls ouvrages reels,
-            # ce qui lui permet de choisir un DN different par piquet (optimisation telescopique
-            # deja implementee dans hydrops_engine). Toujours subdivise, meme sous contrainte
-            # matériau/DN/classe (consigne utilisateur : contraintes par PLAGE DE PK, cf.
-            # _resolve_constraints_at_pk) — une contrainte SANS bornes (ex. l'ancien forçage unique)
-            # resout alors simplement a la meme valeur sur tous les piquets, sans cas particulier.
-            # `fine_parent_ids`/`fine_downstream_pk` permettent de regrouper les resultats fins par
-            # Segment reel une fois le calcul termine (cf. plus bas).
-            effective_constraints = _effective_constraints(first_seg)
-            # Piquets "bis" ephemeres (consigne utilisateur, cf. _constraint_boundary_pks) — calcules
-            # une seule fois pour tout le tronçon, chaque Segment reel n'en retient que ceux qui
-            # tombent dans son propre [pk_start, pk_end] (cf. _hydraulic_subdivision_points).
-            constraint_boundary_pks = _constraint_boundary_pks(effective_constraints, group.pk_start, group.pk_end)
-            first_real_id = str(troncon_segments[0].upstream_node_id)
-            fine_node_ids: list[str] = [first_real_id]
-            fine_node_ground_z: dict[str, float] = {first_real_id: nodes_by_id[first_real_id].z}
-            fine_node_pk: dict[str, float] = {first_real_id: nodes_by_id[first_real_id].pk}
-            fine_specs: list[HSegmentSpec] = []
-            fine_parent_ids: list[str] = []
-            fine_downstream_pk: list[float] = []
+    response.status_code = 202
+    return {"job_id": job.id, "total_units": total_units}
 
-            for seg in troncon_segments:
-                upstream_id = str(seg.upstream_node_id)
-                downstream_id = str(seg.downstream_node_id)
-                seg_flow_m3s = flow_by_node_id.get(upstream_id, 0.0) / 3600.0
-                subdivision = _hydraulic_subdivision_points(
-                    seg.pk_start, seg.pk_end, profile_points, prefs.hydraulic_segment_step_m,
-                    constraint_boundary_pks,
-                )
 
-                prev_pk = seg.pk_start
-                for i, (pk, z) in enumerate(subdivision):
-                    virtual_id = f"{seg.id}::piquet::{i}"
-                    fine_node_ids.append(virtual_id)
-                    fine_node_ground_z[virtual_id] = z
-                    fine_node_pk[virtual_id] = pk
-                    forced_material, forced_dn, forced_pressure_class = _resolve_constraints_at_pk(
-                        effective_constraints, pk, group.pk_start, group.pk_end
-                    )
-                    fine_specs.append(
-                        HSegmentSpec(
-                            id=f"{seg.id}::{len(fine_specs)}", length_m=pk - prev_pk, flow_m3s=seg_flow_m3s,
-                            max_velocity_ms=first_seg.max_velocity, min_velocity_ms=first_seg.min_velocity,
-                            forced_material=forced_material, forced_dn=forced_dn,
-                            forced_pressure_class=forced_pressure_class,
-                        )
-                    )
-                    fine_parent_ids.append(str(seg.id))
-                    fine_downstream_pk.append(pk)
-                    prev_pk = pk
-
-                fine_node_ids.append(downstream_id)
-                fine_node_ground_z[downstream_id] = nodes_by_id[downstream_id].z
-                fine_node_pk[downstream_id] = seg.pk_end
-                forced_material, forced_dn, forced_pressure_class = _resolve_constraints_at_pk(
-                    effective_constraints, seg.pk_end, group.pk_start, group.pk_end
-                )
-                fine_specs.append(
-                    HSegmentSpec(
-                        id=f"{seg.id}::{len(fine_specs)}", length_m=seg.pk_end - prev_pk, flow_m3s=seg_flow_m3s,
-                        max_velocity_ms=first_seg.max_velocity, min_velocity_ms=first_seg.min_velocity,
-                        forced_material=forced_material, forced_dn=forced_dn,
-                        forced_pressure_class=forced_pressure_class,
-                    )
-                )
-                fine_parent_ids.append(str(seg.id))
-                fine_downstream_pk.append(seg.pk_end)
-
-            # Contrainte(s) matériau/DN/classe (fenetre "Modifier le tronçon", consigne
-            # utilisateur) : le calcul doit s'appliquer meme si une contrainte de pression/vitesse
-            # est violee — cf. plus bas, la reinitialisation-sur-alerte est alors sautee pour ce
-            # tronçon (sauf absence totale de resultats exploitables, ex. alerte hydrostatique).
-            troncon_has_forced_pipe = bool(effective_constraints)
-
-            if regime == "gravitaire":
-                result = solve_gravitaire_troncon(
-                    node_ids_ordered=fine_node_ids,
-                    node_ground_z=fine_node_ground_z,
-                    segments_ordered=fine_specs,
-                    upstream_level_max=first_seg.upstream_water_level_max or 0.0,
-                    upstream_level_min=first_seg.upstream_water_level_min,
-                    min_pressure=first_seg.min_pressure,
-                    downstream_residual_pressure=first_seg.downstream_residual_pressure,
-                    catalog=catalog_rows,
-                    singular_loss_markup_pct=prefs.singular_loss_markup_pct,
-                    fluid_temperature_c=prefs.fluid_temperature_c,
-                    allowed_materials_fn=allowed_fn,
-                    node_pk=fine_node_pk,
-                    terrain_samples=terrain_samples,
-                    min_pressure_exclusion_m=first_seg.min_pressure_exclusion_m,
-                )
-            else:
-                result = solve_refoulement_troncon(
-                    node_ids_ordered=fine_node_ids,
-                    node_ground_z=fine_node_ground_z,
-                    segments_ordered=fine_specs,
-                    min_pressure=first_seg.min_pressure,
-                    downstream_residual_pressure=first_seg.downstream_residual_pressure,
-                    catalog=catalog_rows,
-                    singular_loss_markup_pct=prefs.singular_loss_markup_pct,
-                    fluid_temperature_c=prefs.fluid_temperature_c,
-                    allowed_materials_fn=allowed_fn,
-                    node_pk=fine_node_pk,
-                    terrain_samples=terrain_samples,
-                    min_pressure_exclusion_m=first_seg.min_pressure_exclusion_m,
-                )
-
-            all_alerts.extend(result.alerts)
-
-            # Alertes "zone d'exclusion" et "pression minimale non garantie" : toujours informatives,
-            # jamais bloquantes, quel que soit le tronçon (force ou non) — consigne utilisateur : "ne
-            # bloque plus le calcul pour une question de pression minimale, affiche juste une
-            # alerte". Le dimensionnement calcule (DN/materiau/vitesse) reste applique tel quel ;
-            # seule une alerte hydrostatique (terrain au-dessus de la cote du reservoir, aucun
-            # resultat exploitable — cf. plus bas, `result.segments` vide) reste bloquante.
-            hard_alerts = [
-                a for a in result.alerts
-                if EXCLUSION_ZONE_ALERT_MARKER not in a and MIN_PRESSURE_ALERT_MARKER not in a
-            ]
-            if hard_alerts:
-                # Alerte hydrostatique gravitaire (terrain incompatible avec la cote du reservoir
-                # amont, cf. hydraulics.py:_check_hydrostatic_feasibility) : proposer de deplacer
-                # le reservoir au pk compatible le plus proche plutot que de se contenter d'alerter
-                # (consigne utilisateur) — y compris quand ce noeud est l'extremite structurelle de
-                # la trace (pk 0), le cas le plus frequent en pratique pour un reservoir amont ; les
-                # bornes ci-dessous l'autorisent deja a se deplacer vers l'aval jusqu'a son voisin
-                # suivant, cf. patch_node_position.
-                if regime == "gravitaire" and any("hydrostatique" in a.lower() for a in result.alerts):
-                    trace_nodes_sorted = sorted(by_trace[trace_id], key=lambda n: n.pk)
-                    idx = next(
-                        (i for i, n in enumerate(trace_nodes_sorted) if str(n.id) == group.start_node_id), None
-                    )
-                    if idx is not None:
-                        lower_bound = trace_nodes_sorted[idx - 1].pk if idx > 0 else 0.0
-                        upper_bound = (
-                            trace_nodes_sorted[idx + 1].pk
-                            if idx < len(trace_nodes_sorted) - 1
-                            else (trace_entry.geometry.length if trace_entry else group.pk_end)
-                        )
-                        candidate_pk = _find_reposition_candidate_pk(
-                            current_pk=start_node.pk,
-                            lower_bound=lower_bound,
-                            upper_bound=upper_bound,
-                            troncon_end_pk=group.pk_end,
-                            offset=first_seg.upstream_water_level_min_offset,
-                            absolute_level=first_seg.upstream_water_level_min,
-                            terrain=[(p.pk, p.z) for p in profile_points],
-                        )
-                        if candidate_pk is not None:
-                            reposition_suggestions.append(
-                                {
-                                    "node_id": group.start_node_id,
-                                    "node_label": start_node.name or start_node.type,
-                                    "current_pk": start_node.pk,
-                                    "candidate_pk": candidate_pk,
-                                }
-                            )
-                # Un troncon dont le calcul produit une alerte n'a "pas abouti sans erreur"
-                # (consigne utilisateur) — aucun resultat partiel/degrade n'est applique : le
-                # dimensionnement retombe au catalogue par defaut et les noeuds sont remis a zero
-                # (memes helpers que la reinitialisation manuelle), pour ne jamais laisser un
-                # Materiau/DN ou une ligne piezo perimee affichee. Les autres troncons continuent
-                # normalement (le calcul global ne s'interrompt pas).
-                # EXCEPTION (consigne utilisateur) : un tronçon a Materiau/DN force n'est jamais
-                # reinitialise pour une alerte de pression/vitesse — le calcul s'applique quand
-                # meme (l'alerte reste informative). Seule l'absence totale de resultats
-                # exploitables (`result.segments` vide — alerte hydrostatique, precheck avant tout
-                # dimensionnement) impose encore la reinitialisation, meme force.
-                if not troncon_has_forced_pipe or not result.segments:
-                    for seg in troncon_segments:
-                        _reset_segment_calc_outputs(package, str(seg.id))
-                        segments_by_id[str(seg.id)] = package.segments[str(seg.id)]
-                    for nid in troncon_node_ids:
-                        _reset_node_calc_fields(package, nid)
-                        nodes_by_id[nid] = package.nodes[nid]
-                    continue
-
-            # Regroupement des resultats fins (un par piquet) par Segment reel parent — chaque
-            # Segment reel recoit desormais un TABLEAU (`segment_details`, glossaire Piquet/
-            # Segment/Troncon), le dernier piquet (le plus aval) etant aussi reflete dans les
-            # champs scalaires existants pour compatibilite avec le reste de l'app.
-            segment_details_by_real_id: dict[str, list[SegmentDetail]] = {}
-            for parent_id, pk_value, seg_result in zip(fine_parent_ids, fine_downstream_pk, result.segments):
-                segment_details_by_real_id.setdefault(parent_id, []).append(
-                    SegmentDetail(
-                        pk=pk_value,
-                        material=seg_result.material,
-                        pressure_class=seg_result.pressure_class,
-                        dn=seg_result.dn,
-                        di=seg_result.di_mm,
-                        de=float(seg_result.dn),
-                        roughness=seg_result.roughness_mm,
-                        velocity=seg_result.velocity_ms,
-                        head_loss_unit=seg_result.head_loss_unit,
-                        head_loss_segment=seg_result.head_loss_segment,
-                        head_loss_cumulative=seg_result.head_loss_cumulative,
-                    )
-                )
-
-            for real_seg_id, details in segment_details_by_real_id.items():
-                seg = segments_by_id[real_seg_id]
-                last = details[-1]
-                updated_seg = seg.model_copy(
-                    update={
-                        "material": last.material,
-                        "pressure_class": last.pressure_class,
-                        "dn": last.dn,
-                        "di": last.di,
-                        "de": last.de,
-                        "roughness": last.roughness,
-                        "flow": flow_by_node_id.get(str(seg.upstream_node_id), 0.0),
-                        "velocity": last.velocity,
-                        "head_loss_unit": last.head_loss_unit,
-                        "head_loss_segment": last.head_loss_segment,
-                        "head_loss_cumulative": last.head_loss_cumulative,
-                        "segment_details": details,
-                    }
-                )
-                package.segments[real_seg_id] = updated_seg
-                segments_by_id[real_seg_id] = updated_seg
-                updated_segments += 1
-
-            for node_result in result.nodes:
-                # Les piquets virtuels (subdivision fine, cf. plus haut) ne sont pas des `Node`
-                # persistes — seuls les ouvrages reels recoivent une mise a jour ici.
-                if node_result.node_id not in nodes_by_id:
-                    continue
-                node = nodes_by_id[node_result.node_id]
-                updated_node = node.model_copy(
-                    update={
-                        "piezo_head": node_result.piezo_head,
-                        "pressure_dynamic": node_result.pressure_dynamic,
-                        "pressure_static_max": node_result.pressure_static_max,
-                        "pressure_static_min": node_result.pressure_static_min,
-                    }
-                )
-                package.nodes[node_result.node_id] = updated_node
-                nodes_by_id[node_result.node_id] = updated_node
-                updated_nodes += 1
-
-    package.variants[variant_id] = variant.model_copy(update={"status": "calculated"})
-
+@router.get("/calcul-jobs/{job_id}")
+def get_calc_job(session_id: str, variant_id: str, job_id: str, request: Request):
+    job_store = _calc_job_store(request)
+    try:
+        job = job_store.get(job_id)
+    except CalcJobNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    if job.session_id != session_id:
+        raise HTTPException(status_code=404, detail="job de calcul inconnu pour cette session")
     return {
-        "status": "calculated",
-        "segments_updated": updated_segments,
-        "nodes_updated": updated_nodes,
-        "alerts": all_alerts,
-        "reposition_suggestions": reposition_suggestions,
+        "job_id": job.id,
+        "status": job.status,
+        "completed_units": job.completed_units,
+        "total_units": job.total_units,
+        "result": job.result,
+        "error": job.error,
     }
 
 

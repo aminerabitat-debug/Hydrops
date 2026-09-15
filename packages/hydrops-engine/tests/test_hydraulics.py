@@ -921,3 +921,145 @@ def test_solve_gravitaire_troncon_does_not_telescope_when_no_pressure_margin():
     tail_result = next(r for r in result.segments if r.id == "tail")
     assert main_result.dn == 110
     assert tail_result.dn == 110
+
+
+def test_solve_gravitaire_troncon_forced_downstream_segment_does_not_shrink_free_upstream_dn():
+    # Regression (retour utilisateur : "en principe la ligne piezo et les DN ne devraient pas
+    # changer" apres homogeneisation d'une zone AVAL deja optimale) : forcer le segment "tail" a
+    # son DN naturel (homogeneisation d'une plage deja au bon DN, un no-op physique en soi) ne doit
+    # PAS faire retrecir le segment LIBRE "main" en amont. Avant le correctif, le forcage etablit un
+    # plancher `dn_floor`=90 des la toute PREMIERE passe de base (avant meme toute reduction
+    # telescopique) ; `_candidates` choisit alors le DN le moins cher (90) pour "main" — le point de
+    # terrain a pk=200 (entre A et M, jamais lui-meme un piquet) manque alors la pression requise,
+    # mais seule une interpolation lineaire entre piquets (`_check_terrain_pressure`) peut le
+    # detecter : le piquet M lui-meme (son propre `required_by_node`) reste hors de cause ici (son
+    # altitude est volontairement tres basse pour l'isoler de ce cas), donc SEUL un vrai controle
+    # terrain dans la boucle de base peut reagir. Avant le correctif, ce controle n'existait que
+    # dans la toute derniere verification (`_check_terrain_pressure` en fin de fonction), bien trop
+    # tard pour influer sur le choix de DN. Le correctif etend le bouclage d'augmentation iterative
+    # (bump-loop) pour aussi reagir a une violation terrain, en remontant au premier segment LIBRE
+    # en amont d'elle (ici "main") puisque le segment force au point de violation ne peut, par
+    # construction, jamais etre augmente.
+    catalog = [
+        CatalogPipe(id=1, dn=90, di_mm=80.0, material="PVC", pressure_class="PN10", pms_m=500.0, price=50.0, roughness_mm=0.01),
+        CatalogPipe(id=2, dn=110, di_mm=99.4, material="PVC", pressure_class="PN10", pms_m=500.0, price=72.8, roughness_mm=0.01),
+        CatalogPipe(id=3, dn=160, di_mm=147.6, material="PVC", pressure_class="PN10", pms_m=500.0, price=126.8, roughness_mm=0.01),
+    ]
+    # M et B sont volontairement tres bas (-100 m) : leur propre exigence de pression
+    # (`required_by_node`, deja verifiee AVANT ce correctif) reste alors toujours tres confortable
+    # quel que soit le DN de "main", isolant la violation testee au seul point de TERRAIN
+    # intermediaire (pk=200) — sinon le bump-loop existant la corrigerait deja "par coincidence" via
+    # le noeud M, sans jamais passer par le nouveau chemin teste ici.
+    nodes_z = {"A": 0.0, "M": -100.0, "B": -100.0}
+    node_pk = {"A": 0.0, "M": 400.0, "B": 430.0}
+    segments = [
+        SegmentSpec(id="main", length_m=400.0, flow_m3s=0.03, max_velocity_ms=6.0),
+        SegmentSpec(id="tail", length_m=30.0, flow_m3s=0.03, max_velocity_ms=6.0, forced_material="PVC", forced_dn=90),
+    ]
+    # Terrain (z=0) au milieu de "main" (pk 200, entre A et M) : avec main=DN90, la cote piezo
+    # interpolee y tombe a ~82.8 m (< 90 m requis) ; avec main=DN110, elle remonte a ~127.1 m (marge
+    # confortable) — verifie numeriquement ci-dessous par l'assertion finale sur le DN retenu et
+    # l'absence d'alerte.
+    terrain_samples = [(200.0, 0.0)]
+    result = solve_gravitaire_troncon(
+        node_ids_ordered=["A", "M", "B"],
+        node_ground_z=nodes_z,
+        segments_ordered=segments,
+        upstream_level_max=150.0,
+        upstream_level_min=150.0,
+        min_pressure=90.0,
+        downstream_residual_pressure=0.0,
+        catalog=catalog,
+        singular_loss_markup_pct=0.0,
+        fluid_temperature_c=20.0,
+        node_pk=node_pk,
+        terrain_samples=terrain_samples,
+    )
+    assert result.alerts == []
+    main_result = next(r for r in result.segments if r.id == "main")
+    tail_result = next(r for r in result.segments if r.id == "tail")
+    assert main_result.dn == 110
+    assert tail_result.dn == 90
+
+
+def test_solve_gravitaire_troncon_on_progress_reaches_done_equals_total_and_is_monotonic():
+    # Consigne utilisateur : barre de progression a pourcentage reel pour le calcul (remplace le
+    # pas d'echantillonnage hydraulique fixe) — reprend le scenario de telescopage existant
+    # (2 segments, boucle de reduction reellement exercee) pour verifier que le callback est
+    # appele au moins une fois, jamais decroissant, et se termine toujours a done == total.
+    catalog = [
+        CatalogPipe(id=1, dn=90, di_mm=80.0, material="PVC", pressure_class="PN10", pms_m=101.9, price=50.0, roughness_mm=0.01),
+        CatalogPipe(id=2, dn=110, di_mm=99.4, material="PVC", pressure_class="PN10", pms_m=101.9, price=72.8, roughness_mm=0.01),
+        CatalogPipe(id=3, dn=160, di_mm=147.6, material="PVC", pressure_class="PN10", pms_m=101.9, price=126.8, roughness_mm=0.01),
+    ]
+    nodes_z = {"A": 0.0, "M": 0.0, "B": 0.0}
+    segments = [
+        SegmentSpec(id="main", length_m=400.0, flow_m3s=0.03, max_velocity_ms=6.0),
+        SegmentSpec(id="tail", length_m=30.0, flow_m3s=0.03, max_velocity_ms=6.0),
+    ]
+    calls: list[tuple[int, int]] = []
+    result = solve_gravitaire_troncon(
+        node_ids_ordered=["A", "M", "B"],
+        node_ground_z=nodes_z,
+        segments_ordered=segments,
+        upstream_level_max=100.0,
+        upstream_level_min=100.0,
+        min_pressure=None,
+        downstream_residual_pressure=40.0,
+        catalog=catalog,
+        singular_loss_markup_pct=0.0,
+        fluid_temperature_c=20.0,
+        on_progress=lambda done, total: calls.append((done, total)),
+    )
+    assert result.alerts == []
+    assert calls  # au moins un appel
+    assert all(total == calls[0][1] for _, total in calls)  # total stable sur tout l'appel
+    assert calls[0][1] > 0
+    assert all(a[0] <= b[0] for a, b in zip(calls, calls[1:]))  # jamais decroissant
+    assert calls[-1][0] == calls[-1][1]  # termine toujours a done == total
+
+
+def test_solve_gravitaire_troncon_on_progress_does_not_change_result():
+    # Le callback ne doit rien muter — memes segments/alertes avec ou sans lui.
+    catalog = [
+        CatalogPipe(id=1, dn=90, di_mm=80.0, material="PVC", pressure_class="PN10", pms_m=101.9, price=50.0, roughness_mm=0.01),
+        CatalogPipe(id=2, dn=110, di_mm=99.4, material="PVC", pressure_class="PN10", pms_m=101.9, price=72.8, roughness_mm=0.01),
+        CatalogPipe(id=3, dn=160, di_mm=147.6, material="PVC", pressure_class="PN10", pms_m=101.9, price=126.8, roughness_mm=0.01),
+    ]
+    nodes_z = {"A": 0.0, "M": 0.0, "B": 0.0}
+    segments = [
+        SegmentSpec(id="main", length_m=400.0, flow_m3s=0.03, max_velocity_ms=6.0),
+        SegmentSpec(id="tail", length_m=30.0, flow_m3s=0.03, max_velocity_ms=6.0),
+    ]
+    kwargs = dict(
+        node_ids_ordered=["A", "M", "B"], node_ground_z=nodes_z, segments_ordered=segments,
+        upstream_level_max=100.0, upstream_level_min=100.0, min_pressure=None,
+        downstream_residual_pressure=40.0, catalog=catalog, singular_loss_markup_pct=0.0,
+        fluid_temperature_c=20.0,
+    )
+    without = solve_gravitaire_troncon(**kwargs)
+    with_callback = solve_gravitaire_troncon(**kwargs, on_progress=lambda done, total: None)
+    assert with_callback.alerts == without.alerts
+    assert [(r.id, r.dn, r.material) for r in with_callback.segments] == [(r.id, r.dn, r.material) for r in without.segments]
+
+
+def test_solve_refoulement_troncon_on_progress_reaches_done_equals_total():
+    catalog = _catalog()
+    nodes_z = {"P": 50.0, "R": 100.0}
+    segments = [SegmentSpec(id="s1", length_m=2000.0, flow_m3s=0.04, max_velocity_ms=2.0)]
+    calls: list[tuple[int, int]] = []
+    result = solve_refoulement_troncon(
+        node_ids_ordered=["P", "R"],
+        node_ground_z=nodes_z,
+        segments_ordered=segments,
+        min_pressure=None,
+        downstream_residual_pressure=20.0,
+        catalog=catalog,
+        singular_loss_markup_pct=10.0,
+        fluid_temperature_c=20.0,
+        on_progress=lambda done, total: calls.append((done, total)),
+    )
+    assert result.alerts == []
+    assert calls
+    assert calls[-1][0] == calls[-1][1]
+    assert all(a[0] <= b[0] for a, b in zip(calls, calls[1:]))

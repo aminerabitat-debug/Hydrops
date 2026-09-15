@@ -213,23 +213,6 @@ export function PreferencesWindow({ sessionId, onClose, onSaved }: PreferencesWi
             (alerte informative seulement, le calcul n'est jamais bloqué).
           </span>
         </div>
-        <div className="modal-field">
-          <label htmlFor="pref-hydraulic-step">Pas d'échantillonnage hydraulique (m)</label>
-          <input
-            id="pref-hydraulic-step"
-            type="number"
-            min={1}
-            value={prefs.hydraulic_segment_step_m}
-            onChange={(e) =>
-              setPrefs((p) => (p ? { ...p, hydraulic_segment_step_m: Number(e.target.value) || p.hydraulic_segment_step_m } : p))
-            }
-          />
-          <span className="modal-field-hint">
-            Distance entre deux piquets pour le dimensionnement (glossaire Piquet/Segment/Tronçon) : chaque piquet
-            peut recevoir son propre DN (télescopage). Plus petit = plus fin mais calcul plus lent, plus grand =
-            plus rapide mais moins de granularité.
-          </span>
-        </div>
       </div>
 
       <div className="preferences-section">

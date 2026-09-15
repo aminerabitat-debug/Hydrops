@@ -6,9 +6,12 @@ import { useEffect, useMemo, useState } from 'react'
 
 import { api } from '../../shared/apiClient'
 import { findPrecedingOuvrage } from '../../shared/ouvrageFields'
+import { runCalculationJob } from '../../shared/pollCalcJob'
 import { useAppStore } from '../../state/store'
 import { isStructuralEndpoint as isStructuralEndpointOf } from '../../shared/types'
 import type { CreatableNodeType, Node, PipeCatalogRow } from '../../shared/types'
+import { useCalcConfirmDialog } from '../../app/CalcConfirmDialog'
+import { ProgressBar } from '../../app/ProgressBar'
 import { DataTable } from '../table/DataTable'
 import { NodeDialog, type NodeSubmitPayload } from './NodeDialog'
 import { CURVE_COLORS, ProfileChart, type SelectedPipeSpan } from './ProfileChart'
@@ -63,6 +66,9 @@ export function ProfileTableView() {
   // "Réinitialiser le zoom", alors que la selection elle-meme se pilote depuis ProfileChart (clics).
   const [selectedSpans, setSelectedSpans] = useState<SelectedPipeSpan[]>([])
   const [homogenizing, setHomogenizing] = useState(false)
+  const [calculating, setCalculating] = useState(false)
+  const [calcProgress, setCalcProgress] = useState<{ completed: number; total: number } | null>(null)
+  const { dialog: calcConfirmDialog, onNeedsConfirmation } = useCalcConfirmDialog()
 
   useEffect(() => {
     api.listConduites().then(setPipeCatalog).catch(() => setPipeCatalog([]))
@@ -233,15 +239,31 @@ export function ProfileTableView() {
   const runScopedCalcul = async (explicitScope?: { traceId: string; startNodeId: string }) => {
     if (!sessionId || !selectedVariantId) return
     const scope = explicitScope ?? (tableScope.kind === 'troncon' ? { traceId: tableScope.traceId, startNodeId: tableScope.startNodeId } : undefined)
-    const result = await api.runCalculation(sessionId, selectedVariantId, scope)
-    await refreshNetwork()
-    setStatusMessage(
-      result.alerts.length > 0 ? `Calcul terminé avec ${result.alerts.length} alerte(s)` : 'Calcul terminé sans alerte',
-      result.alerts.length > 0 ? 'warning' : 'success',
-      result.alerts.length > 0
-        ? `Calcul terminé avec ${result.alerts.length} alerte(s) :\n${result.alerts.map((a) => `• ${a}`).join('\n')}`
-        : undefined,
-    )
+    setCalculating(true)
+    setCalcProgress(null)
+    try {
+      const result = await runCalculationJob(sessionId, selectedVariantId, scope, {
+        onProgress: (completed, total) => setCalcProgress({ completed, total }),
+        onNeedsConfirmation,
+      })
+      if (result === null) {
+        setStatusMessage('Calcul annulé', 'info')
+        return
+      }
+      await refreshNetwork()
+      setStatusMessage(
+        result.alerts.length > 0 ? `Calcul terminé avec ${result.alerts.length} alerte(s)` : 'Calcul terminé sans alerte',
+        result.alerts.length > 0 ? 'warning' : 'success',
+        result.alerts.length > 0
+          ? `Calcul terminé avec ${result.alerts.length} alerte(s) :\n${result.alerts.map((a) => `• ${a}`).join('\n')}`
+          : undefined,
+      )
+    } catch (error) {
+      setStatusMessage(`Calcul impossible : ${(error as Error).message}`, 'error')
+    } finally {
+      setCalculating(false)
+      setCalcProgress(null)
+    }
   }
 
   // "Homogénéisation des classes" (consigne utilisateur) : generalise la classe de pression la
@@ -440,6 +462,12 @@ export function ProfileTableView() {
               {activeHomogenization ? "Annulation de l'homogénéisation" : 'Homogénéisation des classes'}
             </button>
           )}
+          {calculating && (
+            <ProgressBar
+              label="Calcul en cours"
+              percent={calcProgress && calcProgress.total > 0 ? Math.round((calcProgress.completed / calcProgress.total) * 100) : 0}
+            />
+          )}
         </div>
       </div>
       <div className="profile-content">
@@ -540,6 +568,7 @@ export function ProfileTableView() {
           onSubmit={handlePatchNode}
         />
       )}
+      {calcConfirmDialog}
     </>
   )
 }

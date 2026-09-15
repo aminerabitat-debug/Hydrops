@@ -3,7 +3,7 @@
 // l'API se stabilise (docs/architecture/02-arborescence-repository.md : packages/shared-types).
 
 import type {
-  CalcRunResult,
+  CalculationJobStatus,
   CalculationPreferences,
   CatalogDiameter,
   CatalogMaterial,
@@ -17,6 +17,7 @@ import type {
   ProjectStateResponse,
   Segment,
   SegmentConstraint,
+  StartCalculationResponse,
   TraceGeometry,
   TronconGroup,
   Variant,
@@ -414,16 +415,32 @@ export const api = {
 
   // `scope` (consigne utilisateur : un tronçon deja selectionne et valide se calcule seul, sans
   // exiger les autres) restreint le calcul a CE tronçon precis — omis (ou absent), le calcul reste
-  // celui de toute la variante (comportement historique, exige tous les tronçons valides).
-  async runCalculation(
+  // celui de toute la variante (comportement historique, exige tous les tronçons valides). Le
+  // calcul est asynchrone (job + polling, cf. getCalculationJobStatus) — pleine resolution DEM par
+  // defaut, potentiellement des milliers de piquets fins. `opts.confirmed`/`opts.reduceResolution`
+  // (consigne utilisateur : dialogue d'estimation si >30s) permettent de rappeler apres une
+  // premiere reponse `needs_confirmation` (pas de job demarre dans ce cas — a l'appelant de
+  // reconnaitre la forme de la reponse via `isCalcNeedsConfirmation`).
+  async startCalculation(
     sessionId: string,
     variantId: string,
     scope?: { traceId: string; startNodeId: string },
-  ): Promise<CalcRunResult> {
-    const query = scope
-      ? `?${new URLSearchParams({ scope_trace_id: scope.traceId, scope_start_node_id: scope.startNodeId })}`
-      : ''
+    opts?: { confirmed?: boolean; reduceResolution?: boolean },
+  ): Promise<StartCalculationResponse> {
+    const params = new URLSearchParams()
+    if (scope) {
+      params.set('scope_trace_id', scope.traceId)
+      params.set('scope_start_node_id', scope.startNodeId)
+    }
+    if (opts?.confirmed) params.set('confirmed', 'true')
+    if (opts?.reduceResolution) params.set('reduce_resolution', 'true')
+    const query = params.toString() ? `?${params.toString()}` : ''
     const response = await fetch(`${API_BASE}/projects/${sessionId}/variants/${variantId}/calcul${query}`, { method: 'POST' })
+    return handleJson(response)
+  },
+
+  async getCalculationJobStatus(sessionId: string, variantId: string, jobId: string): Promise<CalculationJobStatus> {
+    const response = await fetch(`${API_BASE}/projects/${sessionId}/variants/${variantId}/calcul-jobs/${jobId}`)
     return handleJson(response)
   },
 }

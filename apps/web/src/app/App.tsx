@@ -5,6 +5,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 
+import { useCalcConfirmDialog } from './CalcConfirmDialog'
 import { CalcResultDialog } from './CalcResultDialog'
 import { ConduitesWindow } from './ConduitesWindow'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -17,6 +18,7 @@ import { QuickBar } from './QuickBar'
 import { Workspace } from './Workspace'
 import { ProjectTree } from '../features/project-tree/ProjectTree'
 import { api, type ProjectFormPayload } from '../shared/apiClient'
+import { runCalculationJob } from '../shared/pollCalcJob'
 import type { CalcRunResult, RepositionSuggestion } from '../shared/types'
 import { useAppStore } from '../state/store'
 import './App.css'
@@ -69,6 +71,8 @@ export function App() {
   const [pendingDeleteVariantId, setPendingDeleteVariantId] = useState<string | null>(null)
   const [calcResult, setCalcResult] = useState<CalcRunResult | null>(null)
   const [calculating, setCalculating] = useState(false)
+  const [calcProgress, setCalcProgress] = useState<{ completed: number; total: number } | null>(null)
+  const { dialog: calcConfirmDialog, onNeedsConfirmation } = useCalcConfirmDialog()
   const openInputRef = useRef<HTMLInputElement>(null)
 
   // Cree une session a la demande si aucune n'existe encore (mount initial rate, ou serveur
@@ -216,9 +220,17 @@ export function App() {
     const scope =
       !forceFull && tableScope.kind === 'troncon' ? { traceId: tableScope.traceId, startNodeId: tableScope.startNodeId } : undefined
     setCalculating(true)
+    setCalcProgress(null)
     try {
       setStatusMessage('Calcul en cours...')
-      const result = await api.runCalculation(sessionId, selectedVariantId, scope)
+      const result = await runCalculationJob(sessionId, selectedVariantId, scope, {
+        onProgress: (completed, total) => setCalcProgress({ completed, total }),
+        onNeedsConfirmation,
+      })
+      if (result === null) {
+        setStatusMessage('Calcul annulé', 'info')
+        return null
+      }
       await refreshNetwork()
       setCalcResult(result)
       const scopeLabel = scope ? ` (${tableScope.kind === 'troncon' ? tableScope.label : ''})` : ''
@@ -239,6 +251,7 @@ export function App() {
       return null
     } finally {
       setCalculating(false)
+      setCalcProgress(null)
     }
   }
   const handleRunCalcul = () => runCalcul(false)
@@ -309,7 +322,12 @@ export function App() {
             ⚠ Serveur API inaccessible — vérifiez qu'il tourne, puis réessayez l'action.
           </span>
         )}
-        {calculating && <ProgressBar />}
+        {calculating && (
+          <ProgressBar
+            label="Calcul en cours"
+            percent={calcProgress && calcProgress.total > 0 ? Math.round((calcProgress.completed / calcProgress.total) * 100) : 0}
+          />
+        )}
         <span className={`status-bar-text ${STATUS_MESSAGE_STYLE[statusMessageType].className}`}>
           <span className="status-bar-icon" aria-hidden="true">
             {STATUS_MESSAGE_STYLE[statusMessageType].icon}
@@ -354,6 +372,7 @@ export function App() {
       {calcResult && calcResult.reposition_suggestions.length > 0 && (
         <CalcResultDialog result={calcResult} onClose={() => setCalcResult(null)} onAcceptReposition={handleAcceptReposition} />
       )}
+      {calcConfirmDialog}
     </div>
   )
 }

@@ -66,6 +66,7 @@ CALCULES EN SENS OPPOSE, parce que leur cote de depart n'a pas le meme statut ph
 
 from __future__ import annotations
 
+import bisect
 import math
 from dataclasses import dataclass, field, replace
 from typing import Callable, Optional
@@ -744,6 +745,129 @@ def _gravitaire_pass(
     return nodes, results, alerts
 
 
+def _terrain_ok_from(
+    node_ids_ordered: list[str],
+    node_pk: dict[str, float],
+    node_cotes: dict[str, float],
+    start_i: int,
+    min_pressure: float,
+    terrain_samples: list[tuple[float, float]],
+    exclusion_end_pk: Optional[float],
+) -> bool:
+    """Equivalent de `_check_terrain_pressure` (violations reelles seulement, zone d'exclusion
+    toujours toleree) mais limite aux piquets d'indice >= start_i ET en un seul passage fusionne
+    (node_ids_ordered ET terrain_samples sont tous deux ordonnes par PK croissant) — O(N-start_i +
+    M) au lieu de O((N-start_i) x M) pour `_check_terrain_pressure`, qui reteste tout
+    `terrain_samples` a chaque paire de noeuds. Utilise par `_try_shrink_segment` (telescopage,
+    consigne utilisateur : ne revalider que l'AVAL du piquet modifie) ou` le nombre d'essais rend ce
+    cout quadratique-en-M critique. `terrain_samples` DOIT deja etre restreint a pk >=
+    node_pk[node_ids_ordered[start_i]] (cf. bisect au point d'appel) pour que le pointeur demarre
+    au bon endroit."""
+    ts_idx = 0
+    total = len(terrain_samples)
+    for k in range(start_i, len(node_ids_ordered) - 1):
+        a, b = node_ids_ordered[k], node_ids_ordered[k + 1]
+        pk_a, pk_b = node_pk[a], node_pk[b]
+        cote_a, cote_b = node_cotes[a], node_cotes[b]
+        span = pk_b - pk_a
+        while ts_idx < total and terrain_samples[ts_idx][0] <= pk_b + 1e-6:
+            pk, z = terrain_samples[ts_idx]
+            ts_idx += 1
+            if pk < pk_a - 1e-6:
+                continue
+            t = 0.0 if span <= 1e-9 else (pk - pk_a) / span
+            cote = cote_a + t * (cote_b - cote_a)
+            pressure = cote - z
+            if pressure < min_pressure - 1e-6:
+                if exclusion_end_pk is None or pk > exclusion_end_pk + _EXCLUSION_ZONE_PK_EPSILON_M:
+                    return False
+    return True
+
+
+def _try_shrink_segment(
+    node_ids_ordered: list[str],
+    segments_ordered: list[SegmentSpec],
+    catalog: list[CatalogPipe],
+    singular_loss_markup_pct: float,
+    viscosity: float,
+    allowed_materials_fn: Optional[AllowedMaterialsFn],
+    node_pk: Optional[dict[str, float]],
+    min_pressure: Optional[float],
+    terrain_samples: Optional[list[tuple[float, float]]],
+    exclusion_end_pk: Optional[float],
+    required_by_node: dict[str, float],
+    nodes: dict[str, NodeCalcResult],
+    results: list[SegmentCalcResult],
+    i: int,
+    trial_dn: int,
+) -> bool:
+    """Coeur de l'optimisation telescopique (consigne utilisateur) : tente de reduire UNIQUEMENT le
+    segment `i` a `trial_dn`, sans jamais retoucher le catalogue ni la cote des piquets en AMONT de
+    lui (indices <= i) — mathematiquement inchanges, quel que soit le DN retenu pour `i` : la
+    translation finale (cf. `_gravitaire_pass`) cale toujours le reservoir exactement sur sa cote
+    fixee, donc tout ce qui se trouve ENTRE le reservoir et le piquet modifie reste par construction
+    identique. Seule la cote (et donc la pression) des piquets STRICTEMENT EN AVAL de `i` se decale
+    d'une meme constante `delta` (la variation de perte de charge du seul segment `i`) — ce sont eux,
+    et EUX SEULS, qui sont revalides ici, jusqu'a la fin du tronçon (consigne utilisateur). Mute
+    `nodes`/`results` EN PLACE si le palier est accepte ; les laisse rigoureusement inchanges sinon
+    (aucune mutation partielle en cas de rejet). Retourne True si accepte."""
+    seg = segments_ordered[i]
+    upstream_node = node_ids_ordered[i]
+    downstream_node = node_ids_ordered[i + 1]
+    max_pms_needed = max(
+        nodes[upstream_node].pressure_static_max or 0.0,
+        nodes[downstream_node].pressure_static_max or 0.0,
+    )
+    min_di = min_di_mm_for_velocity(seg.flow_m3s, seg.max_velocity_ms)
+    max_di = max_di_mm_for_velocity(seg.flow_m3s, seg.min_velocity_ms)
+    candidates = _candidates(catalog, min_di, trial_dn, trial_dn, allowed_materials_fn, max_pms_needed, max_di)
+    if not candidates:
+        # Meme situation que l'ancien `trial_alerts` non vide (aucune conduite active a ce DN
+        # respectant vitesse/PMS/materiaux autorises) — rejet, comme avant.
+        return False
+    cand = candidates[0]
+    velocity, j = segment_hydraulics(seg.flow_m3s, cand.di_mm, cand.roughness_mm, viscosity)
+    new_loss = j * seg.length_m * (1 + singular_loss_markup_pct / 100)
+    delta = new_loss - results[i].head_loss_segment
+
+    # Piquets strictement en aval (indices > i) : cote/pression se decalent de -delta — jamais leur
+    # conduite (deja figee, aucune recherche catalogue pour eux ici). Verifie AUSSI (avant tout
+    # commit) qu'aucun ne passe sous sa pression minimale requise.
+    shifted_piezo: dict[str, float] = {}
+    for k in range(i + 1, len(node_ids_ordered)):
+        nid = node_ids_ordered[k]
+        shifted_piezo[nid] = nodes[nid].piezo_head - delta
+        required = required_by_node.get(nid)
+        if required is not None and (nodes[nid].pressure_dynamic or 0.0) - delta < required - 1e-6:
+            return False
+
+    # Meme verification, mais sur CHAQUE point de terrain echantillonne entre le piquet modifie et
+    # la fin du tronçon (consigne utilisateur) — pas seulement les noeuds reels ci-dessus.
+    if min_pressure is not None and terrain_samples and node_pk:
+        start_pk = node_pk.get(upstream_node)
+        start_ts = bisect.bisect_left(terrain_samples, start_pk, key=lambda t: t[0]) if start_pk is not None else 0
+        node_cotes = {upstream_node: nodes[upstream_node].piezo_head, **shifted_piezo}
+        if not _terrain_ok_from(
+            node_ids_ordered, node_pk, node_cotes, i, min_pressure,
+            terrain_samples[start_ts:], exclusion_end_pk,
+        ):
+            return False
+
+    # Accepte : commit en place, uniquement sur `i` et l'aval.
+    for k in range(i + 1, len(node_ids_ordered)):
+        nid = node_ids_ordered[k]
+        n = nodes[nid]
+        nodes[nid] = replace(n, piezo_head=shifted_piezo[nid], pressure_dynamic=(n.pressure_dynamic or 0.0) - delta)
+    results[i] = replace(
+        results[i], material=cand.material, pressure_class=cand.pressure_class, dn=cand.dn,
+        di_mm=cand.di_mm, roughness_mm=cand.roughness_mm, velocity_ms=velocity,
+        head_loss_unit=j, head_loss_segment=new_loss,
+    )
+    for k in range(i, len(results)):
+        results[k] = replace(results[k], head_loss_cumulative=results[k].head_loss_cumulative + delta)
+    return True
+
+
 # Garde-fou anti-boucle infinie pour la tentative iterative d'augmentation de DN ci-dessous
 # (consigne utilisateur : "processus iteratif", imperfection acceptee au-dela de ce plafond).
 _MAX_GRAVITAIRE_DN_BUMP_ITERATIONS = 20
@@ -928,14 +1052,21 @@ def solve_gravitaire_troncon(
     # segment le plus AVAL et en remontant vers l'amont : DN(PK0) >= DN(fin de tronçon) doit
     # toujours etre respecte, donc chaque segment ne peut etre reduit qu'a un palier >= celui deja
     # retenu pour son voisin aval. Pour un segment donne, on retente le palier immediatement
-    # inferieur, on reverifie l'ENSEMBLE du tronçon (recalcul complet — reduire un segment change sa
-    # perte de charge, qui peut faire manquer la pression n'importe ou en amont), et on accepte tant
-    # qu'aucune alerte n'apparait ; sinon on s'arrete pour ce segment (il garde son dernier DN
-    # valide) et on passe au suivant, plus en amont. Les segments a materiau/DN force (consigne
-    # utilisateur) ne sont jamais touches.
+    # inferieur et on accepte tant qu'aucune alerte n'apparait ; sinon on s'arrete pour ce segment
+    # (il garde son dernier DN valide) et on passe au suivant, plus en amont. Les segments a
+    # materiau/DN force (consigne utilisateur) ne sont jamais touches.
+    #
+    # Consigne utilisateur : reduire le DN d'un piquet ne doit revalider que l'AVAL de ce piquet,
+    # jusqu'a la fin du tronçon — jamais l'amont, qui reste mathematiquement inchange quel que soit
+    # le DN retenu ici (la translation finale cale toujours le reservoir exactement sur sa cote
+    # fixee, donc tout ce qui separe le reservoir du piquet modifie n'en depend pas). `_try_shrink_
+    # segment` fait exactement ca — un seul segment reresolu au catalogue, la portion aval decalee
+    # d'une constante et revalidee (noeuds + terrain), rien d'autre — remplace l'ancien recalcul
+    # complet du tronçon (`_gravitaire_pass` + `_check_terrain_pressure` sur l'ensemble) qui
+    # dominait le cout O(N^2) de cette boucle pour un tronçon a plusieurs milliers de piquets fins
+    # (pleine resolution DEM, consigne utilisateur).
     if not violating_nodes and not pass_alerts:
-        dn_by_segment_id = {r.id: r.dn for r in results}
-        forced_dn_by_segment: dict[str, int] = dict(dn_by_segment_id)
+        forced_dn_by_segment: dict[str, int] = {r.id: r.dn for r in results}
         all_dns = sorted({p.dn for p in catalog if p.active})
         downstream_floor = 0
         for i in range(len(segments_ordered) - 1, -1, -1):
@@ -946,33 +1077,14 @@ def solve_gravitaire_troncon(
             current_dn = forced_dn_by_segment[seg.id]
             smaller_steps = sorted((d for d in all_dns if downstream_floor <= d < current_dn), reverse=True)
             for trial_dn in smaller_steps:
-                trial_forced = dict(forced_dn_by_segment)
-                trial_forced[seg.id] = trial_dn
-                trial_nodes, trial_results, trial_alerts = _gravitaire_pass(
-                    node_ids_ordered, node_ground_z, segments_ordered, upstream_level_max,
-                    effective_upstream_level_min, required_by_node, catalog, singular_loss_markup_pct,
-                    viscosity, allowed_materials_fn, node_pk, min_dn_by_segment, trial_forced,
+                accepted = _try_shrink_segment(
+                    node_ids_ordered, segments_ordered, catalog, singular_loss_markup_pct, viscosity,
+                    allowed_materials_fn, node_pk, min_pressure, terrain_samples, exclusion_end_pk,
+                    required_by_node, nodes, results, i, trial_dn,
                 )
-                if trial_alerts:
+                if not accepted:
                     break
-                # Consigne utilisateur : la reduction ne doit jamais accepter un palier qui casse la
-                # pression sur un point de TERRAIN intermediaire — `_gravitaire_pass` ci-dessus ne
-                # verifie que les noeuds REELS (2 ici : reservoir + extremite), jamais le profil de
-                # terrain entre eux. Sans cette revalidation, un palier plus petit pouvait sembler
-                # "sans alerte" ici puis echouer sur un point haut du terrain entre deux noeuds,
-                # revele seulement par `_check_terrain_pressure` en fin de fonction — trop tard, le DN
-                # etait deja retenu. On rejette donc aussi un palier qui introduit une VRAIE alerte
-                # terrain (le marqueur "zone d'exclusion", lui, reste informatif et n'invalide pas le
-                # palier, coherent avec le reste du module).
-                trial_terrain_alerts = _check_terrain_pressure(
-                    node_ids_ordered, node_pk,
-                    {nid: trial_nodes[nid].piezo_head for nid in node_ids_ordered},
-                    min_pressure, terrain_samples, exclusion_end_pk,
-                )
-                if any(not a.startswith(EXCLUSION_ZONE_ALERT_MARKER) for a in trial_terrain_alerts):
-                    break
-                forced_dn_by_segment = trial_forced
-                nodes, results, pass_alerts = trial_nodes, trial_results, trial_alerts
+                forced_dn_by_segment[seg.id] = trial_dn
             downstream_floor = forced_dn_by_segment[seg.id]
             if on_progress is not None:
                 on_progress(3 + (len(segments_ordered) - i), progress_total)

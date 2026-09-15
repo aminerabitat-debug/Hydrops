@@ -1063,3 +1063,82 @@ def test_solve_refoulement_troncon_on_progress_reaches_done_equals_total():
     assert calls
     assert calls[-1][0] == calls[-1][1]
     assert all(a[0] <= b[0] for a, b in zip(calls, calls[1:]))
+
+
+def test_solve_gravitaire_troncon_telescopage_handles_piquage_and_class_dependent_di():
+    # Verification demandee par l'utilisateur avant de committer l'optimisation telescopique
+    # incrementale (_try_shrink_segment, cf. session) : (1) un piquage (chute de debit en cours de
+    # tronçon) doit rester correctement pris en compte — chaque segment garde SON PROPRE debit
+    # (SegmentSpec.flow_m3s), jamais suppose uniforme ; (2) un materiau dont le DI depend de la
+    # classe (PVC/PEHD au catalogue reel, contrairement a PRV ou le DI ne varie pas) doit rester
+    # correctement resolu segment par segment. Catalogue = extrait reel (PVC, DN90-250, 3 classes
+    # chacun — di varie bien par classe, ex. DN140 : PN6=132.6, PN10=127.8, PN16=121.4).
+    catalog = [
+        CatalogPipe(id=4, dn=90, di_mm=84.4, material="PVC", pressure_class="PN6", pms_m=61.2, price=125.7, roughness_mm=0.01),
+        CatalogPipe(id=5, dn=90, di_mm=81.4, material="PVC", pressure_class="PN10", pms_m=101.9, price=141.6, roughness_mm=0.01),
+        CatalogPipe(id=6, dn=90, di_mm=76.8, material="PVC", pressure_class="PN16", pms_m=163.1, price=164.6, roughness_mm=0.01),
+        CatalogPipe(id=7, dn=110, di_mm=103.6, material="PVC", pressure_class="PN6", pms_m=61.2, price=143.1, roughness_mm=0.01),
+        CatalogPipe(id=8, dn=110, di_mm=99.4, material="PVC", pressure_class="PN10", pms_m=101.9, price=170.2, roughness_mm=0.01),
+        CatalogPipe(id=9, dn=110, di_mm=93.8, material="PVC", pressure_class="PN16", pms_m=163.1, price=204.7, roughness_mm=0.01),
+        CatalogPipe(id=10, dn=125, di_mm=117.6, material="PVC", pressure_class="PN6", pms_m=61.2, price=162.4, roughness_mm=0.01),
+        CatalogPipe(id=11, dn=125, di_mm=113.0, material="PVC", pressure_class="PN10", pms_m=101.9, price=196.0, roughness_mm=0.01),
+        CatalogPipe(id=12, dn=125, di_mm=106.6, material="PVC", pressure_class="PN16", pms_m=163.1, price=241.2, roughness_mm=0.01),
+        CatalogPipe(id=13, dn=140, di_mm=132.6, material="PVC", pressure_class="PN6", pms_m=61.2, price=174.8, roughness_mm=0.01),
+        CatalogPipe(id=14, dn=140, di_mm=127.8, material="PVC", pressure_class="PN10", pms_m=101.9, price=215.0, roughness_mm=0.01),
+        CatalogPipe(id=15, dn=140, di_mm=121.4, material="PVC", pressure_class="PN16", pms_m=163.1, price=266.7, roughness_mm=0.01),
+        CatalogPipe(id=16, dn=160, di_mm=152.4, material="PVC", pressure_class="PN6", pms_m=61.2, price=203.5, roughness_mm=0.01),
+        CatalogPipe(id=17, dn=160, di_mm=147.6, material="PVC", pressure_class="PN10", pms_m=101.9, price=250.8, roughness_mm=0.01),
+        CatalogPipe(id=18, dn=160, di_mm=141.0, material="PVC", pressure_class="PN16", pms_m=163.1, price=313.1, roughness_mm=0.01),
+        CatalogPipe(id=19, dn=200, di_mm=190.6, material="PVC", pressure_class="PN6", pms_m=61.2, price=268.3, roughness_mm=0.01),
+        CatalogPipe(id=20, dn=200, di_mm=184.6, material="PVC", pressure_class="PN10", pms_m=101.9, price=342.0, roughness_mm=0.01),
+        CatalogPipe(id=21, dn=200, di_mm=176.2, material="PVC", pressure_class="PN16", pms_m=163.1, price=440.7, roughness_mm=0.01),
+        CatalogPipe(id=25, dn=250, di_mm=238.2, material="PVC", pressure_class="PN6", pms_m=61.2, price=374.8, roughness_mm=0.01),
+        CatalogPipe(id=26, dn=250, di_mm=230.8, material="PVC", pressure_class="PN10", pms_m=101.9, price=495.4, roughness_mm=0.01),
+        CatalogPipe(id=27, dn=250, di_mm=220.4, material="PVC", pressure_class="PN16", pms_m=163.1, price=652.0, roughness_mm=0.01),
+    ]
+    N = 12
+    node_ids_ordered = [f"n{k}" for k in range(N + 1)]
+    # Terrain plus bas (n6..n9) -> pression statique plus elevee la -> force la classe PN16 dans
+    # cette zone (au lieu de PN6 ailleurs), en meme temps que le telescopage y reduit aussi le DN.
+    node_ground_z = {f"n{k}": (-80.0 if 6 <= k <= 9 else 0.0) for k in range(N + 1)}
+    node_pk = {f"n{k}": k * 100.0 for k in range(N + 1)}
+    Q_HIGH = 150.0 / 3600.0
+    Q_LOW = 60.0 / 3600.0
+    segments_ordered = [
+        SegmentSpec(id=f"s{i}", length_m=100.0, flow_m3s=(Q_HIGH if i < 6 else Q_LOW), max_velocity_ms=2.0, min_velocity_ms=0.05)
+        for i in range(N)
+    ]
+    result = solve_gravitaire_troncon(
+        node_ids_ordered=node_ids_ordered,
+        node_ground_z=node_ground_z,
+        segments_ordered=segments_ordered,
+        upstream_level_max=50.0,
+        upstream_level_min=50.0,
+        min_pressure=None,
+        downstream_residual_pressure=35.0,
+        catalog=catalog,
+        singular_loss_markup_pct=10.0,
+        fluid_temperature_c=20.0,
+        node_pk=node_pk,
+    )
+    assert result.alerts == []
+    dns = [r.dn for r in result.segments]
+    materials_classes = [(r.material, r.pressure_class, r.di_mm) for r in result.segments]
+    # Amont (avant le piquage, debit haut) : DN200. Aval (apres le piquage, debit bas, segments
+    # 6-11) : DN140 — le piquage (chute de debit au segment 6) se traduit bien par un DN plus petit,
+    # jamais suppose uniforme sur tout le tronçon.
+    assert dns[:6] == [200] * 6
+    assert dns[6:] == [140] * 6
+    # Segments 0-4 : terrain haut aux deux bouts -> PN6 (le moins cher, DI le plus grand : 190.6).
+    assert materials_classes[:5] == [("PVC", "PN6", 190.6)] * 5
+    # Segments 5-9 : touchent la zone basse (n6..n9, pression statique plus elevee) a au moins une
+    # extremite -> PN16 exige (DI plus petit pour le meme DN : 176.2 puis 121.4).
+    assert materials_classes[5] == ("PVC", "PN16", 176.2)
+    assert materials_classes[6:10] == [("PVC", "PN16", 121.4)] * 4
+    # Segments 10-11 : retour en terrain haut aux deux bouts -> PN6 de nouveau (DI plus grand : 132.6).
+    assert materials_classes[10:12] == [("PVC", "PN6", 132.6)] * 2
+    # Le DI utilise a chaque etape doit correspondre EXACTEMENT a la classe retenue (pas une valeur
+    # generique/moyenne) — c'est le coeur de la verification "materiau a DI dependant de la classe".
+    for r in result.segments:
+        expected_di = next(c.di_mm for c in catalog if c.dn == r.dn and c.pressure_class == r.pressure_class)
+        assert r.di_mm == expected_di

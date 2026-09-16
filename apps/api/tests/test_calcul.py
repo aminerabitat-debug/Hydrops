@@ -421,10 +421,21 @@ def test_calcul_applies_per_pk_range_constraint_over_wider_material_constraint(
     details = client.get(f"/api/v1/projects/{session_id}/variants/{variant_id}/segments").json()[0]["segment_details"]
     assert details, "aucun detail par piquet retourne"
     assert all(d["material"] == "FD" for d in details), "le materiau doit rester FD sur tout le tronçon"
-    inside_window = [d for d in details if 500.0 - 1e-6 <= d["pk"] <= 700.0 + 1e-6]
+    # Piquet "bis" aux frontieres exactes (500 et 700 coincident ici avec un piquet DEM reel,
+    # cf. hydrops_api.routers.network:_hydraulic_subdivision_points) : DEUX piquets partagent alors
+    # le meme pk, l'un cloturant l'ancien etat, l'autre (le bis) ouvrant le nouveau — a 500
+    # (debut de plage) c'est donc (libre, 60) dans cet ordre, a 700 (fin de plage) c'est (60,
+    # libre). On ne peut donc plus exiger que TOUS les piquets a pk==500 ou pk==700 vaillent 60,
+    # seulement qu'au moins un le fasse a chaque frontiere, et que l'INTERIEUR strict (500, 700)
+    # le soit integralement.
+    strictly_inside = [d for d in details if 500.0 + 1e-6 < d["pk"] < 700.0 - 1e-6]
+    at_start_boundary = [d for d in details if abs(d["pk"] - 500.0) <= 1e-6]
+    at_end_boundary = [d for d in details if abs(d["pk"] - 700.0) <= 1e-6]
     outside_window = [d for d in details if d["pk"] < 500.0 - 1e-6 or d["pk"] > 700.0 + 1e-6]
-    assert inside_window, "aucun piquet dans la fenetre 500-700 — pas hydraulique trop grossier ?"
-    assert all(d["dn"] == 60 for d in inside_window)
+    assert strictly_inside, "aucun piquet dans la fenetre 500-700 — pas hydraulique trop grossier ?"
+    assert all(d["dn"] == 60 for d in strictly_inside)
+    assert at_start_boundary and any(d["dn"] == 60 for d in at_start_boundary)
+    assert at_end_boundary and any(d["dn"] == 60 for d in at_end_boundary)
     assert outside_window and any(d["dn"] != 60 for d in outside_window), (
         "hors de la fenetre 500-700, le DN doit rester choisi automatiquement (pas fige a 60)"
     )

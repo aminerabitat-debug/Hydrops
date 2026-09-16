@@ -437,9 +437,9 @@ def test_solve_gravitaire_troncon_hydrostatic_precheck_disabled_when_level_not_c
 def test_solve_gravitaire_troncon_bumps_upstream_dn_to_resolve_pressure_violation():
     # Avec le DN le moins cher (110) sur les deux segments, le noeud intermediaire M viole la
     # pression minimale (-16.5 m obtenus pour 20.0 m requis) alors que B, plus en aval mais sur un
-    # denivele plus favorable, la respecte deja — verifie via _gravitaire_pass dans le
-    # developpement de ce test. Un DN plus gros sur le segment AMONT de M (A-M) doit resoudre le
-    # deficit (consigne utilisateur : "augmenter le diametre a l'amont du point en question").
+    # denivele plus favorable, la respecte deja. Un DN plus gros sur le segment AMONT de M (A-M)
+    # doit resoudre le deficit (consigne utilisateur : "augmenter le diametre a l'amont du point en
+    # question").
     catalog = _catalog()
     nodes_z = {"A": 100.0, "M": 50.0, "B": 0.0}
     segments = [
@@ -1124,19 +1124,22 @@ def test_solve_gravitaire_troncon_telescopage_handles_piquage_and_class_dependen
     assert result.alerts == []
     dns = [r.dn for r in result.segments]
     materials_classes = [(r.material, r.pressure_class, r.di_mm) for r in result.segments]
-    # Amont (avant le piquage, debit haut) : DN200. Aval (apres le piquage, debit bas, segments
-    # 6-11) : DN140 — le piquage (chute de debit au segment 6) se traduit bien par un DN plus petit,
-    # jamais suppose uniforme sur tout le tronçon.
-    assert dns[:6] == [200] * 6
-    assert dns[6:] == [140] * 6
-    # Segments 0-4 : terrain haut aux deux bouts -> PN6 (le moins cher, DI le plus grand : 190.6).
-    assert materials_classes[:5] == [("PVC", "PN6", 190.6)] * 5
+    # Le dimensionnement initial (Phase 1, piquet par piquet independamment sur la seule vitesse/
+    # PMS locale) laisse une residuelle bien en-dessous de l'exigence aval (35 m) — la Phase 4
+    # (reparation, repart du piquet de depart) doit alors augmenter des segments LIBRES pour la
+    # rattraper, en gardant le telescopage non-croissant vers l'aval (consigne utilisateur : DN
+    # jamais plus grand en aval qu'en amont).
+    assert dns == sorted(dns, reverse=True)  # non-croissant vers l'aval, jamais suppose uniforme
+    # Le piquage (chute de debit au segment 6) se traduit bien par un DN qui rétrécit a cet endroit
+    # (chaque segment garde SON PROPRE debit, jamais suppose uniforme sur tout le tronçon).
+    assert dns[6] < dns[5]
+    # Segments 0-4 : terrain haut aux deux bouts -> PN6 (le moins cher, DI le plus grand pour ce DN).
+    assert all(mc[1] == "PN6" for mc in materials_classes[:5])
     # Segments 5-9 : touchent la zone basse (n6..n9, pression statique plus elevee) a au moins une
-    # extremite -> PN16 exige (DI plus petit pour le meme DN : 176.2 puis 121.4).
-    assert materials_classes[5] == ("PVC", "PN16", 176.2)
-    assert materials_classes[6:10] == [("PVC", "PN16", 121.4)] * 4
-    # Segments 10-11 : retour en terrain haut aux deux bouts -> PN6 de nouveau (DI plus grand : 132.6).
-    assert materials_classes[10:12] == [("PVC", "PN6", 132.6)] * 2
+    # extremite -> PN16 exige (seule classe dont le PMS, 163.1, couvre les 130 m requis la).
+    assert all(mc[1] == "PN16" for mc in materials_classes[5:10])
+    # Segments 10-11 : retour en terrain haut aux deux bouts -> PN6 de nouveau.
+    assert all(mc[1] == "PN6" for mc in materials_classes[10:12])
     # Le DI utilise a chaque etape doit correspondre EXACTEMENT a la classe retenue (pas une valeur
     # generique/moyenne) — c'est le coeur de la verification "materiau a DI dependant de la classe".
     for r in result.segments:

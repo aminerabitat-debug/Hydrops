@@ -308,8 +308,11 @@ export function TronconDialog({
     })
   }
 
+  // Le PK recu ici est deja accroche au piquet DEM regulier le plus proche (consigne utilisateur,
+  // cf. shared/geo.ts:snapPkToNearestSample, applique par MapView/ProfileChart avant de resoudre)
+  // — ne PAS arrondir de nouveau ici, un arrondi au metre casserait cet accrochage exact.
   const handlePickExistingPk = (field: 'pkStart' | 'pkEnd') => {
-    beginPkPick((pk) => setExistingDraft((d) => (d ? { ...d, [field]: String(Math.round(pk)) } : d)))
+    beginPkPick((pk) => setExistingDraft((d) => (d ? { ...d, [field]: String(pk) } : d)))
   }
 
   // Bouton "…" (consigne utilisateur) : ferme temporairement CETTE fenetre (masquee via `hidden`
@@ -317,7 +320,7 @@ export function TronconDialog({
   // clic sur la carte/le profil graphique/le profil Data (cf. store.pkPickResolver, ecoute par
   // MapView/ProfileChart/DataTable), puis rouvre avec le champ vise rempli.
   const handlePickPk = (field: 'pkStart' | 'pkEnd') => {
-    beginPkPick((pk) => setDraft((d) => (d ? { ...d, [field]: String(Math.round(pk)) } : d)))
+    beginPkPick((pk) => setDraft((d) => (d ? { ...d, [field]: String(pk) } : d)))
   }
 
   const isGravitaire = regime !== 'refoulement'

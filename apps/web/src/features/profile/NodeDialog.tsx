@@ -233,8 +233,10 @@ export function NodeDialog({
   // Bouton "…" du champ Position (consigne utilisateur : "possibilité de choisir un nouvel
   // emplacement de manière graphique") — meme mecanisme que TronconDialog.tsx : masque cette
   // fenetre (etat React conserve) pendant qu'un clic sur la carte/le profil/la table est attendu.
+  // Le PK recu est deja accroche au piquet DEM regulier le plus proche (consigne utilisateur, cf.
+  // shared/geo.ts:snapPkToNearestSample) — ne pas arrondir de nouveau, ca casserait l'accrochage.
   const handlePickPosition = () => {
-    beginPkPick((pickedPk) => setNewPk(Math.round(pickedPk)))
+    beginPkPick((pickedPk) => setNewPk(pickedPk))
   }
 
   const renderField = (spec: OuvrageFieldSpec) => {

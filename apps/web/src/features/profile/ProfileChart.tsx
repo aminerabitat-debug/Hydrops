@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { crossingColor, crossingKindGlyph, crossingZoneFillColor } from '../../shared/crossingColors'
+import { snapPkToNearestSample } from '../../shared/geo'
 import { isPlaceholderNode, nodeColor, nodeInitials } from '../../shared/nodeLabels'
 import { useAppStore } from '../../state/store'
 import type { Node, PipeCatalogRow, Segment } from '../../shared/types'
@@ -866,8 +867,11 @@ export function ProfileChart({
 
     // Selection de PK en cours (consigne utilisateur : bouton "…" du panneau Contraintes de la
     // fenetre Tronçon) — un clic resout le PK vise au lieu du comportement habituel du clic.
+    // Accroche au piquet DEM regulier le plus proche (consigne utilisateur, cf. snapPkToNearestSample)
+    // : une contrainte ou un ouvrage doit toujours tomber exactement sur un piquet reel, jamais une
+    // position intermediaire arbitraire issue du seul calcul pixel -> PK.
     if (pkPickResolver) {
-      resolvePkPick(pk)
+      resolvePkPick(snapPkToNearestSample(profile.raw, pk))
       return
     }
 
@@ -882,7 +886,7 @@ export function ProfileChart({
     }
     if (addNodeMode) {
       if (hitNode) onAssignNode(hitNode)
-      else onAddNode(pk)
+      else onAddNode(snapPkToNearestSample(profile.raw, pk))
     }
   }
 

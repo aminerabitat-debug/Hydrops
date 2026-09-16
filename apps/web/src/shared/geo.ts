@@ -77,6 +77,29 @@ export function nearestPkForPoint(vertices: Vertex[], lon: number, lat: number):
   return bestPk
 }
 
+// Accroche un PK au piquet REGULIER (echantillon DEM) le plus proche (consigne utilisateur : "le
+// piquet bis correspond toujours a un piquet regulier... les changements de materiau/DN/classe
+// ainsi que les contraintes et les ouvrages sont tous positionnes sur des piquets reguliers, le
+// plus proche par rapport au point de clic de l'utilisateur") — sans cet accrochage, un clic pixel
+// (profil) ou une projection carte (`nearestPkForPoint` ci-dessus, continue le long de la trace)
+// tombe presque toujours a quelques metres d'un piquet reel, ce qui decalerait legerement la
+// frontiere resolue cote moteur (cf. hydrops_api.routers.network:_constraint_boundary_pks).
+// `samples` doit etre trie par `pk` croissant ; recherche lineaire, un seul appel par clic/
+// selection — pas un cout recurrent.
+export function snapPkToNearestSample(samples: { pk: number }[], pk: number): number {
+  if (samples.length === 0) return pk
+  let closest = samples[0].pk
+  let bestDist = Math.abs(samples[0].pk - pk)
+  for (let i = 1; i < samples.length; i++) {
+    const dist = Math.abs(samples[i].pk - pk)
+    if (dist < bestDist) {
+      bestDist = dist
+      closest = samples[i].pk
+    }
+  }
+  return closest
+}
+
 // Sous-ensemble de coordonnees [lon,lat] couvrant [pkStart, pkEnd] le long d'une trace (extremites
 // interpolees + sommets intermediaires) — sert a calculer l'emprise carte d'un troncon au clic
 // dans l'arborescence (ProjectTree -> MapView:mapFocusRequest).

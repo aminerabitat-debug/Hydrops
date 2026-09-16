@@ -102,6 +102,16 @@ _MAX_FINE_SEGMENTS_PER_SEGMENT = 2000
 _REDUCED_RESOLUTION_STEP_M = 200.0
 
 
+# Ecart (m) utilise pour resoudre une contrainte de part et d'autre d'un piquet "bis" (cf.
+# _hydraulic_subdivision_points) — n'affecte JAMAIS le pk du piquet lui-meme (ni sa longueur/z),
+# seulement le pk interroge par _resolve_constraints_at_pk pour lever l'ambiguite d'une frontiere
+# EXACTE (les deux plages la contiennent a egalite). Tres largement superieur a la tolerance de
+# comparaison des bornes (1e-6) pour ecarter sans ambiguite la plage du mauvais cote, tres
+# largement inferieur a l'espacement reel entre deux piquets (~20 m, DEM) pour ne jamais empieter
+# sur une AUTRE frontiere voisine.
+_CONSTRAINT_BOUNDARY_RESOLUTION_EPSILON_M = 1e-4
+
+
 def _hydraulic_subdivision_points(
     pk_start: float, pk_end: float, profile_points: list, boundary_pks: list[float] = (), step_m: Optional[float] = None
 ) -> list[tuple[float, float]]:
@@ -115,13 +125,20 @@ def _hydraulic_subdivision_points(
     EN PLUS avant ce garde-fou — reserve au repli explicite "reduire la resolution" du dialogue
     d'estimation (cf. _REDUCED_RESOLUTION_STEP_M), jamais utilise par defaut.
 
-    `boundary_pks` (consigne utilisateur : "il faut créer un piquet bis lors des changements de
-    Matériau, DN et classe [...] éphémère") : les PK de frontiere materiau/DN/classe (cf.
-    _constraint_boundary_pks) qui tombent dans [pk_start, pk_end] sont EN PLUS inseres tels quels
-    (altitude interpolee, jamais persistes — recalcules a chaque appel), pour que la resolution
-    par plage de PK (_resolve_constraints_at_pk) applique chaque contrainte exactement a sa
-    frontiere plutot qu'au piquet regulier le plus proche, qui pouvait legerement deplacer la
-    limite affichee et faire resoudre un DN different juste avant/apres la vraie frontiere."""
+    `boundary_pks` (consigne utilisateur : "le piquet bis correspond toujours a un piquet regulier
+    [...] un duplicata de son piquet amont [...] avec une distance partielle egale a 0 [...]
+    ephemere") : les PK de frontiere materiau/DN/classe (cf. _constraint_boundary_pks) qui tombent
+    dans [pk_start, pk_end] sont chacune DUPLIQUEES — le piquet regulier existant a ce PK (deja
+    dans `profile_points`, desormais garanti par l'accrochage au clic cote frontend, cf.
+    apps/web/src/shared/geo.ts:snapPkToNearestSample) est retenu deux fois de suite, a la MEME
+    altitude : le 1er cloture le segment qui se termine sur l'ancien materiau/DN/classe, le second
+    (le "bis") ouvre le segment suivant, de longueur nulle a nulle jusqu'au piquet reel suivant,
+    sur le nouveau materiau/DN/classe (cf. _prepare_troncon, qui resout chacun avec un leger
+    decalage de PK pour lever l'ambiguite a la frontiere exacte). Repli (contrainte anterieure a
+    l'accrochage systematique, dont la frontiere ne correspond a AUCUN piquet DEM reel) : un seul
+    point interpole, comme avant cette evolution — aucun duplicata possible sans piquet regulier a
+    dupliquer. Jamais persiste — recalcule a chaque appel, et disparait de lui-meme si la
+    contrainte qui l'a motive est retiree ou deplacee."""
     interior = [(p.pk, p.z) for p in profile_points if pk_start + 1e-6 < p.pk < pk_end - 1e-6]
     if len(interior) < 2:
         sampled = interior
@@ -138,12 +155,15 @@ def _hydraulic_subdivision_points(
     if not relevant_boundaries:
         return sampled
     merged = list(sampled)
-    existing_pks = {pk for pk, _ in merged}
     for pk in relevant_boundaries:
-        if any(abs(pk - existing) < 1e-6 for existing in existing_pks):
-            continue
-        merged.append((pk, interpolate_value_at_pk([(p.pk, p.z) for p in profile_points], pk)))
-        existing_pks.add(pk)
+        already_present = any(abs(p - pk) < 1e-6 for p, _ in merged)
+        real_z = next((z for p, z in interior if abs(p - pk) < 1e-6), None)
+        if real_z is not None:
+            if not already_present:
+                merged.append((pk, real_z))
+            merged.append((pk, real_z))  # le "bis" — meme PK, meme altitude, duplicata assume
+        elif not already_present:
+            merged.append((pk, interpolate_value_at_pk([(p.pk, p.z) for p in profile_points], pk)))
     merged.sort(key=lambda t: t[0])
     return merged
 
@@ -957,8 +977,20 @@ def _prepare_troncon(
             fine_node_ids.append(virtual_id)
             fine_node_ground_z[virtual_id] = z
             fine_node_pk[virtual_id] = pk
+            # Piquet "bis" (consigne utilisateur, cf. _hydraulic_subdivision_points) : deux piquets
+            # au MEME pk encadrent une frontiere materiau/DN/classe — le 1er cloture l'ancien etat,
+            # le second (bis) ouvre le nouveau. Resoudre les deux avec exactement le meme `pk`
+            # serait ambigu (les deux plages de contrainte le contiennent a egalite, cf.
+            # _resolve_constraints_at_pk) : on decale donc legerement la resolution du cote
+            # concerne (jamais le pk du piquet lui-meme, seulement l'echantillon utilise pour
+            # choisir la contrainte).
+            resolve_pk = pk
+            if i + 1 < len(subdivision) and abs(subdivision[i + 1][0] - pk) < 1e-6:
+                resolve_pk = pk - _CONSTRAINT_BOUNDARY_RESOLUTION_EPSILON_M
+            elif i > 0 and abs(subdivision[i - 1][0] - pk) < 1e-6:
+                resolve_pk = pk + _CONSTRAINT_BOUNDARY_RESOLUTION_EPSILON_M
             forced_material, forced_dn, forced_pressure_class = _resolve_constraints_at_pk(
-                effective_constraints, pk, group.pk_start, group.pk_end
+                effective_constraints, resolve_pk, group.pk_start, group.pk_end
             )
             fine_specs.append(
                 HSegmentSpec(

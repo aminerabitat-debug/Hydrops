@@ -11,7 +11,14 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { ProgressBar } from '../../app/ProgressBar'
 import { api } from '../../shared/apiClient'
 import { crossingColor, crossingDisplayText, crossingZoneFillColor, isZoneKind } from '../../shared/crossingColors'
-import { buildVertices, coordinatesForPkRange, haversineDistanceM, interpolateLonLatAtPk, nearestPkForPoint } from '../../shared/geo'
+import {
+  buildVertices,
+  coordinatesForPkRange,
+  haversineDistanceM,
+  interpolateLonLatAtPk,
+  nearestPkForPoint,
+  snapPkToNearestSample,
+} from '../../shared/geo'
 import { fetchApproximateLocationFromIp } from '../../shared/ipGeolocation'
 import { isPlaceholderNode, nodeColor, nodeDisplayLabel, nodeInitials } from '../../shared/nodeLabels'
 import { useAppStore } from '../../state/store'
@@ -469,7 +476,11 @@ export function MapView() {
       const id = event.features?.[0]?.properties?.id as string | undefined
       if (id !== hoveredTrace.id) return
       const pk = nearestPkForPoint(hoveredTraceVertices, event.lngLat.lng, event.lngLat.lat)
-      resolvePkPick(pk)
+      // Accroche au piquet DEM regulier le plus proche (consigne utilisateur, cf.
+      // snapPkToNearestSample) — la projection geometrique ci-dessus tombe presque toujours a
+      // quelques metres d'un piquet reel, comme pour le clic pixel du profil.
+      const raw = hoveredTrace.elevation_profile?.raw
+      resolvePkPick(raw && raw.length > 0 ? snapPkToNearestSample(raw, pk) : pk)
     }
     map.on('click', 'traces-line', handleClick)
     return () => {
